@@ -1,0 +1,98 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nats-backups
+  namespace: nats
+  labels:
+    app.kubernetes.io/name: nats
+    app.kubernetes.io/component: backup
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: nats-backup
+  namespace: nats
+  labels:
+    app.kubernetes.io/name: nats
+    app.kubernetes.io/component: backup
+spec:
+  schedule: "17 2 * * *"
+  timeZone: Etc/UTC
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 3
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: nats-backup
+            app.kubernetes.io/part-of: online-boutique
+        spec:
+          restartPolicy: OnFailure
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            fsGroup: 1000
+            seccompProfile:
+              type: RuntimeDefault
+          initContainers:
+          - name: volume-permissions
+            image: busybox:1.37.0
+            command: ["sh", "-ec", "chown 1000:1000 /backups"]
+            securityContext:
+              runAsNonRoot: false
+              runAsUser: 0
+              allowPrivilegeEscalation: false
+              capabilities:
+                drop: ["ALL"]
+                add: ["CHOWN"]
+            volumeMounts:
+            - name: backups
+              mountPath: /backups
+          containers:
+          - name: backup
+            image: natsio/nats-box:0.19.7-nonroot
+            command:
+            - sh
+            - -ec
+            - |
+              destination="/backups/$(date -u +%Y%m%dT%H%M%SZ)"
+              nats --server="${NATS_URL}" --user="${NATS_USER}" --password="${NATS_PASSWORD}" \
+                --tlsca=/etc/nats-ca/ca.crt account backup "${destination}" \
+                --consumers --check --critical-warnings --force
+              find /backups -mindepth 1 -maxdepth 1 -type d -mtime +14 -exec rm -rf {} +
+            envFrom:
+            - secretRef:
+                name: nats-admin-credentials
+            resources:
+              requests:
+                cpu: 20m
+                memory: 32Mi
+              limits:
+                cpu: 200m
+                memory: 256Mi
+            securityContext:
+              allowPrivilegeEscalation: false
+              capabilities:
+                drop: ["ALL"]
+            volumeMounts:
+            - name: backups
+              mountPath: /backups
+            - name: ca
+              mountPath: /etc/nats-ca
+              readOnly: true
+          volumes:
+          - name: backups
+            persistentVolumeClaim:
+              claimName: nats-backups
+          - name: ca
+            configMap:
+              name: nats-ca

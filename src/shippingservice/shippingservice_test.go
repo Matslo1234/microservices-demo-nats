@@ -15,100 +15,70 @@
 package main
 
 import (
+	"path/filepath"
 	"regexp"
 	"testing"
 
-	"golang.org/x/net/context"
-
-	pb "github.com/GoogleCloudPlatform/microservices-demo/src/shippingservice/genproto"
+	commandsv1 "github.com/GoogleCloudPlatform/microservices-demo/protos/commands/v1"
+	commonv1 "github.com/GoogleCloudPlatform/microservices-demo/protos/common/v1"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/anypb"
 )
 
-// TestGetQuote is a basic check on the GetQuote RPC service.
-func TestGetQuote(t *testing.T) {
-	s := server{}
-
-	// A basic test case to test logic and protobuf interactions.
-	req := &pb.GetQuoteRequest{
-		Address: &pb.Address{
-			StreetAddress: "Muffin Man",
-			City:          "London",
-			State:         "",
-			Country:       "England",
-		},
-		Items: []*pb.CartItem{
-			{
-				ProductId: "23",
-				Quantity:  1,
-			},
-			{
-				ProductId: "46",
-				Quantity:  3,
-			},
-		},
-	}
-
-	res, err := s.GetQuote(context.Background(), req)
+func TestShippingCommandOutcomesAreStableAndPersistent(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "provider.json")
+	store, err := openShippingProviderStore(storePath)
 	if err != nil {
-		t.Errorf("TestGetQuote (%v) failed", err)
+		t.Fatal(err)
 	}
-	if res.CostUsd.GetUnits() != 8 || res.CostUsd.GetNanos() != 990000000 {
-		t.Errorf("TestGetQuote: Quote value '%d.%d' does not match expected '8.990000000'", res.CostUsd.GetUnits(), res.CostUsd.GetNanos())
+	command := &commandsv1.ShippingCreateShipmentCommand{CommandId: "ship-command", OrderId: "order-1", IdempotencyKey: "order-1/shipment"}
+	wrapped, err := anypb.New(command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope := &commonv1.MessageEnvelope{MessageId: "ship-command", AggregateId: "order-1", AggregateVersion: 3, CorrelationId: "order-1", Data: wrapped}
+	first, err := buildShippingOutcome("boutique.cmd.shipping.create-shipment.v1", envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.record(envelope.MessageId, first); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := openShippingProviderStore(storePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, ok := reopened.outcome(envelope.MessageId)
+	if !ok || first.MessageID != second.MessageID || string(first.Data) != string(second.Data) {
+		t.Fatal("stored provider outcome changed after restart")
 	}
 }
 
-// TestGetQuoteEmptyCart verifies that an empty cart returns a zero quote.
-func TestGetQuoteEmptyCart(t *testing.T) {
-	s := server{}
-
-	req := &pb.GetQuoteRequest{
-		Address: &pb.Address{
-			StreetAddress: "221B Baker Street",
-			City:          "London",
-			State:         "",
-			Country:       "England",
-		},
-		Items: []*pb.CartItem{},
+func TestShippingFailureInjectionCoversEveryProviderStep(t *testing.T) {
+	tests := []struct {
+		mode, subject, expected string
+		command                 proto.Message
+	}{
+		{"quote", "boutique.cmd.shipping.calculate-order-quote.v1", "boutique.evt.shipping.order-quote-failed.v1", &commandsv1.ShippingCalculateOrderQuoteCommand{OrderId: "order-q", Cart: &commonv1.CartSnapshot{}}},
+		{"shipment", "boutique.cmd.shipping.create-shipment.v1", "boutique.evt.shipping.shipment-creation-failed.v1", &commandsv1.ShippingCreateShipmentCommand{OrderId: "order-s"}},
+		{"cancel", "boutique.cmd.shipping.cancel-shipment.v1", "boutique.evt.shipping.shipment-cancellation-failed.v1", &commandsv1.ShippingCancelShipmentCommand{OrderId: "order-c", ShipmentId: "shipment-c"}},
 	}
-
-	res, err := s.GetQuote(context.Background(), req)
-	if err != nil {
-		t.Errorf("TestGetQuoteEmptyCart (%v) failed", err)
-	}
-	if res.CostUsd.GetUnits() != 0 || res.CostUsd.GetNanos() != 0 {
-		t.Errorf("TestGetQuoteEmptyCart: expected zero quote for empty cart, got '%d.%d'", res.CostUsd.GetUnits(), res.CostUsd.GetNanos())
-	}
-}
-
-// TestShipOrder is a basic check on the ShipOrder RPC service.
-func TestShipOrder(t *testing.T) {
-	s := server{}
-
-	// A basic test case to test logic and protobuf interactions.
-	req := &pb.ShipOrderRequest{
-		Address: &pb.Address{
-			StreetAddress: "Muffin Man",
-			City:          "London",
-			State:         "",
-			Country:       "England",
-		},
-		Items: []*pb.CartItem{
-			{
-				ProductId: "23",
-				Quantity:  1,
-			},
-			{
-				ProductId: "46",
-				Quantity:  3,
-			},
-		},
-	}
-
-	res, err := s.ShipOrder(context.Background(), req)
-	if err != nil {
-		t.Errorf("TestShipOrder (%v) failed", err)
-	}
-	if len(res.TrackingId) != 18 {
-		t.Errorf("TestShipOrder: Tracking ID is malformed - has %d characters, %d expected", len(res.TrackingId), 18)
+	for _, test := range tests {
+		t.Run(test.mode, func(t *testing.T) {
+			t.Setenv("SHIPPING_FAILURE_MODE", test.mode)
+			wrapped, err := anypb.New(test.command)
+			if err != nil {
+				t.Fatal(err)
+			}
+			envelope := &commonv1.MessageEnvelope{MessageId: "command-" + test.mode, AggregateId: "order-" + test.mode, Data: wrapped}
+			outcome, err := buildShippingOutcome(test.subject, envelope)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if outcome.Subject != test.expected {
+				t.Fatalf("subject = %s, want %s", outcome.Subject, test.expected)
+			}
+		})
 	}
 }
 
@@ -172,6 +142,16 @@ func TestCreateQuoteFromCount(t *testing.T) {
 	nonZeroQuote := CreateQuoteFromCount(5)
 	if nonZeroQuote.Dollars == 0 && nonZeroQuote.Cents == 0 {
 		t.Error("CreateQuoteFromCount(5) returned zero, expected a non-zero quote")
+	}
+}
+
+func TestShippingMessageIDIsStablePerCause(t *testing.T) {
+	first := shippingMessageID(shippingQuoteSubject, "cause-1")
+	if first != shippingMessageID(shippingQuoteSubject, "cause-1") {
+		t.Fatal("message ID changed for the same causal event")
+	}
+	if first == shippingMessageID(shippingQuoteSubject, "cause-2") {
+		t.Fatal("different causal events received the same message ID")
 	}
 }
 

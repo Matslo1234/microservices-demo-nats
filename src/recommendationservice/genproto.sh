@@ -16,11 +16,8 @@
 
 # [START gke_recommendationservice_genproto]
 
-# script to compile python protos
-#
-# requires gRPC tools:
-#   pip install -r requirements.txt
-
-python -m grpc_tools.protoc -I../../protos --python_out=. --grpc_python_out=. ../../protos/demo.proto
+# Only the event contracts are active. The legacy recommendation gRPC service
+# and its generated stubs were removed in Phase 6.
+python -m grpc_tools.protoc -I../.. --python_out=. ../../protos/common/v1/message.proto ../../protos/events/v1/events.proto
 
 # [END gke_recommendationservice_genproto]

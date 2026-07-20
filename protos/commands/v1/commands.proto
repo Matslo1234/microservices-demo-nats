@@ -1,0 +1,110 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+syntax = "proto3";
+
+package boutique.commands.v1;
+
+import "protos/common/v1/message.proto";
+
+option go_package = "github.com/GoogleCloudPlatform/microservices-demo/protos/commands/v1;commandsv1";
+option java_multiple_files = true;
+option java_package = "boutique.commands.v1";
+option csharp_namespace = "Boutique.Commands.V1";
+
+message CartAddItemCommand {
+  string command_id = 1;
+  string user_id = 2;
+  string product_id = 3;
+  int32 quantity = 4;
+  uint64 expected_cart_version = 5;
+}
+
+message CartClearCommand {
+  string command_id = 1;
+  string user_id = 2;
+  uint64 expected_cart_version = 3;
+  string reason = 4;
+  string order_id = 5;
+}
+
+message OrderSubmitCommand {
+  string command_id = 1;
+  string operation_id = 2;
+  string order_id = 3;
+  string user_id = 4;
+  uint64 expected_cart_version = 5;
+  uint64 expected_catalog_revision = 6;
+  uint64 expected_rate_revision = 7;
+  string currency_code = 8;
+  boutique.common.v1.PostalAddress shipping_address = 9;
+  string email = 10;
+  string payment_token = 11;
+}
+
+message ShippingCalculateOrderQuoteCommand {
+  string command_id = 1;
+  string order_id = 2;
+  boutique.common.v1.PostalAddress shipping_address = 3;
+  boutique.common.v1.CartSnapshot cart = 4;
+}
+
+message ShippingCreateShipmentCommand {
+  string command_id = 1;
+  string order_id = 2;
+  boutique.common.v1.PostalAddress shipping_address = 3;
+  repeated boutique.common.v1.CartLine items = 4;
+  string idempotency_key = 5;
+}
+
+message ShippingCancelShipmentCommand {
+  string command_id = 1;
+  string order_id = 2;
+  string shipment_id = 3;
+  string tracking_id = 4;
+  string reason = 5;
+  string idempotency_key = 6;
+}
+
+message PaymentAuthorizeCommand {
+  string command_id = 1;
+  string order_id = 2;
+  boutique.common.v1.Money amount = 3;
+  string payment_token = 4;
+  string idempotency_key = 5;
+}
+
+message PaymentCaptureCommand {
+  string command_id = 1;
+  string order_id = 2;
+  string authorization_id = 3;
+  boutique.common.v1.Money amount = 4;
+  string idempotency_key = 5;
+}
+
+message PaymentReleaseAuthorizationCommand {
+  string command_id = 1;
+  string order_id = 2;
+  string authorization_id = 3;
+  string reason = 4;
+  string idempotency_key = 5;
+}
+
+message AssistantGenerateResponseCommand {
+  string command_id = 1;
+  string operation_id = 2;
+  string session_id = 3;
+  string prompt = 4;
+  string image_object_reference = 5;
+}

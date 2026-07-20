@@ -13,7 +13,6 @@
 // limitations under the License.
 
 using System;
-using Grpc.Core;
 using Npgsql;
 using Microsoft.Extensions.Configuration;
 using System.Threading.Tasks;
@@ -95,8 +94,7 @@ namespace cartservice.cartstore
         }
         catch (Exception ex)
         {   
-            throw new RpcException(
-                new Status(StatusCode.FailedPrecondition, $"Unable to access cart storage due to an internal error. {ex}"));
+            throw new InvalidOperationException($"Unable to access cart storage due to an internal error. {ex.Message}", ex);
         }
     }
 
@@ -131,8 +129,7 @@ namespace cartservice.cartstore
             }
             catch (Exception ex)
             {
-                throw new RpcException(
-                    new Status(StatusCode.FailedPrecondition, $"Unable to access cart storage due to an internal error. {ex}"));
+                throw new InvalidOperationException($"Unable to access cart storage due to an internal error. {ex.Message}", ex);
             }
             return cart;
         }
@@ -156,8 +153,7 @@ namespace cartservice.cartstore
             }
             catch (Exception ex)
             {
-                throw new RpcException(
-                    new Status(StatusCode.FailedPrecondition, $"Unable to access cart storage due to an internal error. {ex}"));
+                throw new InvalidOperationException($"Unable to access cart storage due to an internal error. {ex.Message}", ex);
             }
         }
 
@@ -174,4 +170,3 @@ namespace cartservice.cartstore
         }
     }
 }
-

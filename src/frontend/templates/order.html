@@ -1,80 +1,44 @@
-<!--
- Copyright 2020 Google LLC
-
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
-
-      http://www.apache.org/licenses/LICENSE-2.0
-
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
--->
-
+<!-- Copyright 2026 Google LLC; Licensed under the Apache License, Version 2.0. -->
 {{ define "order" }}
-
-    {{ template "header" . }}
-
-    <div {{ with $.platform_css }} class="{{.}}" {{ end }}>
-        <span class="platform-flag">
-            {{$.platform_name}}
-        </span>
+{{ template "header" . }}
+<main role="main" class="order">
+  <section class="container order-complete-section">
+    <div class="row"><div class="col-12 text-center">
+      {{ if eq .order.Status "COMPLETED" }}
+        <h3>Your order is complete!</h3>
+        <p>Your confirmation is being delivered independently.</p>
+      {{ else if eq .order.Status "CANCELLED" }}
+        <h3>Your order was cancelled</h3><p>{{ .order.SafeMessage }}</p>
+      {{ else if eq .order.Status "REJECTED" }}
+        <h3>Your order was rejected</h3><p>{{ .order.SafeMessage }}</p>
+      {{ else if eq .order.Status "MANUAL_REVIEW" }}
+        <h3>Your order needs review</h3><p>No additional payment or shipment action will be attempted automatically.</p>
+      {{ else }}
+        <h3>We're processing your order</h3><p>Current stage: {{ .order.Stage }}</p>
+      {{ end }}
+    </div></div>
+    <div class="row border-bottom-solid padding-y-24">
+      <div class="col-6 pl-md-0">Confirmation #</div>
+      <div class="col-6 pr-md-0 text-right">{{ .order.OrderID }}</div>
     </div>
-
-    <main role="main" class="order">
-
-        <section class="container order-complete-section">
-            <div class="row">
-                <div class="col-12 text-center">
-                    <h3>
-                        Your order is complete!
-                    </h3>
-                </div>
-                <div class="col-12 text-center">
-                    <p>We've sent you a confirmation email.</p>
-                </div>
-            </div>
-            <div class="row border-bottom-solid padding-y-24">
-                <div class="col-6 pl-md-0">
-                    Confirmation #
-                </div>
-                <div class="col-6 pr-md-0 text-right">
-                    {{.order.OrderId}}
-                </div>
-            </div>
-            <div class="row border-bottom-solid padding-y-24">
-                <div class="col-6 pl-md-0">
-                    Tracking #
-                </div>
-                <div class="col-6 pr-md-0 text-right">
-                    {{.order.ShippingTrackingId}}
-                </div>
-            </div>
-            <div class="row padding-y-24">
-                <div class="col-6 pl-md-0">
-                    Total Paid
-                </div>
-                <div class="col-6 pr-md-0 text-right">
-                    {{renderMoney .total_paid}}
-                </div>
-            </div>
-            <div class="row">
-                <div class="col-12 text-center">
-                    <a class="cymbal-button-primary" href="{{ $.baseUrl }}/" role="button">
-                        Continue Shopping
-                    </a>
-                </div>
-            </div>
-        </section>
-
-        {{ if $.recommendations }}
-            {{ template "recommendations" $ }}
-        {{ end }}
-
-    </main>
-
-    {{ template "footer" . }}
+    {{ with .order.Snapshot }}
+      {{ if .TrackingId }}
+      <div class="row border-bottom-solid padding-y-24">
+        <div class="col-6 pl-md-0">Tracking #</div><div class="col-6 pr-md-0 text-right">{{ .TrackingId }}</div>
+      </div>
+      {{ end }}
     {{ end }}
+    <div class="row"><div class="col-12 text-center padding-y-24">
+      <a class="cymbal-button-primary" href="{{ $.baseUrl }}/" role="button">Continue Shopping</a>
+    </div></div>
+  </section>
+</main>
+{{ if or (eq .order.Status "QUEUED") (eq .order.Status "PROCESSING") }}
+<script>
+setTimeout(function () {
+  window.location.replace({{ .order_url }});
+}, 1000);
+</script>
+{{ end }}
+{{ template "footer" . }}
+{{ end }}

@@ -14,7 +14,6 @@
 
 using System;
 using Google.Cloud.Spanner.Data;
-using Grpc.Core;
 using Microsoft.Extensions.Configuration;
 using System.Threading.Tasks;
 
@@ -96,8 +95,7 @@ namespace cartservice.cartstore
             }
             catch (Exception ex)
             {
-                throw new RpcException(
-                    new Status(StatusCode.FailedPrecondition, $"Can't access cart storage at {databaseString}. {ex}"));
+                throw new InvalidOperationException($"Can't access cart storage at {databaseString}. {ex.Message}", ex);
             }
         }
 
@@ -136,8 +134,7 @@ namespace cartservice.cartstore
             }
             catch (Exception ex)
             {
-                throw new RpcException(
-                    new Status(StatusCode.FailedPrecondition, $"Can't access cart storage at {databaseString}. {ex}"));
+                throw new InvalidOperationException($"Can't access cart storage at {databaseString}. {ex.Message}", ex);
             }
         }
 
@@ -164,8 +161,7 @@ namespace cartservice.cartstore
 
             catch (Exception ex)
             {
-                throw new RpcException(
-                    new Status(StatusCode.FailedPrecondition, $"Can't access cart storage at {databaseString}. {ex}"));
+                throw new InvalidOperationException($"Can't access cart storage at {databaseString}. {ex.Message}", ex);
             }
         }
 
@@ -182,4 +178,3 @@ namespace cartservice.cartstore
         }
     }
 }
-

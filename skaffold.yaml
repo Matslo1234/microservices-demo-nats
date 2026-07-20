@@ -24,29 +24,49 @@ build:
   # here:
   # https://skaffold.dev/docs/concepts/#image-repository-handling
   - image: emailservice
-    context: src/emailservice
+    context: .
+    docker:
+      dockerfile: src/emailservice/Dockerfile
   - image: productcatalogservice
-    context: src/productcatalogservice
+    context: .
+    docker:
+      dockerfile: src/productcatalogservice/Dockerfile
   - image: recommendationservice
     context: src/recommendationservice
   - image: shoppingassistantservice
     context: src/shoppingassistantservice
   - image: shippingservice
-    context: src/shippingservice
-  - image: checkoutservice
-    context: src/checkoutservice
-  - image: paymentservice
-    context: src/paymentservice
-  - image: currencyservice
-    context: src/currencyservice
-  - image: cartservice
-    context: src/cartservice/src
+    context: .
     docker:
-      dockerfile: Dockerfile
+      dockerfile: src/shippingservice/Dockerfile
+  - image: checkoutservice
+    context: .
+    docker:
+      dockerfile: src/checkoutservice/Dockerfile
+  - image: paymentservice
+    context: .
+    docker:
+      dockerfile: src/paymentservice/Dockerfile
+  - image: currencyservice
+    context: .
+    docker:
+      dockerfile: src/currencyservice/Dockerfile
+  - image: cartservice
+    context: .
+    docker:
+      dockerfile: src/cartservice/src/Dockerfile
+  - image: storefrontprojectionservice
+    context: .
+    docker:
+      dockerfile: src/storefrontprojectionservice/Dockerfile
   - image: frontend
-    context: src/frontend
+    context: .
+    docker:
+      dockerfile: src/frontend/Dockerfile
   - image: adservice
-    context: src/adservice
+    context: .
+    docker:
+      dockerfile: src/adservice/Dockerfile
   tagPolicy:
     gitCommit: {}
   local:
@@ -82,16 +102,8 @@ profiles:
   - command: debug
   patches:
   - op: replace
-    path: /build/artifacts/7/docker/dockerfile
-    value: Dockerfile.debug
-# The "network-policies" profile is not used by default.
-# You can use it in isolation or in combination with other profiles:
-#     skaffold run -p network-policies, debug
-- name: network-policies
-  patches:
-  - op: add
-    path: /manifests/kustomize/paths/1
-    value: kustomize/components/network-policies
+    path: /build/artifacts/8/docker/dockerfile
+    value: src/cartservice/src/Dockerfile.debug
 ---
 apiVersion: skaffold/v3
 kind: Config

@@ -19,10 +19,13 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"cloud.google.com/go/profiler"
 	"github.com/gorilla/mux"
+	"github.com/nats-io/nats.go"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
@@ -61,26 +64,11 @@ var (
 type ctxKeySessionID struct{}
 
 type frontendServer struct {
-	productCatalogSvcAddr string
-	productCatalogSvcConn *grpc.ClientConn
-
-	currencySvcAddr string
-	currencySvcConn *grpc.ClientConn
-
-	cartSvcAddr string
-	cartSvcConn *grpc.ClientConn
-
-	recommendationSvcAddr string
-	recommendationSvcConn *grpc.ClientConn
-
-	checkoutSvcAddr string
-	checkoutSvcConn *grpc.ClientConn
-
-	shippingSvcAddr string
-	shippingSvcConn *grpc.ClientConn
-
-	adSvcAddr string
-	adSvcConn *grpc.ClientConn
+	natsConn                 *nats.Conn
+	natsJS                   nats.JetStreamContext
+	natsRequestTimeout       time.Duration
+	natsPublishTimeout       time.Duration
+	cartOperationWaitTimeout time.Duration
 
 	collectorAddr string
 	collectorConn *grpc.ClientConn
@@ -129,22 +117,19 @@ func main() {
 		srvPort = os.Getenv("PORT")
 	}
 	addr := os.Getenv("LISTEN_ADDR")
-	mustMapEnv(&svc.productCatalogSvcAddr, "PRODUCT_CATALOG_SERVICE_ADDR")
-	mustMapEnv(&svc.currencySvcAddr, "CURRENCY_SERVICE_ADDR")
-	mustMapEnv(&svc.cartSvcAddr, "CART_SERVICE_ADDR")
-	mustMapEnv(&svc.recommendationSvcAddr, "RECOMMENDATION_SERVICE_ADDR")
-	mustMapEnv(&svc.checkoutSvcAddr, "CHECKOUT_SERVICE_ADDR")
-	mustMapEnv(&svc.shippingSvcAddr, "SHIPPING_SERVICE_ADDR")
-	mustMapEnv(&svc.adSvcAddr, "AD_SERVICE_ADDR")
-	mustMapEnv(&svc.shoppingAssistantSvcAddr, "SHOPPING_ASSISTANT_SERVICE_ADDR")
+	// The optional Assistant was deliberately not deployed in Phase 6. Keep its
+	// legacy HTTP integration dormant unless an operator explicitly configures it.
+	svc.shoppingAssistantSvcAddr = os.Getenv("SHOPPING_ASSISTANT_SERVICE_ADDR")
 
-	mustConnGRPC(ctx, &svc.currencySvcConn, svc.currencySvcAddr)
-	mustConnGRPC(ctx, &svc.productCatalogSvcConn, svc.productCatalogSvcAddr)
-	mustConnGRPC(ctx, &svc.cartSvcConn, svc.cartSvcAddr)
-	mustConnGRPC(ctx, &svc.recommendationSvcConn, svc.recommendationSvcAddr)
-	mustConnGRPC(ctx, &svc.shippingSvcConn, svc.shippingSvcAddr)
-	mustConnGRPC(ctx, &svc.checkoutSvcConn, svc.checkoutSvcAddr)
-	mustConnGRPC(ctx, &svc.adSvcConn, svc.adSvcAddr)
+	var err error
+	svc.natsConn, svc.natsJS, svc.natsRequestTimeout, svc.natsPublishTimeout, err = connectFrontendNATS()
+	if err != nil {
+		log.Fatal(err)
+	}
+	svc.cartOperationWaitTimeout, err = durationEnv("CART_OPERATION_WAIT_TIMEOUT", 750*time.Millisecond)
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	r := mux.NewRouter()
 	r.HandleFunc(baseUrl+"/", svc.homeHandler).Methods(http.MethodGet, http.MethodHead)
@@ -152,13 +137,32 @@ func main() {
 	r.HandleFunc(baseUrl+"/cart", svc.viewCartHandler).Methods(http.MethodGet, http.MethodHead)
 	r.HandleFunc(baseUrl+"/cart", svc.addToCartHandler).Methods(http.MethodPost)
 	r.HandleFunc(baseUrl+"/cart/empty", svc.emptyCartHandler).Methods(http.MethodPost)
+	r.HandleFunc(baseUrl+"/operations/{id}", svc.operationHandler).Methods(http.MethodGet)
+	r.HandleFunc(baseUrl+"/orders/{id}", svc.orderHandler).Methods(http.MethodGet)
 	r.HandleFunc(baseUrl+"/setCurrency", svc.setCurrencyHandler).Methods(http.MethodPost)
 	r.HandleFunc(baseUrl+"/logout", svc.logoutHandler).Methods(http.MethodGet)
 	r.HandleFunc(baseUrl+"/cart/checkout", svc.placeOrderHandler).Methods(http.MethodPost)
 	r.HandleFunc(baseUrl+"/assistant", svc.assistantHandler).Methods(http.MethodGet)
 	r.PathPrefix(baseUrl + "/static/").Handler(http.StripPrefix(baseUrl+"/static/", http.FileServer(http.Dir("./static/"))))
 	r.HandleFunc(baseUrl+"/robots.txt", func(w http.ResponseWriter, _ *http.Request) { fmt.Fprint(w, "User-agent: *\nDisallow: /") })
-	r.HandleFunc(baseUrl+"/_healthz", func(w http.ResponseWriter, _ *http.Request) { fmt.Fprint(w, "ok") })
+	r.HandleFunc(baseUrl+"/_healthz", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, "ok")
+	})
+	r.HandleFunc(baseUrl+"/_readyz", func(w http.ResponseWriter, r *http.Request) {
+		if !svc.natsConn.IsConnected() {
+			http.Error(w, "NATS unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		fmt.Fprint(w, "ok")
+	})
+	r.HandleFunc(baseUrl+"/metrics", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+		connected := 0
+		if svc.natsConn.IsConnected() {
+			connected = 1
+		}
+		fmt.Fprintf(w, "boutique_dependency_ready{service=\"frontend\",dependency=\"nats\"} %d\n", connected)
+	})
 	r.HandleFunc(baseUrl+"/product-meta/{ids}", svc.getProductByID).Methods(http.MethodGet)
 	r.HandleFunc(baseUrl+"/bot", svc.chatBotHandler).Methods(http.MethodPost)
 
@@ -167,8 +171,30 @@ func main() {
 	handler = ensureSessionID(handler)                 // add session ID
 	handler = otelhttp.NewHandler(handler, "frontend") // add OTel tracing
 
-	log.Infof("starting server on %s:%s", addr, srvPort)
-	log.Fatal(http.ListenAndServe(addr+":"+srvPort, handler))
+	server := &http.Server{Addr: addr + ":" + srvPort, Handler: handler, ReadHeaderTimeout: 5 * time.Second}
+	serveErrors := make(chan error, 1)
+	go func() {
+		log.Infof("starting server on %s:%s", addr, srvPort)
+		serveErrors <- server.ListenAndServe()
+	}()
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
+	select {
+	case received := <-signals:
+		log.WithField("signal", received.String()).Info("shutting down")
+	case serveErr := <-serveErrors:
+		if serveErr != nil && serveErr != http.ErrServerClosed {
+			log.WithError(serveErr).Error("frontend server stopped")
+		}
+	}
+	shutdownContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := server.Shutdown(shutdownContext); err != nil {
+		log.WithError(err).Warn("frontend HTTP drain failed")
+	}
+	if err := svc.natsConn.Drain(); err != nil {
+		log.WithError(err).Warn("frontend NATS drain failed")
+	}
 }
 func initStats(log logrus.FieldLogger) {
 	// TODO(arbrown) Implement OpenTelemtry stats

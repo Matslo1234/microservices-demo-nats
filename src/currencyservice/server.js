@@ -1,198 +1,108 @@
-/*
- * Copyright 2018 Google LLC.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+/* Copyright 2018 Google LLC.
+ * Licensed under the Apache License, Version 2.0 (the "License"); */
 
+'use strict';
+
+const http = require('http');
 const pino = require('pino');
+const { connectAndPublish } = require('./nats_events');
+
 const logger = pino({
   name: 'currencyservice-server',
   messageKey: 'message',
-  formatters: {
-    level (logLevelString, logLevelNum) {
-      return { severity: logLevelString }
-    }
-  }
+  formatters: { level (label) { return { severity: label }; } }
 });
 
-if(process.env.DISABLE_PROFILER) {
-  logger.info("Profiler disabled.")
-}
-else {
-  logger.info("Profiler enabled.")
+if (process.env.DISABLE_PROFILER) {
+  logger.info('Profiler disabled.');
+} else {
+  logger.info('Profiler enabled.');
   require('@google-cloud/profiler').start({
-    serviceContext: {
-      service: 'currencyservice',
-      version: '1.0.0'
-    }
+    serviceContext: { service: 'currencyservice', version: '1.0.0' }
   });
 }
 
-// Register GRPC OTel Instrumentation for trace propagation
-// regardless of whether tracing is emitted.
-const { GrpcInstrumentation } = require('@opentelemetry/instrumentation-grpc');
-const { registerInstrumentations } = require('@opentelemetry/instrumentation');
-
-registerInstrumentations({
-  instrumentations: [new GrpcInstrumentation()]
-});
-
-if(process.env.ENABLE_TRACING == "1") {
-  logger.info("Tracing enabled.")
-
+if (process.env.ENABLE_TRACING === '1') {
   const { resourceFromAttributes } = require('@opentelemetry/resources');
-
   const { ATTR_SERVICE_NAME } = require('@opentelemetry/semantic-conventions');
-
   const opentelemetry = require('@opentelemetry/sdk-node');
-
   const { OTLPTraceExporter } = require('@opentelemetry/exporter-otlp-grpc');
-
-  const collectorUrl = process.env.COLLECTOR_SERVICE_ADDR;
-  const traceExporter = new OTLPTraceExporter({url: collectorUrl});
   const sdk = new opentelemetry.NodeSDK({
     resource: resourceFromAttributes({
-      [ ATTR_SERVICE_NAME ]: process.env.OTEL_SERVICE_NAME || 'currencyservice',
+      [ATTR_SERVICE_NAME]: process.env.OTEL_SERVICE_NAME || 'currencyservice'
     }),
-    traceExporter: traceExporter,
+    traceExporter: new OTLPTraceExporter({ url: process.env.COLLECTOR_SERVICE_ADDR })
   });
-
-  sdk.start()
-}
-else {
-  logger.info("Tracing disabled.")
+  sdk.start();
+} else {
+  logger.info('Tracing disabled.');
 }
 
-const path = require('path');
-const grpc = require('@grpc/grpc-js');
-const protoLoader = require('@grpc/proto-loader');
+let natsConnection = null;
+let natsReady = process.env.NATS_REQUIRED !== 'true';
+let healthServer = null;
 
-const MAIN_PROTO_PATH = path.join(__dirname, './proto/demo.proto');
-const HEALTH_PROTO_PATH = path.join(__dirname, './proto/grpc/health/v1/health.proto');
-
-const PORT = process.env.PORT;
-
-const shopProto = _loadProto(MAIN_PROTO_PATH).hipstershop;
-const healthProto = _loadProto(HEALTH_PROTO_PATH).grpc.health.v1;
-
-/**
- * Helper function that loads a protobuf file.
- */
-function _loadProto (path) {
-  const packageDefinition = protoLoader.loadSync(
-    path,
-    {
-      keepCase: true,
-      longs: String,
-      enums: String,
-      defaults: true,
-      oneofs: true
-    }
-  );
-  return grpc.loadPackageDefinition(packageDefinition);
-}
-
-/**
- * Helper function that gets currency data from a stored JSON file
- * Uses public data from European Central Bank
- */
-function _getCurrencyData (callback) {
-  const data = require('./data/currency_conversion.json');
-  callback(data);
-}
-
-/**
- * Helper function that handles decimal/fractional carrying
- */
-function _carry (amount) {
-  const fractionSize = Math.pow(10, 9);
-  amount.nanos += (amount.units % 1) * fractionSize;
-  amount.units = Math.floor(amount.units) + Math.floor(amount.nanos / fractionSize);
-  amount.nanos = amount.nanos % fractionSize;
-  return amount;
-}
-
-/**
- * Lists the supported currencies
- */
-function getSupportedCurrencies (call, callback) {
-  logger.info('Getting supported currencies...');
-  _getCurrencyData((data) => {
-    callback(null, {currency_codes: Object.keys(data)});
-  });
-}
-
-/**
- * Converts between currencies
- */
-function convert (call, callback) {
-  try {
-    _getCurrencyData((data) => {
-      const request = call.request;
-
-      // Convert: from_currency --> EUR
-      const from = request.from;
-      const euros = _carry({
-        units: from.units / data[from.currency_code],
-        nanos: from.nanos / data[from.currency_code]
-      });
-
-      euros.nanos = Math.round(euros.nanos);
-
-      // Convert: EUR --> to_currency
-      const result = _carry({
-        units: euros.units * data[request.to_code],
-        nanos: euros.nanos * data[request.to_code]
-      });
-
-      result.units = Math.floor(result.units);
-      result.nanos = Math.floor(result.nanos);
-      result.currency_code = request.to_code;
-
-      logger.info(`conversion request successful`);
-      callback(null, result);
-    });
-  } catch (err) {
-    logger.error(`conversion request failed: ${err}`);
-    callback(err.message);
+function healthHandler (request, response) {
+  if (request.url === '/healthz') {
+    response.writeHead(200, { 'Content-Type': 'text/plain' });
+    response.end('ok\n');
+    return;
   }
+  if (request.url === '/readyz') {
+    response.writeHead(natsReady ? 200 : 503, { 'Content-Type': 'text/plain' });
+    response.end(natsReady ? 'ok\n' : 'currency publisher is not ready\n');
+    return;
+  }
+  if (request.url === '/metrics') {
+    response.writeHead(200, { 'Content-Type': 'text/plain; version=0.0.4' });
+    response.end(`boutique_dependency_ready{service="currencyservice",dependency="nats"} ${natsReady ? 1 : 0}\n`);
+    return;
+  }
+  response.writeHead(404);
+  response.end();
 }
 
-/**
- * Endpoint for health checks
- */
-function check (call, callback) {
-  callback(null, { status: 'SERVING' });
+async function main () {
+  const currencyData = require('./data/currency_conversion.json');
+  natsConnection = await connectAndPublish(currencyData, logger);
+  if (natsConnection) {
+    natsReady = true;
+    (async () => {
+      for await (const status of natsConnection.status()) {
+        if (status.type === 'disconnect' || status.type === 'error') {
+          natsReady = false;
+          logger.warn({ type: status.type, data: status.data }, 'NATS connection is not ready');
+        } else if (status.type === 'reconnect') {
+          natsReady = true;
+          logger.info('NATS connection restored');
+        }
+      }
+    })().catch(err => {
+      natsReady = false;
+      logger.error({ err }, 'NATS status monitor failed');
+    });
+  }
+  const port = Number(process.env.PORT || 8080);
+  healthServer = http.createServer(healthHandler);
+  healthServer.listen(port, '0.0.0.0', () => logger.info({ port }, 'currency health server started'));
 }
 
-/**
- * Starts an RPC server that receives requests for the
- * CurrencyConverter service at the sample server port
- */
-function main () {
-  logger.info(`Starting gRPC server on port ${PORT}...`);
-  const server = new grpc.Server();
-  server.addService(shopProto.CurrencyService.service, {getSupportedCurrencies, convert});
-  server.addService(healthProto.Health.service, {check});
-
-  server.bindAsync(
-    `[::]:${PORT}`,
-    grpc.ServerCredentials.createInsecure(),
-    function() {
-      logger.info(`CurrencyService gRPC server started on port ${PORT}`);
-      server.start();
-    },
-   );
+async function shutdown () {
+  natsReady = false;
+  if (healthServer) await new Promise(resolve => healthServer.close(resolve));
+  if (natsConnection) await natsConnection.drain();
 }
 
-main();
+for (const signal of ['SIGTERM', 'SIGINT']) {
+  process.on(signal, () => {
+    shutdown().then(() => process.exit(0)).catch(err => {
+      logger.error({ err }, 'shutdown failed');
+      process.exit(1);
+    });
+  });
+}
+
+main().catch(err => {
+  logger.fatal({ err }, 'currency service startup failed');
+  process.exit(1);
+});

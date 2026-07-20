@@ -16,13 +16,8 @@ syntax = "proto3";
 
 package hipstershop;
 
-// -----------------Cart service-----------------
-
-service CartService {
-    rpc AddItem(AddItemRequest) returns (Empty) {}
-    rpc GetCart(GetCartRequest) returns (Cart) {}
-    rpc EmptyCart(EmptyCartRequest) returns (Empty) {}
-}
+// Legacy cart message types retained for Redis serialization compatibility.
+// Cart writes and reads are now handled by NATS commands and projections.
 
 message CartItem {
     string product_id = 1;

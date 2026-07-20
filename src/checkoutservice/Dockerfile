@@ -21,10 +21,11 @@ ARG TARGETARCH=amd64
 WORKDIR /src
 
 # restore dependencies
-COPY go.mod go.sum ./
+COPY src/checkoutservice/go.mod src/checkoutservice/go.sum ./
+COPY protos /protos
 RUN go mod download
 
-COPY . .
+COPY src/checkoutservice .
 
 # Skaffold passes in debug-oriented compiler flags
 ARG SKAFFOLD_GO_GCFLAGS
@@ -40,5 +41,5 @@ COPY --from=builder /checkoutservice /src/checkoutservice
 # See https://golang.org/pkg/runtime/
 ENV GOTRACEBACK=single
 
-EXPOSE 5050
+EXPOSE 8080
 ENTRYPOINT ["/src/checkoutservice"]

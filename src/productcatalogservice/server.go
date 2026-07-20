@@ -16,39 +16,27 @@ package main
 
 import (
 	"context"
-	"flag"
 	"fmt"
-	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"sync"
 	"syscall"
 	"time"
 
-	pb "github.com/GoogleCloudPlatform/microservices-demo/src/productcatalogservice/genproto"
-	"google.golang.org/grpc/credentials/insecure"
-	"google.golang.org/grpc/health"
-	healthpb "google.golang.org/grpc/health/grpc_health_v1"
-
 	"cloud.google.com/go/profiler"
-	"github.com/pkg/errors"
+	pb "github.com/GoogleCloudPlatform/microservices-demo/src/productcatalogservice/genproto"
 	"github.com/sirupsen/logrus"
-	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	"google.golang.org/grpc"
 )
 
 var (
-	catalogMutex *sync.Mutex
 	log          *logrus.Logger
-	extraLatency time.Duration
-
-	port = "3550"
-
-	reloadCatalog bool
+	catalogNATS  *catalogEventPublisher
+	catalogMutex = &sync.Mutex{}
 )
 
 func init() {
@@ -62,14 +50,12 @@ func init() {
 		TimestampFormat: time.RFC3339Nano,
 	}
 	log.Out = os.Stdout
-	catalogMutex = &sync.Mutex{}
 }
 
 func main() {
 	if os.Getenv("ENABLE_TRACING") == "1" {
-		err := initTracing()
-		if err != nil {
-			log.Warnf("warn: failed to start tracer: %+v", err)
+		if err := initTracing(); err != nil {
+			log.Warnf("failed to start tracer: %+v", err)
 		}
 	} else {
 		log.Info("Tracing disabled.")
@@ -82,136 +68,102 @@ func main() {
 		log.Info("Profiling disabled.")
 	}
 
-	flag.Parse()
-
-	// set injected latency
-	if s := os.Getenv("EXTRA_LATENCY"); s != "" {
-		v, err := time.ParseDuration(s)
-		if err != nil {
-			log.Fatalf("failed to parse EXTRA_LATENCY (%s) as time.Duration: %+v", v, err)
-		}
-		extraLatency = v
-		log.Infof("extra latency enabled (duration: %v)", extraLatency)
-	} else {
-		extraLatency = time.Duration(0)
-	}
-
-	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, syscall.SIGUSR1, syscall.SIGUSR2)
-	go func() {
-		for {
-			sig := <-sigs
-			log.Printf("Received signal: %s", sig)
-			if sig == syscall.SIGUSR1 {
-				reloadCatalog = true
-				log.Infof("Enable catalog reloading")
-			} else {
-				reloadCatalog = false
-				log.Infof("Disable catalog reloading")
-			}
-		}
-	}()
-
-	if os.Getenv("PORT") != "" {
-		port = os.Getenv("PORT")
-	}
-	log.Infof("starting grpc server at :%s", port)
-	run(port)
-	select {}
-}
-
-func run(port string) string {
-	listener, err := net.Listen("tcp", fmt.Sprintf(":%s", port))
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	// Propagate trace context
-	otel.SetTextMapPropagator(
-		propagation.NewCompositeTextMapPropagator(
-			propagation.TraceContext{}, propagation.Baggage{}))
-	var srv *grpc.Server
-	srv = grpc.NewServer(
-		grpc.StatsHandler(otelgrpc.NewServerHandler()))
-
-	svc := &productCatalog{}
-	err = loadCatalog(&svc.catalog)
-	if err != nil {
+	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
+		propagation.TraceContext{}, propagation.Baggage{}))
+	catalog := &pb.ListProductsResponse{}
+	if err := loadCatalog(catalog); err != nil {
 		log.Fatalf("could not parse product catalog: %v", err)
 	}
+	if natsIsRequired() {
+		var err error
+		catalogNATS, err = connectCatalogPublisher()
+		if err != nil {
+			log.Fatalf("could not initialize required NATS publisher: %v", err)
+		}
+		if err := catalogNATS.publishBootstrap(catalog.Products); err != nil {
+			log.Fatalf("could not publish catalog bootstrap events: %v", err)
+		}
+	}
 
-	pb.RegisterProductCatalogServiceServer(srv, svc)
-	healthcheck := health.NewServer()
-	healthpb.RegisterHealthServer(srv, healthcheck)
-	go srv.Serve(listener)
+	ready := func() bool {
+		return len(catalog.Products) > 0 &&
+			(!natsIsRequired() || (catalogNATS != nil && catalogNATS.nc.IsConnected()))
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", func(response http.ResponseWriter, _ *http.Request) {
+		_, _ = response.Write([]byte("ok\n"))
+	})
+	mux.HandleFunc("/readyz", func(response http.ResponseWriter, _ *http.Request) {
+		if !ready() {
+			http.Error(response, "catalog publisher is not ready", http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = response.Write([]byte("ok\n"))
+	})
+	mux.HandleFunc("/metrics", func(response http.ResponseWriter, _ *http.Request) {
+		response.Header().Set("Content-Type", "text/plain; version=0.0.4")
+		natsReady := 0
+		if !natsIsRequired() || (catalogNATS != nil && catalogNATS.nc.IsConnected()) {
+			natsReady = 1
+		}
+		_, _ = fmt.Fprintln(response, "boutique_dependency_ready{service=\"productcatalogservice\",dependency=\"catalog\"} 1")
+		_, _ = fmt.Fprintf(response, "boutique_dependency_ready{service=\"productcatalogservice\",dependency=\"nats\"} %d\n", natsReady)
+		_, _ = fmt.Fprintf(response, "boutique_catalog_products %d\n", len(catalog.Products))
+	})
 
-	return listener.Addr().String()
-}
-
-func initStats() {
-	// TODO(drewbr) Implement OpenTelemetry stats
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+	server := &http.Server{Addr: ":" + port, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	serveErrors := make(chan error, 1)
+	go func() {
+		log.Infof("product catalog health server listening on :%s", port)
+		serveErrors <- server.ListenAndServe()
+	}()
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, syscall.SIGTERM, syscall.SIGINT)
+	select {
+	case received := <-signals:
+		log.WithField("signal", received.String()).Info("shutting down")
+	case serveErr := <-serveErrors:
+		if serveErr != nil && serveErr != http.ErrServerClosed {
+			log.WithError(serveErr).Error("product catalog health server stopped")
+		}
+	}
+	shutdownContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_ = server.Shutdown(shutdownContext)
+	if catalogNATS != nil {
+		catalogNATS.drain()
+	}
 }
 
 func initTracing() error {
-	var (
-		collectorAddr string
-		collectorConn *grpc.ClientConn
-	)
-
-	ctx := context.Background()
-
-	mustMapEnv(&collectorAddr, "COLLECTOR_SERVICE_ADDR")
-	mustConnGRPC(ctx, &collectorConn, collectorAddr)
-
-	exporter, err := otlptracegrpc.New(
-		ctx,
-		otlptracegrpc.WithGRPCConn(collectorConn))
-	if err != nil {
-		log.Warnf("warn: Failed to create trace exporter: %v", err)
+	collectorAddr := os.Getenv("COLLECTOR_SERVICE_ADDR")
+	if collectorAddr == "" {
+		return fmt.Errorf("COLLECTOR_SERVICE_ADDR is required when tracing is enabled")
 	}
-	tp := sdktrace.NewTracerProvider(
-		sdktrace.WithBatcher(exporter),
-		sdktrace.WithSampler(sdktrace.AlwaysSample()))
-	otel.SetTracerProvider(tp)
-	return err
+	ctx := context.Background()
+	exporter, err := otlptracegrpc.New(ctx,
+		otlptracegrpc.WithEndpoint(collectorAddr), otlptracegrpc.WithInsecure())
+	if err != nil {
+		return err
+	}
+	otel.SetTracerProvider(sdktrace.NewTracerProvider(
+		sdktrace.WithBatcher(exporter), sdktrace.WithSampler(sdktrace.AlwaysSample())))
+	return nil
 }
 
 func initProfiling(service, version string) {
-	for i := 1; i <= 3; i++ {
-		if err := profiler.Start(profiler.Config{
-			Service:        service,
-			ServiceVersion: version,
-			// ProjectID must be set if not running on GCP.
-			// ProjectID: "my-project",
-		}); err != nil {
+	for attempt := 1; attempt <= 3; attempt++ {
+		if err := profiler.Start(profiler.Config{Service: service, ServiceVersion: version}); err != nil {
 			log.Warnf("failed to start profiler: %+v", err)
 		} else {
 			log.Info("started Stackdriver profiler")
 			return
 		}
-		d := time.Second * 10 * time.Duration(i)
-		log.Infof("sleeping %v to retry initializing Stackdriver profiler", d)
-		time.Sleep(d)
+		time.Sleep(time.Second * 10 * time.Duration(attempt))
 	}
 	log.Warn("could not initialize Stackdriver profiler after retrying, giving up")
-}
-
-func mustMapEnv(target *string, envKey string) {
-	v := os.Getenv(envKey)
-	if v == "" {
-		panic(fmt.Sprintf("environment variable %q not set", envKey))
-	}
-	*target = v
-}
-
-func mustConnGRPC(ctx context.Context, conn **grpc.ClientConn, addr string) {
-	var err error
-	_, cancel := context.WithTimeout(ctx, time.Second*3)
-	defer cancel()
-	*conn, err = grpc.NewClient(addr,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithStatsHandler(otelgrpc.NewClientHandler()))
-	if err != nil {
-		panic(errors.Wrapf(err, "grpc: failed to connect %s", addr))
-	}
 }

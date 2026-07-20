@@ -18,12 +18,12 @@ grpcio==1.76.0
     # via
     #   grpcio-health-checking
     #   opentelemetry-exporter-otlp-proto-grpc
-grpcio-health-checking==1.76.0
-    # via -r requirements.in
 idna==3.7
     # via requests
 importlib-metadata==6.8.0
     # via opentelemetry-api
+nats-py==2.15.0
+    # via -r requirements.in
 opentelemetry-api==1.39.1
     # via
     #   opentelemetry-distro
@@ -42,8 +42,6 @@ opentelemetry-instrumentation==0.60b1
     # via
     #   opentelemetry-distro
     #   opentelemetry-instrumentation-grpc
-opentelemetry-instrumentation-grpc==0.60b1
-    # via -r requirements.in
 opentelemetry-proto==1.39.1
     # via
     #   opentelemetry-exporter-otlp-proto-common

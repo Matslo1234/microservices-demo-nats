@@ -27,16 +27,18 @@ RUN apk update \
     && rm -rf /var/cache/apk/*
 
 # get packages
-COPY requirements.txt .
+COPY src/emailservice/requirements.txt .
 RUN pip install -r requirements.txt
+
+COPY protos /build/protos
+RUN mkdir -p /generated \
+    && python -m grpc_tools.protoc -I/build --python_out=/generated \
+      /build/protos/common/v1/message.proto /build/protos/events/v1/events.proto
 
 FROM base
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
-
-# Enable Profiler
-ENV ENABLE_PROFILER=1
 
 RUN apk update \
     && apk add --no-cache libstdc++ \
@@ -48,7 +50,8 @@ WORKDIR /email_server
 COPY --from=builder /usr/local/lib/python3.14/ /usr/local/lib/python3.14/
 
 # Add the application
-COPY . .
+COPY src/emailservice .
+COPY --from=builder /generated/protos ./protos
 
 EXPOSE 8080
 ENTRYPOINT [ "python", "email_server.py" ]

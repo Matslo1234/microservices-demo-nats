@@ -26,7 +26,7 @@ RUN apk add --update --no-cache \
 
 WORKDIR /usr/src/app
 
-COPY package*.json ./
+COPY src/paymentservice/package*.json ./
 
 RUN npm install --only=production
 
@@ -38,8 +38,9 @@ WORKDIR /usr/src/app
 
 COPY --from=builder /usr/src/app/node_modules ./node_modules
 
-COPY . .
+COPY src/paymentservice .
+COPY protos ./protos
 
-EXPOSE 50051
+EXPOSE 8080
 
 ENTRYPOINT [ "node", "index.js" ]

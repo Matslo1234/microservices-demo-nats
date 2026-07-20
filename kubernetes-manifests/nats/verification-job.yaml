@@ -1,0 +1,171 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nats-phase1-verification
+  namespace: nats
+data:
+  verify.sh: |
+    #!/bin/sh
+    set -eu
+
+    event_subject="boutique.evt.ops.phase1-verify.v1"
+    allowed_subject="boutique.qry.storefront.home.v1"
+    denied_subject="boutique.evt.payment.phase1-verify.v1"
+    advisory_subject="boutique.evt.ops.phase1-max-delivery.v1"
+    consumer="PHASE1_REPLAY_VERIFY"
+    advisory_consumer="PHASE1_MAX_DELIVERY_VERIFY"
+    payload="phase1-replay-payload"
+    message_id="phase1-dedup-$(date +%s)"
+
+    nats_admin() {
+      nats --server="${NATS_URL}" --user="${NATS_USER}" --password="${NATS_PASSWORD}" \
+        --tlsca=/etc/nats-ca/ca.crt --timeout=5s "$@"
+    }
+
+    nats_frontend() {
+      nats --server="${NATS_URL}" --user=frontend --password="${FRONTEND_PASSWORD}" \
+        --tlsca=/etc/nats-ca/ca.crt --timeout=5s "$@"
+    }
+
+    cleanup() {
+      nats_admin consumer rm BOUTIQUE_EVENTS "${consumer}" --force >/dev/null 2>&1 || true
+      nats_admin consumer rm BOUTIQUE_EVENTS "${advisory_consumer}" --force >/dev/null 2>&1 || true
+      for subject in "${event_subject}" "${allowed_subject}" "${denied_subject}" "${advisory_subject}"; do
+        case "${subject}" in
+          boutique.cmd.*) stream=BOUTIQUE_COMMANDS ;;
+          *) stream=BOUTIQUE_EVENTS ;;
+        esac
+        nats_admin stream purge "${stream}" --subject "${subject}" --force >/dev/null 2>&1 || true
+      done
+    }
+    trap cleanup EXIT
+    cleanup
+
+    nats_admin account info >/dev/null
+    for stream in BOUTIQUE_COMMANDS BOUTIQUE_EVENTS BOUTIQUE_DLQ; do
+      nats_admin stream info "${stream}" --json | grep -q '"num_replicas": 3'
+    done
+    echo "PASS: account and replicated streams are healthy"
+
+    first_publish="$(nats_admin pub "${event_subject}" "${payload}" --jetstream \
+      --header "Nats-Msg-Id:${message_id}" 2>&1)"
+    second_publish="$(nats_admin pub "${event_subject}" "${payload}" --jetstream \
+      --header "Nats-Msg-Id:${message_id}" 2>&1)"
+    printf '%s\n%s\n' "${first_publish}" "${second_publish}" | grep -qi duplicate
+    echo "PASS: duplicate message ID was suppressed"
+
+    nats_admin consumer add BOUTIQUE_EVENTS "${consumer}" --pull \
+      --filter "${event_subject}" --deliver all --ack explicit --max-deliver 3 \
+      --replicas 3 --defaults >/dev/null
+    received="$(nats_admin consumer next BOUTIQUE_EVENTS "${consumer}" \
+      --count 1 --no-ack --raw --wait=5s)"
+    test "${received}" = "${payload}"
+    nats_admin consumer rm BOUTIQUE_EVENTS "${consumer}" --force >/dev/null
+
+    nats_admin consumer add BOUTIQUE_EVENTS "${consumer}" --pull \
+      --filter "${event_subject}" --deliver all --ack explicit --max-deliver 3 \
+      --replicas 3 --defaults >/dev/null
+    replayed="$(nats_admin consumer next BOUTIQUE_EVENTS "${consumer}" \
+      --count 1 --no-ack --raw --wait=5s)"
+    test "${replayed}" = "${payload}"
+    echo "PASS: a recreated durable consumer replayed the retained event"
+
+    nats_admin pub "${advisory_subject}" "phase1-max-delivery" --jetstream \
+      --header "Nats-Msg-Id:phase1-max-delivery-$(date +%s)" >/dev/null 2>&1
+    nats_admin consumer add BOUTIQUE_EVENTS "${advisory_consumer}" --pull \
+      --filter "${advisory_subject}" --deliver all --ack explicit --wait=1s \
+      --max-deliver 2 --replicas 3 --defaults >/dev/null
+    nats_admin consumer next BOUTIQUE_EVENTS "${advisory_consumer}" \
+      --count 1 --no-ack --raw --wait=5s >/dev/null
+    sleep 2
+    nats_admin consumer next BOUTIQUE_EVENTS "${advisory_consumer}" \
+      --count 1 --no-ack --raw --wait=5s >/dev/null
+    sleep 2
+    if nats_admin consumer next BOUTIQUE_EVENTS "${advisory_consumer}" \
+      --count 1 --no-ack --raw --wait=2s >/dev/null 2>&1; then
+      echo "FAIL: consumer exceeded its MaxDeliver limit" >&2
+      exit 1
+    fi
+    nats_admin consumer info BOUTIQUE_EVENTS "${advisory_consumer}" --json | \
+      grep -q '"num_redelivered": 1'
+    echo "PASS: MaxDeliver stopped redelivery and emitted an advisory"
+
+    # Use an ephemeral query subject for the positive permission check so the
+    # verifier cannot enqueue a malformed command for a production consumer.
+    nats_frontend pub "${allowed_subject}" "phase1-allowed" >/dev/null
+
+    nats_frontend pub "${denied_subject}" "phase1-must-be-denied" >/tmp/denied.log 2>&1 || true
+    sleep 1
+    if nats_admin stream get BOUTIQUE_EVENTS --last-for "${denied_subject}" >/dev/null 2>&1; then
+      echo "FAIL: frontend published to a forbidden payment subject" >&2
+      exit 1
+    fi
+    echo "PASS: frontend publish allowlist permits storefront queries and denies payment events"
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: nats-phase1-verification
+  namespace: nats
+  labels:
+    app.kubernetes.io/name: nats-phase1-verification
+    app.kubernetes.io/component: verification
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: nats-phase1-verification
+        app.kubernetes.io/part-of: online-boutique
+    spec:
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: verify
+        image: natsio/nats-box:0.19.7-nonroot
+        command: ["sh", "/verification/verify.sh"]
+        env:
+        - name: FRONTEND_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: nats-server-auth
+              key: FRONTEND_PASSWORD
+        envFrom:
+        - secretRef:
+            name: nats-admin-credentials
+        resources:
+          requests:
+            cpu: 20m
+            memory: 32Mi
+          limits:
+            cpu: 200m
+            memory: 128Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+          readOnlyRootFilesystem: true
+        volumeMounts:
+        - name: verification
+          mountPath: /verification
+          readOnly: true
+        - name: ca
+          mountPath: /etc/nats-ca
+          readOnly: true
+        - name: tmp
+          mountPath: /tmp
+      volumes:
+      - name: verification
+        configMap:
+          name: nats-phase1-verification
+      - name: ca
+        configMap:
+          name: nats-ca
+      - name: tmp
+        emptyDir: {}

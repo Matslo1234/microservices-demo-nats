@@ -1,0 +1,225 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nats-server-config
+  namespace: nats
+  labels:
+    app.kubernetes.io/name: nats
+data:
+  nats.conf: |
+    server_name: $POD_NAME
+    pid_file: "/var/run/nats/nats.pid"
+    listen: 0.0.0.0:4222
+    http: 0.0.0.0:8222
+    max_payload: 1MB
+    write_deadline: "10s"
+    lame_duck_duration: "30s"
+    lame_duck_grace_period: "10s"
+
+    tls {
+      cert_file: "/etc/nats/tls/tls.crt"
+      key_file: "/etc/nats/tls/tls.key"
+      ca_file: "/etc/nats/tls/ca.crt"
+      min_version: "1.2"
+      timeout: 2
+    }
+
+    cluster {
+      name: "BOUTIQUE"
+      listen: 0.0.0.0:6222
+      # Kubernetes clients connect through the TLS service name. Do not gossip
+      # pod IPs, which are not stable and are intentionally absent from the cert.
+      no_advertise: true
+      connect_retries: 120
+      connect_backoff: true
+      routes: [
+        nats://nats-0.nats-headless.nats.svc.cluster.local:6222,
+        nats://nats-1.nats-headless.nats.svc.cluster.local:6222,
+        nats://nats-2.nats-headless.nats.svc.cluster.local:6222
+      ]
+      tls {
+        cert_file: "/etc/nats/tls/tls.crt"
+        key_file: "/etc/nats/tls/tls.key"
+        ca_file: "/etc/nats/tls/ca.crt"
+        min_version: "1.2"
+        timeout: 2
+      }
+    }
+
+    jetstream {
+      store_dir: "/data/jetstream"
+      max_memory_store: 256MB
+      max_file_store: 8GB
+      cipher: "aes"
+      key: $JETSTREAM_ENCRYPTION_KEY
+    }
+
+    accounts {
+      SYS {
+        users: [
+          {user: "system", password: $SYS_PASSWORD}
+        ]
+      }
+
+      BOUTIQUE {
+        jetstream: enabled
+        users: [
+          {
+            user: "admin", password: $ADMIN_PASSWORD,
+            permissions: {publish: [">"], subscribe: [">"]}
+          },
+          {
+            user: "frontend", password: $FRONTEND_PASSWORD,
+            permissions: {
+              publish: [
+                "boutique.cmd.cart.add-item.v1", "boutique.cmd.cart.clear.v1",
+                "boutique.cmd.order.submit.v1",
+                "boutique.evt.storefront.page-viewed.v1",
+                "boutique.evt.storefront.operation-accepted.v1",
+                "boutique.qry.storefront.home.v1",
+                "boutique.qry.storefront.product.v1",
+                "boutique.qry.storefront.cart.v1",
+                "boutique.qry.storefront.currencies.v1",
+                "boutique.qry.storefront.product-meta.v1",
+                "boutique.qry.storefront.search-products.v1",
+                "boutique.qry.storefront.order.v1",
+                "boutique.qry.storefront.operation.v1",
+                "boutique.qry.payment.tokenize.v1", "$JS.API.INFO",
+                "$JS.API.STREAM.INFO.*"
+              ],
+              subscribe: ["_INBOX.>"]
+            }
+          },
+          {
+            user: "storefrontprojectionservice", password: $STOREFRONTPROJECTIONSERVICE_PASSWORD,
+            permissions: {
+              publish: [
+                "$JS.API.>", "$JS.ACK.>", "_INBOX.>",
+                "$KV.STOREFRONT_PRODUCTS.>", "$KV.STOREFRONT_CARTS.>",
+                "$KV.STOREFRONT_CONTEXT.>", "$KV.STOREFRONT_ORDERS.>",
+                "$KV.STOREFRONT_OPERATIONS.>", "$KV.STOREFRONT_ASSISTANT.>"
+              ],
+              subscribe: ["_INBOX.>", "$SRV.>", "boutique.evt.>", "boutique.qry.storefront.>"]
+            }
+          },
+          {
+            user: "productcatalogservice", password: $PRODUCTCATALOGSERVICE_PASSWORD,
+            permissions: {
+              publish: [
+                "boutique.evt.catalog.product-upserted.v1",
+                "boutique.evt.catalog.product-removed.v1",
+                "boutique.evt.catalog.snapshot-completed.v1",
+                "$JS.API.INFO", "$JS.API.STREAM.INFO.*"
+              ],
+              subscribe: ["_INBOX.>"]
+            }
+          },
+          {
+            user: "currencyservice", password: $CURRENCYSERVICE_PASSWORD,
+            permissions: {
+              publish: ["boutique.evt.currency.rates-updated.v1", "$JS.API.INFO", "$JS.API.STREAM.INFO.*"],
+              subscribe: ["_INBOX.>"]
+            }
+          },
+          {
+            user: "cartservice", password: $CARTSERVICE_PASSWORD,
+            permissions: {
+              publish: [
+                "boutique.evt.cart.item-added.v1",
+                "boutique.evt.cart.cleared.v1",
+                "boutique.evt.cart.command-rejected.v1",
+                "$JS.API.>", "$JS.ACK.>"
+              ],
+              subscribe: ["_INBOX.>", "boutique.cmd.cart.>", "boutique.evt.catalog.>"]
+            }
+          },
+          {
+            user: "recommendationservice", password: $RECOMMENDATIONSERVICE_PASSWORD,
+            permissions: {
+              publish: ["boutique.evt.recommendation.generated.v1", "$JS.API.>", "$JS.ACK.>"],
+              subscribe: ["_INBOX.>", "boutique.evt.catalog.>", "boutique.evt.cart.>", "boutique.evt.storefront.page-viewed.v1"]
+            }
+          },
+          {
+            user: "adservice", password: $ADSERVICE_PASSWORD,
+            permissions: {
+              publish: ["boutique.evt.ad.selection-generated.v1", "$JS.API.>", "$JS.ACK.>"],
+              subscribe: ["_INBOX.>", "boutique.evt.storefront.page-viewed.v1"]
+            }
+          },
+          {
+            user: "checkoutservice", password: $CHECKOUTSERVICE_PASSWORD,
+            permissions: {
+              publish: [
+                "boutique.evt.order.submitted.v1",
+                "boutique.evt.order.processing-stage-changed.v1",
+                "boutique.evt.order.rejected.v1",
+                "boutique.evt.order.completed.v1",
+                "boutique.evt.order.cancelled.v1",
+                "boutique.evt.order.manual-review-required.v1",
+                "boutique.evt.order.step-timed-out.v1",
+                "boutique.cmd.shipping.calculate-order-quote.v1",
+                "boutique.cmd.shipping.create-shipment.v1",
+                "boutique.cmd.shipping.cancel-shipment.v1",
+                "boutique.cmd.payment.authorize.v1",
+                "boutique.cmd.payment.capture.v1",
+                "boutique.cmd.payment.release-authorization.v1",
+                "boutique.cmd.cart.clear.v1", "$JS.API.>", "$JS.ACK.>"
+              ],
+              subscribe: ["_INBOX.>", "boutique.cmd.order.>", "boutique.evt.catalog.>", "boutique.evt.currency.>", "boutique.evt.cart.>", "boutique.evt.shipping.>", "boutique.evt.payment.>"]
+            }
+          },
+          {
+            user: "shippingservice", password: $SHIPPINGSERVICE_PASSWORD,
+            permissions: {
+              publish: [
+                "boutique.evt.shipping.cart-quote-updated.v1",
+                "boutique.evt.shipping.order-quote-calculated.v1",
+                "boutique.evt.shipping.order-quote-failed.v1",
+                "boutique.evt.shipping.shipment-created.v1",
+                "boutique.evt.shipping.shipment-creation-failed.v1",
+                "boutique.evt.shipping.shipment-cancelled.v1",
+                "boutique.evt.shipping.shipment-cancellation-failed.v1",
+                "$JS.API.>", "$JS.ACK.>"
+              ],
+              subscribe: ["_INBOX.>", "boutique.cmd.shipping.>", "boutique.evt.cart.>"]
+            }
+          },
+          {
+            user: "paymentservice", password: $PAYMENTSERVICE_PASSWORD,
+            permissions: {
+              publish: [
+                "boutique.evt.payment.authorized.v1",
+                "boutique.evt.payment.authorization-declined.v1",
+                "boutique.evt.payment.captured.v1",
+                "boutique.evt.payment.capture-failed.v1",
+                "boutique.evt.payment.authorization-released.v1",
+                "boutique.evt.payment.authorization-release-failed.v1",
+                "_INBOX.>", "$JS.API.>", "$JS.ACK.>"
+              ],
+              subscribe: ["_INBOX.>", "boutique.cmd.payment.>", "boutique.qry.payment.tokenize.v1"]
+            }
+          },
+          {
+            user: "emailservice", password: $EMAILSERVICE_PASSWORD,
+            permissions: {
+              publish: [
+                "boutique.evt.notification.order-confirmation-sent.v1",
+                "boutique.evt.notification.order-confirmation-failed.v1",
+                "$JS.API.>", "$JS.ACK.>"
+              ],
+              subscribe: ["_INBOX.>", "boutique.evt.order.completed.v1"]
+            }
+          },
+          {
+            user: "messageoperationsservice", password: $MESSAGEOPERATIONSSERVICE_PASSWORD,
+            permissions: {
+              publish: ["boutique.dlq.>", "boutique.evt.ops.>", "$JS.API.>", "$JS.ACK.>"],
+              subscribe: ["_INBOX.>", "$JS.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES.>", "boutique.evt.>"]
+            }
+          }
+        ]
+      }
+    }
+
+    system_account: SYS

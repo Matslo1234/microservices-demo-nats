@@ -25,8 +25,6 @@ on:
       - '.github/workflows/kustomize-build-ci.yaml'
       - 'terraform/**'
       - '.github/workflows/terraform-validate-ci.yaml'
-      - 'helm-chart/**'
-      - '.github/workflows/helm-chart-ci.yaml'
 
 # Ensure this workflow only runs for the most recent commit of a pull-request
 concurrency:
@@ -49,12 +47,30 @@ jobs:
     - name: Go Unit Tests
       timeout-minutes: 10
       run: |
-        for GO_PACKAGE in "shippingservice" "productcatalogservice" "frontend/validator"; do
+        for GO_PACKAGE in "shippingservice" "productcatalogservice" "frontend" "storefrontprojectionservice" "checkoutservice"; do
           echo "Testing $GO_PACKAGE..."
           pushd src/$GO_PACKAGE
-          go test
+          go test ./...
           popd
         done
+    - name: Phase 3 Read Cutover Guardrails
+      run: |
+        python -m py_compile src/recommendationservice/recommendation_server.py src/recommendationservice/nats_events.py src/recommendationservice/protos/common/v1/message_pb2.py src/recommendationservice/protos/events/v1/events_pb2.py
+        python scripts/verify-phase3-contracts.py
+    - name: Phase 4 Cart Command Guardrails
+      run: |
+        python -m py_compile src/loadgenerator/locustfile.py
+        python scripts/verify-phase4-contracts.py
+    - name: Phase 5 Checkout Saga Guardrails
+      run: |
+        python -m py_compile src/emailservice/email_server.py src/emailservice/nats_worker.py src/loadgenerator/locustfile.py
+        npm --prefix src/paymentservice ci
+        npm --prefix src/paymentservice test
+        python scripts/verify-phase5-contracts.py
+    - name: Phase 6 NATS-only Cleanup Guardrails
+      run: |
+        python -m py_compile src/emailservice/email_server.py src/recommendationservice/recommendation_server.py src/loadgenerator/locustfile.py
+        python scripts/verify-phase6-contracts.py
     - name: C# Unit Tests
       timeout-minutes: 10
       run: |

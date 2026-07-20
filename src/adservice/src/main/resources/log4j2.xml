@@ -35,7 +35,6 @@
     </Console>
   </Appenders>
   <Loggers>
-    <Logger name="io.grpc.netty" level="INFO"/>
     <Logger name="io.netty" level="INFO"/>
     <Logger name="sun.net" level="INFO"/>
     <Root level="TRACE">

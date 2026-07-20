@@ -26,3 +26,5 @@ resources:
 - productcatalogservice.yaml
 - recommendationservice.yaml
 - shippingservice.yaml
+- storefrontprojectionservice.yaml
+- network-policies.yaml

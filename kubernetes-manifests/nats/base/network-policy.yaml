@@ -1,0 +1,136 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: nats
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress", "Egress"]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: nats-clients-and-cluster
+  namespace: nats
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: nats
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: default
+      podSelector:
+        matchExpressions:
+        - key: app
+          operator: In
+          values:
+          - adservice
+          - cartservice
+          - checkoutservice
+          - currencyservice
+          - emailservice
+          - frontend
+          - paymentservice
+          - productcatalogservice
+          - recommendationservice
+          - shippingservice
+          - storefrontprojectionservice
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: nats
+    ports:
+    - protocol: TCP
+      port: 4222
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: nats
+    ports:
+    - protocol: TCP
+      port: 6222
+    - protocol: TCP
+      port: 8222
+    - protocol: TCP
+      port: 7777
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          observability.online-boutique.io/enabled: "true"
+    ports:
+    - protocol: TCP
+      port: 7777
+  egress:
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: nats
+    ports:
+    - protocol: TCP
+      port: 6222
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: nats-operations-clients
+  namespace: nats
+spec:
+  podSelector:
+    matchExpressions:
+    - key: app.kubernetes.io/name
+      operator: In
+      values: ["nats-bootstrap", "nats-backup", "nats-advisory-watcher", "nats-phase1-verification"]
+  policyTypes: ["Egress"]
+  egress:
+  - to:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/name: nats
+    ports:
+    - protocol: TCP
+      port: 4222
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+---
+# The setup Deployment only calls the Kubernetes API with its in-cluster
+# service-account token. A cluster API endpoint is not consistently selectable
+# by namespace/pod labels across CNI implementations. Permit the service port
+# (443) and the usual API-server endpoint port (6443): some CNI plugins enforce
+# egress after Service DNAT. No other network access is granted.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: nats-setup-kubernetes-api
+  namespace: nats
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: nats-setup
+  policyTypes: ["Egress"]
+  egress:
+  - to:
+    - ipBlock:
+        cidr: 0.0.0.0/0
+    ports:
+    - protocol: TCP
+      port: 443
+    - protocol: TCP
+      port: 6443

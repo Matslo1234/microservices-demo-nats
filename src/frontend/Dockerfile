@@ -21,9 +21,10 @@ ARG TARGETARCH=amd64
 WORKDIR /src
 
 # restore dependencies
-COPY go.mod go.sum ./
+COPY src/frontend/go.mod src/frontend/go.sum ./
+COPY protos /protos
 RUN go mod download
-COPY . .
+COPY src/frontend .
 
 # Skaffold passes in debug-oriented compiler flags
 ARG SKAFFOLD_GO_GCFLAGS
@@ -32,8 +33,8 @@ RUN GOOS=${TARGETOS} GOARCH=${TARGETARCH} CGO_ENABLED=0 go build -ldflags="-s -w
 FROM gcr.io/distroless/static
 WORKDIR /src
 COPY --from=builder /go/bin/frontend /src/server
-COPY ./templates ./templates
-COPY ./static ./static
+COPY src/frontend/templates ./templates
+COPY src/frontend/static ./static
 
 # Definition of this variable is used by 'skaffold debug' to identify a golang binary.
 # Default behavior - a failure prints a stack trace for the current goroutine.

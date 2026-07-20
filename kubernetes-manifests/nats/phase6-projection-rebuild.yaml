@@ -1,0 +1,143 @@
+# On-demand, destructive reset of rebuildable storefront projection state.
+# Run only through scripts/nats/verify-phase6-dr.sh, which stops projection
+# writers before applying this Job and restores them afterward.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: nats-phase6-projection-rebuild
+  namespace: nats
+  labels:
+    app.kubernetes.io/name: nats-phase1-verification
+    phase6.online-boutique.io/step: rebuild
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: nats-phase1-verification
+    spec:
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: rebuild
+        image: natsio/nats-box:0.19.7-nonroot
+        command:
+        - sh
+        - -ec
+        - |
+          args="--server=${NATS_URL} --user=${NATS_USER} --password=${NATS_PASSWORD} --tlsca=/etc/nats-ca/ca.crt"
+
+          nats ${args} consumer rm BOUTIQUE_EVENTS storefront-projection-v1 --force || true
+          for bucket in STOREFRONT_PRODUCTS STOREFRONT_CARTS STOREFRONT_CONTEXT STOREFRONT_ORDERS STOREFRONT_OPERATIONS STOREFRONT_ASSISTANT; do
+            nats ${args} kv del "${bucket}" --force || true
+          done
+
+          nats ${args} kv add STOREFRONT_PRODUCTS --history=5 --replicas=3 --storage=file --ttl=0s --max-bucket-size=536870912
+          nats ${args} kv add STOREFRONT_CARTS --history=2 --replicas=3 --storage=file --ttl=0s --max-bucket-size=536870912
+          nats ${args} kv add STOREFRONT_CONTEXT --history=2 --replicas=3 --storage=file --ttl=1h --max-bucket-size=268435456
+          nats ${args} kv add STOREFRONT_ORDERS --history=10 --replicas=3 --storage=file --ttl=0s --max-bucket-size=536870912
+          nats ${args} kv add STOREFRONT_OPERATIONS --history=10 --replicas=3 --storage=file --ttl=24h --max-bucket-size=268435456
+        envFrom:
+        - secretRef:
+            name: nats-admin-credentials
+        volumeMounts:
+        - name: ca
+          mountPath: /etc/nats-ca
+          readOnly: true
+        resources:
+          requests:
+            cpu: 20m
+            memory: 32Mi
+          limits:
+            cpu: 100m
+            memory: 128Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+          readOnlyRootFilesystem: true
+      volumes:
+      - name: ca
+        configMap:
+          name: nats-ca
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: nats-phase6-replay-verification
+  namespace: nats
+  labels:
+    app.kubernetes.io/name: nats-phase1-verification
+    phase6.online-boutique.io/step: replay
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: nats-phase1-verification
+    spec:
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: verify
+        image: natsio/nats-box:0.19.7-nonroot
+        command:
+        - sh
+        - -ec
+        - |
+          args="--server=${NATS_URL} --user=${NATS_USER} --password=${NATS_PASSWORD} --tlsca=/etc/nats-ca/ca.crt"
+          deadline=$(( $(date +%s) + 300 ))
+          while :; do
+            state="$(nats ${args} consumer info BOUTIQUE_EVENTS storefront-projection-v1 --json 2>/dev/null || true)"
+            if echo "${state}" | grep -Eq '"num_pending"[[:space:]]*:[[:space:]]*0' && \
+               echo "${state}" | grep -Eq '"num_ack_pending"[[:space:]]*:[[:space:]]*0'; then
+              break
+            fi
+            if [ "$(date +%s)" -ge "${deadline}" ]; then
+              echo "storefront replay did not catch up before the deadline" >&2
+              echo "${state}" >&2
+              exit 1
+            fi
+            sleep 2
+          done
+
+          for bucket in STOREFRONT_PRODUCTS STOREFRONT_CARTS STOREFRONT_CONTEXT STOREFRONT_ORDERS STOREFRONT_OPERATIONS; do
+            nats ${args} kv info "${bucket}" >/dev/null
+          done
+          nats ${args} consumer info BOUTIQUE_EVENTS storefront-projection-v1
+          echo "Storefront projection replay reached zero pending and zero ack-pending messages."
+        envFrom:
+        - secretRef:
+            name: nats-admin-credentials
+        volumeMounts:
+        - name: ca
+          mountPath: /etc/nats-ca
+          readOnly: true
+        resources:
+          requests:
+            cpu: 20m
+            memory: 32Mi
+          limits:
+            cpu: 100m
+            memory: 128Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+          readOnlyRootFilesystem: true
+      volumes:
+      - name: ca
+        configMap:
+          name: nats-ca

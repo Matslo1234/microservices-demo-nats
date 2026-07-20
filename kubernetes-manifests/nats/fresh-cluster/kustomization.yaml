@@ -1,0 +1,6 @@
+# A portable NATS installation for a cluster with a default dynamic
+# StorageClass.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- ../base

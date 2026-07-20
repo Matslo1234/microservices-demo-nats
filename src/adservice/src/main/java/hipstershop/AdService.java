@@ -1,152 +1,100 @@
-/*
- * Copyright 2018, Google LLC.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+/* Copyright 2018, Google LLC.
+ * Licensed under the Apache License, Version 2.0 (the "License"); */
 
 package hipstershop;
 
-import com.google.common.collect.ImmutableListMultimap;
-import com.google.common.collect.ImmutableMap;
-import com.google.common.collect.Iterables;
+import com.sun.net.httpserver.HttpExchange;
+import com.sun.net.httpserver.HttpServer;
 import hipstershop.Demo.Ad;
-import hipstershop.Demo.AdRequest;
-import hipstershop.Demo.AdResponse;
-import io.grpc.Server;
-import io.grpc.ServerBuilder;
-import io.grpc.StatusRuntimeException;
-import io.grpc.health.v1.HealthCheckResponse.ServingStatus;
-import io.grpc.services.*;
-import io.grpc.stub.StreamObserver;
 import java.io.IOException;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
-import java.util.Collection;
+import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.Random;
-import java.util.concurrent.TimeUnit;
-import org.apache.logging.log4j.Level;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 public final class AdService {
-
   private static final Logger logger = LogManager.getLogger(AdService.class);
-
-  @SuppressWarnings("FieldCanBeLocal")
-  private static int MAX_ADS_TO_SERVE = 2;
-
-  private Server server;
-  private HealthStatusManager healthMgr;
-
+  private static final int MAX_ADS_TO_SERVE = 2;
   private static final AdService service = new AdService();
 
-  private void start() throws IOException {
-    int port = Integer.parseInt(System.getenv().getOrDefault("PORT", "9555"));
-    healthMgr = new HealthStatusManager();
+  private HttpServer healthServer;
+  private ExecutorService healthExecutor;
+  private NatsEventWorker eventWorker;
 
-    server =
-        ServerBuilder.forPort(port)
-            .addService(new AdServiceImpl())
-            .addService(healthMgr.getHealthService())
-            .build()
-            .start();
-    logger.info("Ad Service started, listening on " + port);
-    Runtime.getRuntime()
-        .addShutdownHook(
-            new Thread(
-                () -> {
-                  // Use stderr here since the logger may have been reset by its JVM shutdown hook.
-                  System.err.println(
-                      "*** shutting down gRPC ads server since JVM is shutting down");
-                  AdService.this.stop();
-                  System.err.println("*** server shut down");
-                }));
-    healthMgr.setStatus("", ServingStatus.SERVING);
+  private void start() throws IOException {
+    int port = Integer.parseInt(System.getenv().getOrDefault("PORT", "8080"));
+    eventWorker = new NatsEventWorker(service);
+    eventWorker.start();
+
+    healthServer = HttpServer.create(new InetSocketAddress("0.0.0.0", port), 0);
+    healthExecutor = Executors.newFixedThreadPool(4);
+    healthServer.setExecutor(healthExecutor);
+    healthServer.createContext("/healthz", exchange -> reply(exchange, 200, "ok\n"));
+    healthServer.createContext(
+        "/readyz",
+        exchange ->
+            reply(
+                exchange,
+                eventWorker.ready() ? 200 : 503,
+                eventWorker.ready() ? "ok\n" : "ad NATS consumer is not ready\n"));
+    healthServer.createContext(
+        "/metrics",
+        exchange -> {
+          exchange.getResponseHeaders().set("Content-Type", "text/plain; version=0.0.4");
+          reply(
+              exchange,
+              200,
+              "boutique_dependency_ready{service=\"adservice\",dependency=\"nats\"} "
+                  + (eventWorker.ready() ? "1\n" : "0\n"));
+        });
+    healthServer.start();
+    logger.info("Ad health server started, listening on " + port);
+    Runtime.getRuntime().addShutdownHook(new Thread(this::stop, "adservice-shutdown"));
+  }
+
+  private static void reply(HttpExchange exchange, int status, String body) throws IOException {
+    byte[] encoded = body.getBytes(StandardCharsets.UTF_8);
+    exchange.getResponseHeaders().putIfAbsent("Content-Type", List.of("text/plain"));
+    exchange.sendResponseHeaders(status, encoded.length);
+    exchange.getResponseBody().write(encoded);
+    exchange.close();
   }
 
   private void stop() {
-    if (server != null) {
-      healthMgr.clearStatus("");
-      server.shutdown();
+    if (healthServer != null) {
+      healthServer.stop(0);
+    }
+    if (healthExecutor != null) {
+      healthExecutor.shutdown();
+    }
+    if (eventWorker != null) {
+      eventWorker.close();
     }
   }
 
-  private static class AdServiceImpl extends hipstershop.AdServiceGrpc.AdServiceImplBase {
+  private static final Map<String, List<Ad>> adsMap = createAdsMap();
 
-    /**
-     * Retrieves ads based on context provided in the request {@code AdRequest}.
-     *
-     * @param req the request containing context.
-     * @param responseObserver the stream observer which gets notified with the value of {@code
-     *     AdResponse}
-     */
-    @Override
-    public void getAds(AdRequest req, StreamObserver<AdResponse> responseObserver) {
-      AdService service = AdService.getInstance();
-      try {
-        List<Ad> allAds = new ArrayList<>();
-        logger.info("received ad request (context_words=" + req.getContextKeysList() + ")");
-        if (req.getContextKeysCount() > 0) {
-          for (int i = 0; i < req.getContextKeysCount(); i++) {
-            Collection<Ad> ads = service.getAdsByCategory(req.getContextKeys(i));
-            allAds.addAll(ads);
-          }
-        } else {
-          allAds = service.getRandomAds();
-        }
-        if (allAds.isEmpty()) {
-          // Serve random ads.
-          allAds = service.getRandomAds();
-        }
-        AdResponse reply = AdResponse.newBuilder().addAllAds(allAds).build();
-        responseObserver.onNext(reply);
-        responseObserver.onCompleted();
-      } catch (StatusRuntimeException e) {
-        logger.log(Level.WARN, "GetAds Failed with status {}", e.getStatus());
-        responseObserver.onError(e);
-      }
+  List<Ad> selectAds(List<String> categories, long seed) {
+    List<Ad> selected = new ArrayList<>();
+    for (String category : categories) {
+      selected.addAll(adsMap.getOrDefault(category, List.of()));
     }
-  }
-
-  private static final ImmutableListMultimap<String, Ad> adsMap = createAdsMap();
-
-  private Collection<Ad> getAdsByCategory(String category) {
-    return adsMap.get(category);
-  }
-
-  private static final Random random = new Random();
-
-  private List<Ad> getRandomAds() {
-    List<Ad> ads = new ArrayList<>(MAX_ADS_TO_SERVE);
-    Collection<Ad> allAds = adsMap.values();
-    for (int i = 0; i < MAX_ADS_TO_SERVE; i++) {
-      ads.add(Iterables.get(allAds, random.nextInt(allAds.size())));
+    if (selected.isEmpty()) {
+      adsMap.values().forEach(selected::addAll);
     }
-    return ads;
+    Collections.shuffle(selected, new Random(seed));
+    return selected.subList(0, Math.min(MAX_ADS_TO_SERVE, selected.size()));
   }
 
-  private static AdService getInstance() {
-    return service;
-  }
-
-  /** Await termination on the main thread since the grpc library uses daemon threads. */
-  private void blockUntilShutdown() throws InterruptedException {
-    if (server != null) {
-      server.awaitTermination();
-    }
-  }
-
-  private static ImmutableListMultimap<String, Ad> createAdsMap() {
+  private static Map<String, List<Ad>> createAdsMap() {
     Ad hairdryer =
         Ad.newBuilder()
             .setRedirectUrl("/product/2ZYFJ3GM2N")
@@ -182,57 +130,18 @@ public final class AdService {
             .setRedirectUrl("/product/L9ECAV7KIM")
             .setText("Loafers for sale. Buy one, get second one for free")
             .build();
-    return ImmutableListMultimap.<String, Ad>builder()
-        .putAll("clothing", tankTop)
-        .putAll("accessories", watch)
-        .putAll("footwear", loafers)
-        .putAll("hair", hairdryer)
-        .putAll("decor", candleHolder)
-        .putAll("kitchen", bambooGlassJar, mug)
-        .build();
+    return Map.of(
+        "clothing", List.of(tankTop),
+        "accessories", List.of(watch),
+        "footwear", List.of(loafers),
+        "hair", List.of(hairdryer),
+        "decor", List.of(candleHolder),
+        "kitchen", List.of(bambooGlassJar, mug));
   }
 
-  private static void initStats() {
-    if (System.getenv("DISABLE_STATS") != null) {
-      logger.info("Stats disabled.");
-      return;
-    }
-    logger.info("Stats enabled, but temporarily unavailable");
-
-    long sleepTime = 10; /* seconds */
-    int maxAttempts = 5;
-
-    // TODO(arbrown) Implement OpenTelemetry stats
-
-  }
-
-  private static void initTracing() {
-    if (System.getenv("DISABLE_TRACING") != null) {
-      logger.info("Tracing disabled.");
-      return;
-    }
-    logger.info("Tracing enabled but temporarily unavailable");
-    logger.info("See https://github.com/GoogleCloudPlatform/microservices-demo/issues/422 for more info.");
-
-    // TODO(arbrown) Implement OpenTelemetry tracing
-    
-    logger.info("Tracing enabled - Stackdriver exporter initialized.");
-  }
-
-  /** Main launches the server from the command line. */
   public static void main(String[] args) throws IOException, InterruptedException {
-
-    new Thread(
-            () -> {
-              initStats();
-              initTracing();
-            })
-        .start();
-
-    // Start the RPC server. You shouldn't see any output from gRPC before this.
-    logger.info("AdService starting.");
-    final AdService service = AdService.getInstance();
+    logger.info("AdService NATS worker starting.");
     service.start();
-    service.blockUntilShutdown();
+    new CountDownLatch(1).await();
   }
 }

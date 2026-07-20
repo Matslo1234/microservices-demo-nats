@@ -1,15 +1,15 @@
 using System;
+using System.Linq;
 using Microsoft.AspNetCore.Builder;
-using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Microsoft.Extensions.Hosting;
 using cartservice.cartstore;
-using cartservice.services;
 using Microsoft.Extensions.Caching.StackExchangeRedis;
+using StackExchange.Redis;
+using cartservice.messaging;
 
 namespace cartservice
 {
@@ -26,6 +26,8 @@ namespace cartservice
         // For more information on how to configure your application, visit https://go.microsoft.com/fwlink/?LinkID=398940
         public void ConfigureServices(IServiceCollection services)
         {
+            services.AddRouting();
+
             string redisAddress = Configuration["REDIS_ADDR"];
             string spannerProjectId = Configuration["SPANNER_PROJECT"];
             string spannerConnectionString = Configuration["SPANNER_CONNECTION_STRING"];
@@ -33,11 +35,18 @@ namespace cartservice
 
             if (!string.IsNullOrEmpty(redisAddress))
             {
-                services.AddStackExchangeRedisCache(options =>
+                services.AddSingleton<IConnectionMultiplexer>(_ =>
                 {
-                    options.Configuration = redisAddress;
+                    var redisOptions = ConfigurationOptions.Parse(redisAddress);
+                    redisOptions.AbortOnConnectFail = false;
+                    return ConnectionMultiplexer.Connect(redisOptions);
                 });
-                services.AddSingleton<ICartStore, RedisCartStore>();
+                services.AddSingleton<RedisOutboxCartStore>();
+                services.AddSingleton<ICartStore>(provider => provider.GetRequiredService<RedisOutboxCartStore>());
+                services.AddSingleton<ICartCommandStore>(provider => provider.GetRequiredService<RedisOutboxCartStore>());
+                services.AddSingleton<NatsOutboxRelay>();
+                services.AddSingleton<ICartMessagingHealth>(provider => provider.GetRequiredService<NatsOutboxRelay>());
+                services.AddHostedService(provider => provider.GetRequiredService<NatsOutboxRelay>());
             }
             else if (!string.IsNullOrEmpty(spannerProjectId) || !string.IsNullOrEmpty(spannerConnectionString))
             {
@@ -54,9 +63,6 @@ namespace cartservice
                 services.AddDistributedMemoryCache();
                 services.AddSingleton<ICartStore, RedisCartStore>();
             }
-
-
-            services.AddGrpc();
         }
 
         // This method gets called by the runtime. Use this method to configure the HTTP request pipeline.
@@ -71,12 +77,30 @@ namespace cartservice
 
             app.UseEndpoints(endpoints =>
             {
-                endpoints.MapGrpcService<CartService>();
-                endpoints.MapGrpcService<cartservice.services.HealthCheckService>();
-
-                endpoints.MapGet("/", async context =>
+                endpoints.MapGet("/healthz", async context =>
                 {
-                    await context.Response.WriteAsync("Communication with gRPC endpoints must be made through a gRPC client. To learn how to create a client, visit: https://go.microsoft.com/fwlink/?linkid=2086909");
+                    await context.Response.WriteAsync("ok\n");
+                });
+                endpoints.MapGet("/readyz", async context =>
+                {
+                    var cartStore = context.RequestServices.GetRequiredService<ICartStore>();
+                    var messaging = context.RequestServices.GetServices<ICartMessagingHealth>();
+                    if (!cartStore.Ping() || !messaging.All(health => health.Ready))
+                    {
+                        context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+                        await context.Response.WriteAsync("cart dependencies are not ready\n");
+                        return;
+                    }
+                    await context.Response.WriteAsync("ok\n");
+                });
+                endpoints.MapGet("/metrics", async context =>
+                {
+                    var cartStore = context.RequestServices.GetRequiredService<ICartStore>();
+                    var messaging = context.RequestServices.GetServices<ICartMessagingHealth>();
+                    context.Response.ContentType = "text/plain; version=0.0.4";
+                    await context.Response.WriteAsync(
+                        $"boutique_dependency_ready{{service=\"cartservice\",dependency=\"cart_store\"}} {(cartStore.Ping() ? 1 : 0)}\n" +
+                        $"boutique_dependency_ready{{service=\"cartservice\",dependency=\"nats\"}} {(messaging.All(health => health.Ready) ? 1 : 0)}\n");
                 });
             });
         }

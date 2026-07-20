@@ -5,15 +5,20 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Grpc.AspNetCore" Version="2.80.0" />
-    <PackageReference Include="Grpc.HealthCheck" Version="2.80.0" />
+    <PackageReference Include="Google.Protobuf" Version="3.31.1" />
+    <PackageReference Include="Grpc.Tools" Version="2.80.0" PrivateAssets="All" />
     <PackageReference Include="Microsoft.Extensions.Caching.StackExchangeRedis" Version="10.0.9" />
+    <PackageReference Include="NATS.Net" Version="3.0.0" />
+    <PackageReference Include="StackExchange.Redis" Version="3.0.17" />
     <PackageReference Include="Google.Cloud.Spanner.Data" Version="5.12.0" />
     <PackageReference Include="Npgsql" Version="10.0.3" />
     <PackageReference Include="Google.Cloud.SecretManager.V1" Version="2.7.0" />
   </ItemGroup>
 
   <ItemGroup>
-    <Protobuf Include="protos\Cart.proto" GrpcServices="Both" />
+    <Protobuf Include="protos\Cart.proto" GrpcServices="None" />
+    <Protobuf Include="..\..\..\protos\common\v1\message.proto" GrpcServices="None" ProtoRoot="..\..\.." Link="protos\common\v1\message.proto" />
+    <Protobuf Include="..\..\..\protos\commands\v1\commands.proto" GrpcServices="None" ProtoRoot="..\..\.." Link="protos\commands\v1\commands.proto" />
+    <Protobuf Include="..\..\..\protos\events\v1\events.proto" GrpcServices="None" ProtoRoot="..\..\.." Link="protos\events\v1\events.proto" />
   </ItemGroup>
 </Project>

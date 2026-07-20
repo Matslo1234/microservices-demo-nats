@@ -19,6 +19,10 @@ metadata:
   labels:
     app: checkoutservice
 spec:
+  # The local state/outbox store has one writer. Never overlap replicas during
+  # an update, even though a same-node RWO volume can be mounted by both pods.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: checkoutservice
@@ -26,13 +30,40 @@ spec:
     metadata:
       labels:
         app: checkoutservice
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: /metrics
     spec:
       serviceAccountName: checkoutservice
+      terminationGracePeriodSeconds: 35
       securityContext:
         fsGroup: 1000
         runAsGroup: 1000
         runAsNonRoot: true
         runAsUser: 1000
+      initContainers:
+        - name: volume-permissions
+          image: busybox:1.37.0
+          command: ["sh", "-ec", "chown 1000:1000 /data"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+              add: ["CHOWN"]
+            readOnlyRootFilesystem: true
+            runAsNonRoot: false
+            runAsUser: 0
+          volumeMounts:
+            - name: checkout-data
+              mountPath: /data
+          resources:
+            requests:
+              cpu: 5m
+              memory: 8Mi
+            limits:
+              cpu: 50m
+              memory: 32Mi
       containers:
         - name: server
           securityContext:
@@ -42,30 +73,48 @@ spec:
                 - ALL
             privileged: false
             readOnlyRootFilesystem: true
-          image: us-central1-docker.pkg.dev/online-boutique-ci/microservices-demo/checkoutservice:v0.10.6
+          image: matslo123/checkoutservice:phase6-20260719-1
           ports:
-          - containerPort: 5050
+          - name: health
+            containerPort: 8080
           readinessProbe:
-            grpc:
-              port: 5050
+            httpGet:
+              path: /readyz
+              port: health
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            periodSeconds: 5
+            failureThreshold: 180
           livenessProbe:
-            grpc:
-              port: 5050
+            httpGet:
+              path: /healthz
+              port: health
           env:
           - name: PORT
-            value: "5050"
-          - name: PRODUCT_CATALOG_SERVICE_ADDR
-            value: "productcatalogservice:3550"
-          - name: SHIPPING_SERVICE_ADDR
-            value: "shippingservice:50051"
-          - name: PAYMENT_SERVICE_ADDR
-            value: "paymentservice:50051"
-          - name: EMAIL_SERVICE_ADDR
-            value: "emailservice:5000"
-          - name: CURRENCY_SERVICE_ADDR
-            value: "currencyservice:7000"
-          - name: CART_SERVICE_ADDR
-            value: "cartservice:7070"
+            value: "8080"
+          - name: NATS_REQUIRED
+            value: "true"
+          - name: NATS_REQUIRED_SUBSCRIPTIONS
+            value: "checkout-catalog-v1,checkout-currency-v1,checkout-cart-v1,checkout-order-commands-v1,checkout-saga-shipping-v1,checkout-saga-payment-v1"
+          - name: CHECKOUT_STORE_PATH
+            value: /var/lib/checkout/sagas.json
+          - name: CHECKOUT_SAGA_STEP_TIMEOUT
+            value: 30s
+          - name: CHECKOUT_PROJECTION_CATCHUP_TIMEOUT
+            value: 10m
+          envFrom:
+          - configMapRef:
+              name: nats-client-config
+          - secretRef:
+              name: nats-credentials-checkoutservice
+          volumeMounts:
+          - name: nats-ca
+            mountPath: /etc/nats-ca
+            readOnly: true
+          - name: checkout-data
+            mountPath: /var/lib/checkout
           resources:
             requests:
               cpu: 100m
@@ -73,23 +122,25 @@ spec:
             limits:
               cpu: 200m
               memory: 128Mi
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: checkoutservice
-  labels:
-    app: checkoutservice
-spec:
-  type: ClusterIP
-  selector:
-    app: checkoutservice
-  ports:
-  - name: grpc
-    port: 5050
-    targetPort: 5050
+      volumes:
+      - name: nats-ca
+        configMap:
+          name: nats-ca
+      - name: checkout-data
+        persistentVolumeClaim:
+          claimName: checkout-data
 ---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: checkoutservice
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: checkout-data
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 1Gi

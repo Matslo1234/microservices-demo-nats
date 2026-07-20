@@ -21,6 +21,619 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
+  name: adservice
+  labels:
+    app: adservice
+spec:
+  selector:
+    matchLabels:
+      app: adservice
+  template:
+    metadata:
+      labels:
+        app: adservice
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: /metrics
+    spec:
+      serviceAccountName: adservice
+      terminationGracePeriodSeconds: 5
+      securityContext:
+        fsGroup: 1000
+        runAsGroup: 1000
+        runAsNonRoot: true
+        runAsUser: 1000
+      containers:
+      - name: server
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+              - ALL
+          privileged: false
+          readOnlyRootFilesystem: true
+        image: matslo123/adservice:phase6-20260719-1
+        ports:
+        - name: health
+          containerPort: 8080
+        env:
+        - name: PORT
+          value: "8080"
+        - name: NATS_REQUIRED
+          value: "true"
+        - name: NATS_REQUIRED_SUBSCRIPTIONS
+          value: "ad-page-views-v1"
+        envFrom:
+        - configMapRef:
+            name: nats-client-config
+        - secretRef:
+            name: nats-credentials-adservice
+        volumeMounts:
+        - name: nats-ca
+          mountPath: /etc/nats-ca
+          readOnly: true
+        resources:
+          requests:
+            cpu: 200m
+            memory: 180Mi
+          limits:
+            cpu: 300m
+            memory: 300Mi
+        readinessProbe:
+          initialDelaySeconds: 20
+          periodSeconds: 15
+          httpGet:
+            path: /readyz
+            port: health
+        livenessProbe:
+          initialDelaySeconds: 20
+          periodSeconds: 15
+          httpGet:
+            path: /healthz
+            port: health
+      volumes:
+      - name: nats-ca
+        configMap:
+          name: nats-ca
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: adservice
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cartservice
+  labels:
+    app: cartservice
+spec:
+  selector:
+    matchLabels:
+      app: cartservice
+  template:
+    metadata:
+      labels:
+        app: cartservice
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: /metrics
+    spec:
+      serviceAccountName: cartservice
+      terminationGracePeriodSeconds: 35
+      securityContext:
+        fsGroup: 1000
+        runAsGroup: 1000
+        runAsNonRoot: true
+        runAsUser: 1000
+      containers:
+      - name: server
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+              - ALL
+          privileged: false
+          readOnlyRootFilesystem: true
+        image: matslo123/cartservice:phase6-20260719-1
+        ports:
+        - name: health
+          containerPort: 8080
+        env:
+        - name: REDIS_ADDR
+          value: "redis-cart:6379"
+        - name: NATS_REQUIRED
+          value: "true"
+        - name: NATS_REQUIRED_SUBSCRIPTIONS
+          value: "cart-commands-v1"
+        envFrom:
+        - configMapRef:
+            name: nats-client-config
+        - secretRef:
+            name: nats-credentials-cartservice
+        volumeMounts:
+        - name: nats-ca
+          mountPath: /etc/nats-ca
+          readOnly: true
+        resources:
+          requests:
+            cpu: 200m
+            memory: 64Mi
+          limits:
+            cpu: 300m
+            memory: 128Mi
+        readinessProbe:
+          initialDelaySeconds: 15
+          httpGet:
+            path: /readyz
+            port: health
+        livenessProbe:
+          initialDelaySeconds: 15
+          periodSeconds: 10
+          httpGet:
+            path: /healthz
+            port: health
+      volumes:
+      - name: nats-ca
+        configMap:
+          name: nats-ca
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cartservice
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis-cart
+  labels:
+    app: redis-cart
+spec:
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: redis-cart
+  template:
+    metadata:
+      labels:
+        app: redis-cart
+    spec:
+      securityContext:
+        fsGroup: 1000
+        runAsGroup: 1000
+        runAsNonRoot: true
+        runAsUser: 1000
+      initContainers:
+      - name: volume-permissions
+        image: redis:alpine
+        # The Redis process already owns files it creates. Only the newly
+        # provisioned volume root needs ownership repaired.
+        command: ["sh", "-c", "chown 1000:1000 /data"]
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+            add: ["CHOWN"]
+          readOnlyRootFilesystem: true
+          runAsNonRoot: false
+          runAsUser: 0
+        volumeMounts:
+        - mountPath: /data
+          name: redis-data
+        resources:
+          requests:
+            cpu: 5m
+            memory: 8Mi
+          limits:
+            cpu: 50m
+            memory: 32Mi
+      containers:
+      - name: redis
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+              - ALL
+          privileged: false
+          readOnlyRootFilesystem: true
+        image: redis:alpine
+        args: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
+        ports:
+        - containerPort: 6379
+        readinessProbe:
+          periodSeconds: 5
+          exec:
+            command: ["redis-cli", "ping"]
+        livenessProbe:
+          periodSeconds: 5
+          exec:
+            command: ["redis-cli", "ping"]
+        volumeMounts:
+        - mountPath: /data
+          name: redis-data
+        resources:
+          limits:
+            memory: 256Mi
+            cpu: 125m
+          requests:
+            cpu: 70m
+            memory: 200Mi
+      volumes:
+      - name: redis-data
+        persistentVolumeClaim:
+          claimName: redis-cart-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-cart
+  labels:
+    app: redis-cart
+spec:
+  type: ClusterIP
+  selector:
+    app: redis-cart
+  ports:
+  - name: tcp-redis
+    port: 6379
+    targetPort: 6379
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: redis-cart-data
+  labels:
+    app: redis-cart
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: checkoutservice
+  labels:
+    app: checkoutservice
+spec:
+  # The local state/outbox store has one writer. Never overlap replicas during
+  # an update, even though a same-node RWO volume can be mounted by both pods.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: checkoutservice
+  template:
+    metadata:
+      labels:
+        app: checkoutservice
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: /metrics
+    spec:
+      serviceAccountName: checkoutservice
+      terminationGracePeriodSeconds: 35
+      securityContext:
+        fsGroup: 1000
+        runAsGroup: 1000
+        runAsNonRoot: true
+        runAsUser: 1000
+      initContainers:
+        - name: volume-permissions
+          image: busybox:1.37.0
+          command: ["sh", "-ec", "chown 1000:1000 /data"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+              add: ["CHOWN"]
+            readOnlyRootFilesystem: true
+            runAsNonRoot: false
+            runAsUser: 0
+          volumeMounts:
+            - name: checkout-data
+              mountPath: /data
+          resources:
+            requests:
+              cpu: 5m
+              memory: 8Mi
+            limits:
+              cpu: 50m
+              memory: 32Mi
+      containers:
+        - name: server
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            privileged: false
+            readOnlyRootFilesystem: true
+          image: matslo123/checkoutservice:phase6-20260719-1
+          ports:
+          - name: health
+            containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            periodSeconds: 5
+            failureThreshold: 180
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+          env:
+          - name: PORT
+            value: "8080"
+          - name: NATS_REQUIRED
+            value: "true"
+          - name: NATS_REQUIRED_SUBSCRIPTIONS
+            value: "checkout-catalog-v1,checkout-currency-v1,checkout-cart-v1,checkout-order-commands-v1,checkout-saga-shipping-v1,checkout-saga-payment-v1"
+          - name: CHECKOUT_STORE_PATH
+            value: /var/lib/checkout/sagas.json
+          - name: CHECKOUT_SAGA_STEP_TIMEOUT
+            value: 30s
+          - name: CHECKOUT_PROJECTION_CATCHUP_TIMEOUT
+            value: 10m
+          envFrom:
+          - configMapRef:
+              name: nats-client-config
+          - secretRef:
+              name: nats-credentials-checkoutservice
+          volumeMounts:
+          - name: nats-ca
+            mountPath: /etc/nats-ca
+            readOnly: true
+          - name: checkout-data
+            mountPath: /var/lib/checkout
+          resources:
+            requests:
+              cpu: 100m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+      volumes:
+      - name: nats-ca
+        configMap:
+          name: nats-ca
+      - name: checkout-data
+        persistentVolumeClaim:
+          claimName: checkout-data
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: checkoutservice
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: checkout-data
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: currencyservice
+  labels:
+    app: currencyservice
+spec:
+  selector:
+    matchLabels:
+      app: currencyservice
+  template:
+    metadata:
+      labels:
+        app: currencyservice
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: /metrics
+    spec:
+      serviceAccountName: currencyservice
+      terminationGracePeriodSeconds: 35
+      securityContext:
+        fsGroup: 1000
+        runAsGroup: 1000
+        runAsNonRoot: true
+        runAsUser: 1000
+      containers:
+      - name: server
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+              - ALL
+          privileged: false
+          readOnlyRootFilesystem: true
+        image: matslo123/currencyservice:phase6-20260719-1
+        ports:
+        - name: health
+          containerPort: 8080
+        env:
+        - name: PORT
+          value: "8080"
+        - name: DISABLE_PROFILER
+          value: "1"
+        - name: NATS_REQUIRED
+          value: "true"
+        envFrom:
+        - configMapRef:
+            name: nats-client-config
+        - secretRef:
+            name: nats-credentials-currencyservice
+        volumeMounts:
+        - name: nats-ca
+          mountPath: /etc/nats-ca
+          readOnly: true
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: health
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: health
+        resources:
+          requests:
+            cpu: 100m
+            memory: 64Mi
+          limits:
+            cpu: 200m
+            memory: 128Mi
+      volumes:
+      - name: nats-ca
+        configMap:
+          name: nats-ca
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: currencyservice
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: emailservice
+  labels:
+    app: emailservice
+spec:
+  # Notification outcomes are persisted by a single writer.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: emailservice
+  template:
+    metadata:
+      labels:
+        app: emailservice
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: /metrics
+    spec:
+      serviceAccountName: emailservice
+      terminationGracePeriodSeconds: 35
+      securityContext:
+        fsGroup: 1000
+        runAsGroup: 1000
+        runAsNonRoot: true
+        runAsUser: 1000
+      initContainers:
+      - name: volume-permissions
+        image: busybox:1.37.0
+        command: ["sh", "-ec", "chown 1000:1000 /data"]
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+            add: ["CHOWN"]
+          readOnlyRootFilesystem: true
+          runAsNonRoot: false
+          runAsUser: 0
+        volumeMounts:
+        - name: email-data
+          mountPath: /data
+        resources:
+          requests:
+            cpu: 5m
+            memory: 8Mi
+          limits:
+            cpu: 50m
+            memory: 32Mi
+      containers:
+      - name: server
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+              - ALL
+          privileged: false
+          readOnlyRootFilesystem: true
+        image: matslo123/emailservice:phase6-20260719-1
+        ports:
+        - name: health
+          containerPort: 8080
+        env:
+        - name: PORT
+          value: "8080"
+        - name: NATS_REQUIRED
+          value: "true"
+        - name: NATS_REQUIRED_SUBSCRIPTIONS
+          value: "email-order-completed-v1"
+        - name: EMAIL_STORE_PATH
+          value: /var/lib/email/inbox.json
+        envFrom:
+        - configMapRef:
+            name: nats-client-config
+        - secretRef:
+            name: nats-credentials-emailservice
+        volumeMounts:
+        - name: nats-ca
+          mountPath: /etc/nats-ca
+          readOnly: true
+        - name: email-data
+          mountPath: /var/lib/email
+        readinessProbe:
+          periodSeconds: 5
+          httpGet:
+            path: /readyz
+            port: health
+        livenessProbe:
+          periodSeconds: 5
+          httpGet:
+            path: /healthz
+            port: health
+        resources:
+          requests:
+            cpu: 100m
+            memory: 64Mi
+          limits:
+            cpu: 200m
+            memory: 128Mi
+      volumes:
+      - name: nats-ca
+        configMap:
+          name: nats-ca
+      - name: email-data
+        persistentVolumeClaim:
+          claimName: email-data
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: emailservice
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: email-data
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
   name: frontend
   labels:
     app: frontend
@@ -34,13 +647,59 @@ spec:
         app: frontend
       annotations:
         sidecar.istio.io/rewriteAppHTTPProbers: "true"
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: /metrics
     spec:
       serviceAccountName: frontend
+      terminationGracePeriodSeconds: 35
       securityContext:
         fsGroup: 1000
         runAsGroup: 1000
         runAsNonRoot: true
         runAsUser: 1000
+      initContainers:
+      - name: wait-for-storefront-projection
+        image: natsio/nats-box:0.19.7-nonroot
+        command:
+        - sh
+        - -ec
+        - |
+          for attempt in $(seq 1 60); do
+            response="$(nats --server="${NATS_URL}" --user="${NATS_USER}" --password="${NATS_PASSWORD}" --tlsca=/etc/nats-ca/ca.crt --timeout=2s request boutique.qry.storefront.home.v1 '{"currency_code":"USD"}' 2>/dev/null || true)"
+            case "${response}" in
+              *'"products"'*)
+                echo "storefront projection contains the initial catalog and currency snapshots"
+                exit 0
+                ;;
+            esac
+            echo "waiting for initial storefront projection (${attempt}/60)"
+            sleep 2
+          done
+          echo "storefront projection did not initialize within two minutes" >&2
+          exit 1
+        envFrom:
+        - configMapRef:
+            name: nats-client-config
+        - secretRef:
+            name: nats-credentials-frontend
+        resources:
+          requests:
+            cpu: 20m
+            memory: 32Mi
+          limits:
+            cpu: 100m
+            memory: 128Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+        volumeMounts:
+        - name: nats-ca
+          mountPath: /etc/nats-ca
+          readOnly: true
       containers:
         - name: server
           securityContext:
@@ -50,13 +709,14 @@ spec:
                 - ALL
             privileged: false
             readOnlyRootFilesystem: true
-          image: us-central1-docker.pkg.dev/online-boutique-ci/microservices-demo/frontend:v0.10.6
+          image: matslo123/frontend:phase6-20260719-1
           ports:
           - containerPort: 8080
           readinessProbe:
             initialDelaySeconds: 10
+            timeoutSeconds: 3
             httpGet:
-              path: "/_healthz"
+              path: "/_readyz"
               port: 8080
               httpHeaders:
               - name: "Cookie"
@@ -72,22 +732,12 @@ spec:
           env:
           - name: PORT
             value: "8080"
-          - name: PRODUCT_CATALOG_SERVICE_ADDR
-            value: "productcatalogservice:3550"
-          - name: CURRENCY_SERVICE_ADDR
-            value: "currencyservice:7000"
-          - name: CART_SERVICE_ADDR
-            value: "cartservice:7070"
-          - name: RECOMMENDATION_SERVICE_ADDR
-            value: "recommendationservice:8080"
-          - name: SHIPPING_SERVICE_ADDR
-            value: "shippingservice:50051"
-          - name: CHECKOUT_SERVICE_ADDR
-            value: "checkoutservice:5050"
-          - name: AD_SERVICE_ADDR
-            value: "adservice:9555"
-          - name: SHOPPING_ASSISTANT_SERVICE_ADDR
-            value: "shoppingassistantservice:80"
+          - name: NATS_REQUIRED
+            value: "true"
+          - name: NATS_REQUIRED_SUBSCRIPTIONS
+            value: "boutique.qry.storefront.home.v1,boutique.qry.storefront.product.v1,boutique.qry.storefront.cart.v1,boutique.qry.storefront.currencies.v1,boutique.qry.storefront.product-meta.v1,boutique.qry.storefront.operation.v1,boutique.qry.storefront.order.v1,boutique.qry.payment.tokenize.v1"
+          - name: CART_OPERATION_WAIT_TIMEOUT
+            value: "750ms"
           # # ENV_PLATFORM: One of: local, gcp, aws, azure, onprem, alibaba
           # # When not set, defaults to "local" unless running in GKE, otherwies auto-sets to gcp
           # - name: ENV_PLATFORM
@@ -100,9 +750,15 @@ spec:
           #   value: "true"
           # - name: FRONTEND_MESSAGE
           #   value: "Replace this with a message you want to display on all pages."
-          # As part of an optional Google Cloud demo, you can run an optional microservice called the "packaging service".
-          # - name: PACKAGING_SERVICE_URL
-          #   value: "" # This value would look like "http://123.123.123"
+          envFrom:
+          - configMapRef:
+              name: nats-client-config
+          - secretRef:
+              name: nats-credentials-frontend
+          volumeMounts:
+          - name: nats-ca
+            mountPath: /etc/nats-ca
+            readOnly: true
           resources:
             requests:
               cpu: 100m
@@ -110,6 +766,10 @@ spec:
             limits:
               cpu: 200m
               memory: 128Mi
+      volumes:
+      - name: nats-ca
+        configMap:
+          name: nats-ca
 ---
 apiVersion: v1
 kind: Service
@@ -145,298 +805,6 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: frontend
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: adservice
-  labels:
-    app: adservice
-spec:
-  selector:
-    matchLabels:
-      app: adservice
-  template:
-    metadata:
-      labels:
-        app: adservice
-    spec:
-      serviceAccountName: adservice
-      terminationGracePeriodSeconds: 5
-      securityContext:
-        fsGroup: 1000
-        runAsGroup: 1000
-        runAsNonRoot: true
-        runAsUser: 1000
-      containers:
-      - name: server
-        securityContext:
-          allowPrivilegeEscalation: false
-          capabilities:
-            drop:
-              - ALL
-          privileged: false
-          readOnlyRootFilesystem: true
-        image: us-central1-docker.pkg.dev/online-boutique-ci/microservices-demo/adservice:v0.10.6
-        ports:
-        - containerPort: 9555
-        env:
-        - name: PORT
-          value: "9555"
-        resources:
-          requests:
-            cpu: 200m
-            memory: 180Mi
-          limits:
-            cpu: 300m
-            memory: 300Mi
-        readinessProbe:
-          initialDelaySeconds: 20
-          periodSeconds: 15
-          grpc:
-            port: 9555
-        livenessProbe:
-          initialDelaySeconds: 20
-          periodSeconds: 15
-          grpc:
-            port: 9555
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: adservice
-  labels:
-    app: adservice
-spec:
-  type: ClusterIP
-  selector:
-    app: adservice
-  ports:
-  - name: grpc
-    port: 9555
-    targetPort: 9555
----
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: adservice
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: currencyservice
-  labels:
-    app: currencyservice
-spec:
-  selector:
-    matchLabels:
-      app: currencyservice
-  template:
-    metadata:
-      labels:
-        app: currencyservice
-    spec:
-      serviceAccountName: currencyservice
-      terminationGracePeriodSeconds: 5
-      securityContext:
-        fsGroup: 1000
-        runAsGroup: 1000
-        runAsNonRoot: true
-        runAsUser: 1000
-      containers:
-      - name: server
-        securityContext:
-          allowPrivilegeEscalation: false
-          capabilities:
-            drop:
-              - ALL
-          privileged: false
-          readOnlyRootFilesystem: true
-        image: us-central1-docker.pkg.dev/online-boutique-ci/microservices-demo/currencyservice:v0.10.6
-        ports:
-        - name: grpc
-          containerPort: 7000
-        env:
-        - name: PORT
-          value: "7000"
-        - name: DISABLE_PROFILER
-          value: "1"
-        readinessProbe:
-          grpc:
-            port: 7000
-        livenessProbe:
-          grpc:
-            port: 7000
-        resources:
-          requests:
-            cpu: 100m
-            memory: 64Mi
-          limits:
-            cpu: 200m
-            memory: 128Mi
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: currencyservice
-  labels:
-    app: currencyservice
-spec:
-  type: ClusterIP
-  selector:
-    app: currencyservice
-  ports:
-  - name: grpc
-    port: 7000
-    targetPort: 7000
----
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: currencyservice
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: cartservice
-  labels:
-    app: cartservice
-spec:
-  selector:
-    matchLabels:
-      app: cartservice
-  template:
-    metadata:
-      labels:
-        app: cartservice
-    spec:
-      serviceAccountName: cartservice
-      terminationGracePeriodSeconds: 5
-      securityContext:
-        fsGroup: 1000
-        runAsGroup: 1000
-        runAsNonRoot: true
-        runAsUser: 1000
-      containers:
-      - name: server
-        securityContext:
-          allowPrivilegeEscalation: false
-          capabilities:
-            drop:
-              - ALL
-          privileged: false
-          readOnlyRootFilesystem: true
-        image: us-central1-docker.pkg.dev/online-boutique-ci/microservices-demo/cartservice:v0.10.6
-        ports:
-        - containerPort: 7070
-        env:
-        - name: REDIS_ADDR
-          value: "redis-cart:6379"
-        resources:
-          requests:
-            cpu: 200m
-            memory: 64Mi
-          limits:
-            cpu: 300m
-            memory: 128Mi
-        readinessProbe:
-          initialDelaySeconds: 15
-          grpc:
-            port: 7070
-        livenessProbe:
-          initialDelaySeconds: 15
-          periodSeconds: 10
-          grpc:
-            port: 7070
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: cartservice
-  labels:
-    app: cartservice
-spec:
-  type: ClusterIP
-  selector:
-    app: cartservice
-  ports:
-  - name: grpc
-    port: 7070
-    targetPort: 7070
----
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: cartservice
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: redis-cart
-  labels:
-    app: redis-cart
-spec:
-  selector:
-    matchLabels:
-      app: redis-cart
-  template:
-    metadata:
-      labels:
-        app: redis-cart
-    spec:
-      securityContext:
-        fsGroup: 1000
-        runAsGroup: 1000
-        runAsNonRoot: true
-        runAsUser: 1000
-      containers:
-      - name: redis
-        securityContext:
-          allowPrivilegeEscalation: false
-          capabilities:
-            drop:
-              - ALL
-          privileged: false
-          readOnlyRootFilesystem: true
-        image: redis:alpine
-        ports:
-        - containerPort: 6379
-        readinessProbe:
-          periodSeconds: 5
-          tcpSocket:
-            port: 6379
-        livenessProbe:
-          periodSeconds: 5
-          tcpSocket:
-            port: 6379
-        volumeMounts:
-        - mountPath: /data
-          name: redis-data
-        resources:
-          limits:
-            memory: 256Mi
-            cpu: 125m
-          requests:
-            cpu: 70m
-            memory: 200Mi
-      volumes:
-      - name: redis-data
-        emptyDir: {}
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: redis-cart
-  labels:
-    app: redis-cart
-spec:
-  type: ClusterIP
-  selector:
-    app: redis-cart
-  ports:
-  - name: tcp-redis
-    port: 6379
-    targetPort: 6379
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -504,7 +872,7 @@ spec:
               - ALL
           privileged: false
           readOnlyRootFilesystem: true
-        image: us-central1-docker.pkg.dev/online-boutique-ci/microservices-demo/loadgenerator:v0.10.6
+        image: matslo123/loadgenerator:phase6-20260719-1
         env:
         - name: FRONTEND_ADDR
           value: "frontend:80"
@@ -525,6 +893,383 @@ kind: ServiceAccount
 metadata:
   name: loadgenerator
 ---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress", "Egress"]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: application-health-and-nats
+spec:
+  podSelector:
+    matchExpressions:
+    - key: app
+      operator: In
+      values:
+      - adservice
+      - cartservice
+      - checkoutservice
+      - currencyservice
+      - emailservice
+      - frontend
+      - paymentservice
+      - productcatalogservice
+      - recommendationservice
+      - shippingservice
+      - storefrontprojectionservice
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+  # Kubelet probes and Prometheus may originate outside the workload namespace.
+  # Port 8080 exposes only HTTP health/metrics on domain workers; frontend is
+  # intentionally the sole business HTTP boundary on the same port.
+  - ports:
+    - protocol: TCP
+      port: 8080
+  egress:
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: nats
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: nats
+    ports:
+    - protocol: TCP
+      port: 4222
+  - to:
+    - podSelector:
+        matchLabels:
+          app: opentelemetrycollector
+    ports:
+    - protocol: TCP
+      port: 4317
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: telemetry-collector
+spec:
+  podSelector:
+    matchLabels:
+      app: opentelemetrycollector
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+  - from:
+    - podSelector:
+        matchExpressions:
+        - key: app
+          operator: Exists
+    ports:
+    - protocol: TCP
+      port: 4317
+  egress:
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+  - to:
+    - ipBlock:
+        cidr: 0.0.0.0/0
+    ports:
+    - protocol: TCP
+      port: 443
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: cart-to-redis
+spec:
+  podSelector:
+    matchLabels:
+      app: cartservice
+  policyTypes: ["Egress"]
+  egress:
+  - to:
+    - podSelector:
+        matchLabels:
+          app: redis-cart
+    ports:
+    - protocol: TCP
+      port: 6379
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: redis-from-cart
+spec:
+  podSelector:
+    matchLabels:
+      app: redis-cart
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app: cartservice
+    ports:
+    - protocol: TCP
+      port: 6379
+  egress: []
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: loadgenerator-to-frontend
+spec:
+  podSelector:
+    matchLabels:
+      app: loadgenerator
+  policyTypes: ["Egress"]
+  egress:
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+  - to:
+    - podSelector:
+        matchLabels:
+          app: frontend
+    ports:
+    - protocol: TCP
+      port: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: paymentservice
+  labels:
+    app: paymentservice
+spec:
+  # Provider outcomes are persisted by a single writer.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: paymentservice
+  template:
+    metadata:
+      labels:
+        app: paymentservice
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: /metrics
+    spec:
+      serviceAccountName: paymentservice
+      terminationGracePeriodSeconds: 35
+      securityContext:
+        fsGroup: 1000
+        runAsGroup: 1000
+        runAsNonRoot: true
+        runAsUser: 1000
+      initContainers:
+      - name: volume-permissions
+        image: busybox:1.37.0
+        command: ["sh", "-ec", "chown 1000:1000 /data"]
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+            add: ["CHOWN"]
+          readOnlyRootFilesystem: true
+          runAsNonRoot: false
+          runAsUser: 0
+        volumeMounts:
+        - name: payment-data
+          mountPath: /data
+        resources:
+          requests:
+            cpu: 5m
+            memory: 8Mi
+          limits:
+            cpu: 50m
+            memory: 32Mi
+      containers:
+      - name: server
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+              - ALL
+          privileged: false
+          readOnlyRootFilesystem: true
+        image: matslo123/paymentservice:phase6-20260719-1
+        ports:
+        - name: health
+          containerPort: 8080
+        env:
+        - name: PORT
+          value: "8080"
+        - name: DISABLE_PROFILER
+          value: "1"
+        - name: NATS_REQUIRED
+          value: "true"
+        - name: NATS_REQUIRED_SUBSCRIPTIONS
+          value: "boutique.qry.payment.tokenize.v1,payment-commands-v1"
+        - name: PAYMENT_STORE_PATH
+          value: /var/lib/payment/provider-state.json
+        envFrom:
+        - configMapRef:
+            name: nats-client-config
+        - secretRef:
+            name: nats-credentials-paymentservice
+        volumeMounts:
+        - name: nats-ca
+          mountPath: /etc/nats-ca
+          readOnly: true
+        - name: payment-data
+          mountPath: /var/lib/payment
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: health
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: health
+        resources:
+          requests:
+            cpu: 100m
+            memory: 64Mi
+          limits:
+            cpu: 200m
+            memory: 128Mi
+      volumes:
+      - name: nats-ca
+        configMap:
+          name: nats-ca
+      - name: payment-data
+        persistentVolumeClaim:
+          claimName: payment-data
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: paymentservice
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: payment-data
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: productcatalogservice
+  labels:
+    app: productcatalogservice
+spec:
+  selector:
+    matchLabels:
+      app: productcatalogservice
+  template:
+    metadata:
+      labels:
+        app: productcatalogservice
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: /metrics
+    spec:
+      serviceAccountName: productcatalogservice
+      terminationGracePeriodSeconds: 35
+      securityContext:
+        fsGroup: 1000
+        runAsGroup: 1000
+        runAsNonRoot: true
+        runAsUser: 1000
+      containers:
+      - name: server
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+              - ALL
+          privileged: false
+          readOnlyRootFilesystem: true
+        image: matslo123/productcatalogservice:phase6-20260719-1
+        ports:
+        - name: health
+          containerPort: 8080
+        env:
+        - name: PORT
+          value: "8080"
+        - name: DISABLE_PROFILER
+          value: "1"
+        - name: NATS_REQUIRED
+          value: "true"
+        envFrom:
+        - configMapRef:
+            name: nats-client-config
+        - secretRef:
+            name: nats-credentials-productcatalogservice
+        volumeMounts:
+        - name: nats-ca
+          mountPath: /etc/nats-ca
+          readOnly: true
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: health
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: health
+        resources:
+          requests:
+            cpu: 100m
+            memory: 64Mi
+          limits:
+            cpu: 200m
+            memory: 128Mi
+      volumes:
+      - name: nats-ca
+        configMap:
+          name: nats-ca
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: productcatalogservice
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -539,6 +1284,10 @@ spec:
     metadata:
       labels:
         app: recommendationservice
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: /metrics
     spec:
       serviceAccountName: recommendationservice
       terminationGracePeriodSeconds: 5
@@ -556,24 +1305,38 @@ spec:
               - ALL
           privileged: false
           readOnlyRootFilesystem: true
-        image: us-central1-docker.pkg.dev/online-boutique-ci/microservices-demo/recommendationservice:v0.10.6
+        image: matslo123/recommendationservice:phase6-20260719-1
         ports:
-        - containerPort: 8080
+        - name: health
+          containerPort: 8080
         readinessProbe:
           periodSeconds: 5
-          grpc:
-            port: 8080
+          httpGet:
+            path: /readyz
+            port: health
         livenessProbe:
           periodSeconds: 5
-          grpc:
-            port: 8080
+          httpGet:
+            path: /healthz
+            port: health
         env:
         - name: PORT
           value: "8080"
-        - name: PRODUCT_CATALOG_SERVICE_ADDR
-          value: "productcatalogservice:3550"
         - name: DISABLE_PROFILER
           value: "1"
+        - name: NATS_REQUIRED
+          value: "true"
+        - name: NATS_REQUIRED_SUBSCRIPTIONS
+          value: "recommendation-catalog-v1,recommendation-cart-v1,recommendation-page-views-v1"
+        envFrom:
+        - configMapRef:
+            name: nats-client-config
+        - secretRef:
+            name: nats-credentials-recommendationservice
+        volumeMounts:
+        - name: nats-ca
+          mountPath: /etc/nats-ca
+          readOnly: true
         resources:
           requests:
             cpu: 100m
@@ -581,256 +1344,15 @@ spec:
           limits:
             cpu: 200m
             memory: 450Mi
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: recommendationservice
-  labels:
-    app: recommendationservice
-spec:
-  type: ClusterIP
-  selector:
-    app: recommendationservice
-  ports:
-  - name: grpc
-    port: 8080
-    targetPort: 8080
+      volumes:
+      - name: nats-ca
+        configMap:
+          name: nats-ca
 ---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: recommendationservice
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: checkoutservice
-  labels:
-    app: checkoutservice
-spec:
-  selector:
-    matchLabels:
-      app: checkoutservice
-  template:
-    metadata:
-      labels:
-        app: checkoutservice
-    spec:
-      serviceAccountName: checkoutservice
-      securityContext:
-        fsGroup: 1000
-        runAsGroup: 1000
-        runAsNonRoot: true
-        runAsUser: 1000
-      containers:
-        - name: server
-          securityContext:
-            allowPrivilegeEscalation: false
-            capabilities:
-              drop:
-                - ALL
-            privileged: false
-            readOnlyRootFilesystem: true
-          image: us-central1-docker.pkg.dev/online-boutique-ci/microservices-demo/checkoutservice:v0.10.6
-          ports:
-          - containerPort: 5050
-          readinessProbe:
-            grpc:
-              port: 5050
-          livenessProbe:
-            grpc:
-              port: 5050
-          env:
-          - name: PORT
-            value: "5050"
-          - name: PRODUCT_CATALOG_SERVICE_ADDR
-            value: "productcatalogservice:3550"
-          - name: SHIPPING_SERVICE_ADDR
-            value: "shippingservice:50051"
-          - name: PAYMENT_SERVICE_ADDR
-            value: "paymentservice:50051"
-          - name: EMAIL_SERVICE_ADDR
-            value: "emailservice:5000"
-          - name: CURRENCY_SERVICE_ADDR
-            value: "currencyservice:7000"
-          - name: CART_SERVICE_ADDR
-            value: "cartservice:7070"
-          resources:
-            requests:
-              cpu: 100m
-              memory: 64Mi
-            limits:
-              cpu: 200m
-              memory: 128Mi
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: checkoutservice
-  labels:
-    app: checkoutservice
-spec:
-  type: ClusterIP
-  selector:
-    app: checkoutservice
-  ports:
-  - name: grpc
-    port: 5050
-    targetPort: 5050
----
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: checkoutservice
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: emailservice
-  labels:
-    app: emailservice
-spec:
-  selector:
-    matchLabels:
-      app: emailservice
-  template:
-    metadata:
-      labels:
-        app: emailservice
-    spec:
-      serviceAccountName: emailservice
-      terminationGracePeriodSeconds: 5
-      securityContext:
-        fsGroup: 1000
-        runAsGroup: 1000
-        runAsNonRoot: true
-        runAsUser: 1000
-      containers:
-      - name: server
-        securityContext:
-          allowPrivilegeEscalation: false
-          capabilities:
-            drop:
-              - ALL
-          privileged: false
-          readOnlyRootFilesystem: true
-        image: us-central1-docker.pkg.dev/online-boutique-ci/microservices-demo/emailservice:v0.10.6
-        ports:
-        - containerPort: 8080
-        env:
-        - name: PORT
-          value: "8080"
-        - name: DISABLE_PROFILER
-          value: "1"
-        readinessProbe:
-          periodSeconds: 5
-          grpc:
-            port: 8080
-        livenessProbe:
-          periodSeconds: 5
-          grpc:
-            port: 8080
-        resources:
-          requests:
-            cpu: 100m
-            memory: 64Mi
-          limits:
-            cpu: 200m
-            memory: 128Mi
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: emailservice
-  labels:
-    app: emailservice
-spec:
-  type: ClusterIP
-  selector:
-    app: emailservice
-  ports:
-  - name: grpc
-    port: 5000
-    targetPort: 8080
----
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: emailservice
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: paymentservice
-  labels:
-    app: paymentservice
-spec:
-  selector:
-    matchLabels:
-      app: paymentservice
-  template:
-    metadata:
-      labels:
-        app: paymentservice
-    spec:
-      serviceAccountName: paymentservice
-      terminationGracePeriodSeconds: 5
-      securityContext:
-        fsGroup: 1000
-        runAsGroup: 1000
-        runAsNonRoot: true
-        runAsUser: 1000
-      containers:
-      - name: server
-        securityContext:
-          allowPrivilegeEscalation: false
-          capabilities:
-            drop:
-              - ALL
-          privileged: false
-          readOnlyRootFilesystem: true
-        image: us-central1-docker.pkg.dev/online-boutique-ci/microservices-demo/paymentservice:v0.10.6
-        ports:
-        - containerPort: 50051
-        env:
-        - name: PORT
-          value: "50051"
-        - name: DISABLE_PROFILER
-          value: "1"
-        readinessProbe:
-          grpc:
-            port: 50051
-        livenessProbe:
-          grpc:
-            port: 50051
-        resources:
-          requests:
-            cpu: 100m
-            memory: 64Mi
-          limits:
-            cpu: 200m
-            memory: 128Mi
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: paymentservice
-  labels:
-    app: paymentservice
-spec:
-  type: ClusterIP
-  selector:
-    app: paymentservice
-  ports:
-  - name: grpc
-    port: 50051
-    targetPort: 50051
----
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: paymentservice
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -839,6 +1361,9 @@ metadata:
   labels:
     app: shippingservice
 spec:
+  # Provider outcomes are persisted by a single writer.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: shippingservice
@@ -846,13 +1371,40 @@ spec:
     metadata:
       labels:
         app: shippingservice
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: /metrics
     spec:
       serviceAccountName: shippingservice
+      terminationGracePeriodSeconds: 35
       securityContext:
         fsGroup: 1000
         runAsGroup: 1000
         runAsNonRoot: true
         runAsUser: 1000
+      initContainers:
+      - name: volume-permissions
+        image: busybox:1.37.0
+        command: ["sh", "-ec", "chown 1000:1000 /data"]
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+            add: ["CHOWN"]
+          readOnlyRootFilesystem: true
+          runAsNonRoot: false
+          runAsUser: 0
+        volumeMounts:
+        - name: shipping-data
+          mountPath: /data
+        resources:
+          requests:
+            cpu: 5m
+            memory: 8Mi
+          limits:
+            cpu: 50m
+            memory: 32Mi
       containers:
       - name: server
         securityContext:
@@ -862,21 +1414,41 @@ spec:
               - ALL
           privileged: false
           readOnlyRootFilesystem: true
-        image: us-central1-docker.pkg.dev/online-boutique-ci/microservices-demo/shippingservice:v0.10.6
+        image: matslo123/shippingservice:phase6-20260719-1
         ports:
-        - containerPort: 50051
+        - name: health
+          containerPort: 8080
         env:
         - name: PORT
-          value: "50051"
+          value: "8080"
         - name: DISABLE_PROFILER
           value: "1"
+        - name: NATS_REQUIRED
+          value: "true"
+        - name: NATS_REQUIRED_SUBSCRIPTIONS
+          value: "shipping-cart-quotes-v1,shipping-commands-v1"
+        - name: SHIPPING_STORE_PATH
+          value: /var/lib/shipping/provider-state.json
+        envFrom:
+        - configMapRef:
+            name: nats-client-config
+        - secretRef:
+            name: nats-credentials-shippingservice
+        volumeMounts:
+        - name: nats-ca
+          mountPath: /etc/nats-ca
+          readOnly: true
+        - name: shipping-data
+          mountPath: /var/lib/shipping
         readinessProbe:
           periodSeconds: 5
-          grpc:
-            port: 50051
+          httpGet:
+            path: /readyz
+            port: health
         livenessProbe:
-          grpc:
-            port: 50051
+          httpGet:
+            path: /healthz
+            port: health
         resources:
           requests:
             cpu: 100m
@@ -884,44 +1456,51 @@ spec:
           limits:
             cpu: 200m
             memory: 128Mi
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: shippingservice
-  labels:
-    app: shippingservice
-spec:
-  type: ClusterIP
-  selector:
-    app: shippingservice
-  ports:
-  - name: grpc
-    port: 50051
-    targetPort: 50051
+      volumes:
+      - name: nats-ca
+        configMap:
+          name: nats-ca
+      - name: shipping-data
+        persistentVolumeClaim:
+          claimName: shipping-data
 ---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: shippingservice
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: shipping-data
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 1Gi
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: productcatalogservice
+  name: storefrontprojectionservice
   labels:
-    app: productcatalogservice
+    app: storefrontprojectionservice
 spec:
+  replicas: 1
   selector:
     matchLabels:
-      app: productcatalogservice
+      app: storefrontprojectionservice
   template:
     metadata:
       labels:
-        app: productcatalogservice
+        app: storefrontprojectionservice
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: /metrics
     spec:
-      serviceAccountName: productcatalogservice
-      terminationGracePeriodSeconds: 5
+      serviceAccountName: storefrontprojectionservice
+      terminationGracePeriodSeconds: 35
       securityContext:
         fsGroup: 1000
         runAsGroup: 1000
@@ -929,52 +1508,53 @@ spec:
         runAsUser: 1000
       containers:
       - name: server
+        image: matslo123/storefrontprojectionservice:phase6-20260719-1
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:
-            drop:
-              - ALL
-          privileged: false
+            drop: ["ALL"]
           readOnlyRootFilesystem: true
-        image: us-central1-docker.pkg.dev/online-boutique-ci/microservices-demo/productcatalogservice:v0.10.6
         ports:
-        - containerPort: 3550
+        - name: http
+          containerPort: 8080
         env:
-        - name: PORT
-          value: "3550"
-        - name: DISABLE_PROFILER
-          value: "1"
+        - name: NATS_REQUIRED
+          value: "true"
+        - name: NATS_REQUIRED_SUBSCRIPTIONS
+          value: "storefront-projection-v1,boutique.qry.storefront.home.v1,boutique.qry.storefront.product.v1,boutique.qry.storefront.cart.v1,boutique.qry.storefront.currencies.v1,boutique.qry.storefront.product-meta.v1,boutique.qry.storefront.operation.v1,boutique.qry.storefront.order.v1"
+        envFrom:
+        - configMapRef:
+            name: nats-client-config
+        - secretRef:
+            name: nats-credentials-storefrontprojectionservice
+        volumeMounts:
+        - name: nats-ca
+          mountPath: /etc/nats-ca
+          readOnly: true
         readinessProbe:
-          grpc:
-            port: 3550
+          httpGet:
+            path: /readyz
+            port: 8080
+          periodSeconds: 5
         livenessProbe:
-          grpc:
-            port: 3550
+          httpGet:
+            path: /healthz
+            port: 8080
+          periodSeconds: 10
         resources:
           requests:
             cpu: 100m
             memory: 64Mi
           limits:
-            cpu: 200m
-            memory: 128Mi
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: productcatalogservice
-  labels:
-    app: productcatalogservice
-spec:
-  type: ClusterIP
-  selector:
-    app: productcatalogservice
-  ports:
-  - name: grpc
-    port: 3550
-    targetPort: 3550
+            cpu: 300m
+            memory: 256Mi
+      volumes:
+      - name: nats-ca
+        configMap:
+          name: nats-ca
 ---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: productcatalogservice
+  name: storefrontprojectionservice
 # [END gke_release_kubernetes_manifests_microservices_demo]

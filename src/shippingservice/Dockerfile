@@ -21,9 +21,10 @@ ARG TARGETARCH=amd64
 WORKDIR /src
 
 # restore dependencies
-COPY go.mod go.sum ./
+COPY src/shippingservice/go.mod src/shippingservice/go.sum ./
+COPY protos /protos
 RUN go mod download
-COPY . .
+COPY src/shippingservice .
 
 # Skaffold passes in debug-oriented compiler flags
 ARG SKAFFOLD_GO_GCFLAGS
@@ -33,12 +34,10 @@ FROM gcr.io/distroless/static
 
 WORKDIR /src
 COPY --from=builder /go/bin/shippingservice /src/shippingservice
-ENV APP_PORT=50051
-
 # Definition of this variable is used by 'skaffold debug' to identify a golang binary.
 # Default behavior - a failure prints a stack trace for the current goroutine.
 # See https://golang.org/pkg/runtime/
 ENV GOTRACEBACK=single
 
-EXPOSE 50051
+EXPOSE 8080
 ENTRYPOINT ["/src/shippingservice"]

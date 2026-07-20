@@ -38,8 +38,6 @@ if (process.env.ENABLE_TRACING == "1") {
 
   const { ATTR_SERVICE_NAME }= require('@opentelemetry/semantic-conventions');
 
-  const { GrpcInstrumentation } = require('@opentelemetry/instrumentation-grpc');
-  const { registerInstrumentations } = require('@opentelemetry/instrumentation');
   const opentelemetry = require('@opentelemetry/sdk-node');
 
   const { OTLPTraceExporter } = require('@opentelemetry/exporter-otlp-grpc');
@@ -54,22 +52,33 @@ if (process.env.ENABLE_TRACING == "1") {
     traceExporter: traceExporter,
   });
 
-  registerInstrumentations({
-    instrumentations: [new GrpcInstrumentation()]
-  });
-
   sdk.start()
 } else {
   logger.info("Tracing disabled.")
 }
 
 
-const path = require('path');
-const HipsterShopServer = require('./server');
+const PaymentHealthServer = require('./server');
+const { startPaymentNATS } = require('./nats_worker');
 
 const PORT = process.env['PORT'];
-const PROTO_PATH = path.join(__dirname, '/proto/');
 
-const server = new HipsterShopServer(PROTO_PATH, PORT);
+async function main() {
+  const messaging = await startPaymentNATS();
+  const server = new PaymentHealthServer(messaging, PORT);
+  server.listen();
+  const shutdown = async () => {
+    try {
+      messaging.markNotReady();
+      await server.close();
+      await messaging.nc.drain();
+    } finally { process.exit(0); }
+  };
+  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', shutdown);
+}
 
-server.listen();
+main().catch(err => {
+  logger.error({ error: err.message }, 'paymentservice startup failed');
+  process.exit(1);
+});

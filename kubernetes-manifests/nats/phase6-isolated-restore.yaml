@@ -1,0 +1,219 @@
+# On-demand isolated three-node JetStream target for testing an account backup.
+# It is intentionally outside every Kustomization and is removed by the Phase 6
+# DR verifier after the restored stream and consumer inventory is checked.
+apiVersion: v1
+kind: Service
+metadata:
+  name: nats-phase6-restore-dr-headless
+  namespace: nats
+  labels:
+    phase6.online-boutique.io/step: infrastructure
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: nats-phase6-restore-server
+  ports:
+  - name: client
+    port: 4222
+  - name: cluster
+    port: 6222
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nats-phase6-restore-dr
+  namespace: nats
+  labels:
+    phase6.online-boutique.io/step: infrastructure
+spec:
+  selector:
+    app.kubernetes.io/name: nats-phase6-restore-server
+  ports:
+  - name: client
+    port: 4222
+    targetPort: client
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: nats-phase6-restore-dr
+  namespace: nats
+  labels:
+    phase6.online-boutique.io/step: infrastructure
+spec:
+  serviceName: nats-phase6-restore-dr-headless
+  replicas: 3
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: nats-phase6-restore-server
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: nats-phase6-restore-server
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: nats
+        image: nats:2.14.3-alpine
+        command: ["sh", "-ec"]
+        args:
+        - |
+          exec nats-server --name "${POD_NAME}" --jetstream --store_dir /data \
+            --cluster_name PHASE6_RESTORE --cluster nats://0.0.0.0:6222 \
+            --routes nats://nats-phase6-restore-dr-0.nats-phase6-restore-dr-headless.nats.svc.cluster.local:6222,nats://nats-phase6-restore-dr-1.nats-phase6-restore-dr-headless.nats.svc.cluster.local:6222,nats://nats-phase6-restore-dr-2.nats-phase6-restore-dr-headless.nats.svc.cluster.local:6222
+        env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        ports:
+        - name: client
+          containerPort: 4222
+        - name: cluster
+          containerPort: 6222
+        readinessProbe:
+          tcpSocket:
+            port: client
+          periodSeconds: 2
+        resources:
+          requests:
+            cpu: 20m
+            memory: 64Mi
+          limits:
+            cpu: 200m
+            memory: 256Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+        volumeMounts:
+        - name: data
+          mountPath: /data
+      volumes:
+      - name: data
+        emptyDir: {}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: nats-phase6-restore-dr
+  namespace: nats
+  labels:
+    phase6.online-boutique.io/step: infrastructure
+spec:
+  podSelector:
+    matchExpressions:
+    - key: app.kubernetes.io/name
+      operator: In
+      values: ["nats-phase6-restore-server", "nats-phase6-restore-client"]
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+  - from:
+    - podSelector:
+        matchExpressions:
+        - key: app.kubernetes.io/name
+          operator: In
+          values: ["nats-phase6-restore-server", "nats-phase6-restore-client"]
+    ports:
+    - protocol: TCP
+      port: 4222
+    - protocol: TCP
+      port: 6222
+  egress:
+  - to:
+    - podSelector:
+        matchExpressions:
+        - key: app.kubernetes.io/name
+          operator: In
+          values: ["nats-phase6-restore-server", "nats-phase6-restore-client"]
+    ports:
+    - protocol: TCP
+      port: 4222
+    - protocol: TCP
+      port: 6222
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: nats-phase6-restore-dr
+  namespace: nats
+  labels:
+    phase6.online-boutique.io/step: restore
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: nats-phase6-restore-client
+    spec:
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: restore
+        image: natsio/nats-box:0.19.7-nonroot
+        command: ["sh", "-ec"]
+        args:
+        - |
+          latest="$(find /backups -mindepth 1 -maxdepth 1 -type d | sort | tail -n 1)"
+          test -n "${latest}"
+          echo "Restoring ${latest} into the isolated Phase 6 cluster"
+          server="nats://nats-phase6-restore-dr.nats.svc.cluster.local:4222"
+          deadline=$(( $(date +%s) + 120 ))
+          until nats --server="${server}" --timeout=2s stream ls --json >/dev/null 2>&1; do
+            if [ "$(date +%s)" -ge "${deadline}" ]; then
+              echo "isolated JetStream metadata leader was not ready before the deadline" >&2
+              exit 1
+            fi
+            sleep 1
+          done
+          args="--server=${server} --timeout=10m"
+          nats ${args} account restore "${latest}"
+          nats ${args} stream info BOUTIQUE_EVENTS
+          nats ${args} stream info BOUTIQUE_COMMANDS
+          nats ${args} stream info BOUTIQUE_DLQ
+          nats ${args} account info
+          echo "Isolated account restore and stream inventory verification passed."
+        volumeMounts:
+        - name: backups
+          mountPath: /backups
+          readOnly: true
+        resources:
+          requests:
+            cpu: 20m
+            memory: 32Mi
+          limits:
+            cpu: 200m
+            memory: 256Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+      volumes:
+      - name: backups
+        persistentVolumeClaim:
+          claimName: nats-backups

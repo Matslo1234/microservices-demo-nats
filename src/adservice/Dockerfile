@@ -17,14 +17,15 @@ ARG BUILDPLATFORM=linux/amd64
 
 FROM --platform=$BUILDPLATFORM eclipse-temurin:24.0.2_12-jdk-noble@sha256:dacac8e9a0df0d2bd24e702b4431132875c249930b70555ebd7ca285b5bee684 AS builder
 
-WORKDIR /app
+WORKDIR /workspace/src/adservice
 
-COPY ["build.gradle", "gradlew", "./"]
-COPY gradle gradle
+COPY ["src/adservice/build.gradle", "src/adservice/gradlew", "./"]
+COPY src/adservice/gradle gradle
 RUN chmod +x gradlew
 RUN ./gradlew downloadRepos
 
-COPY . .
+COPY protos /workspace/protos
+COPY src/adservice .
 RUN chmod +x gradlew
 RUN ./gradlew installDist
 
@@ -38,7 +39,7 @@ FROM eclipse-temurin:25.0.3_9-jre-alpine@sha256:28db6fdf60e38945e43d840c0333aeae
 #     rm -rf profiler_java_agent.tar.gz
 
 WORKDIR /app
-COPY --from=builder /app .
+COPY --from=builder /workspace/src/adservice .
 
-EXPOSE 9555
+EXPOSE 8080
 ENTRYPOINT ["/app/build/install/hipstershop/bin/AdService"]

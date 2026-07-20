@@ -1,0 +1,93 @@
+<!--
+ Copyright 2026 Google LLC
+
+ Licensed under the Apache License, Version 2.0 (the "License");
+ you may not use this file except in compliance with the License.
+ You may obtain a copy of the License at
+
+      http://www.apache.org/licenses/LICENSE-2.0
+
+ Unless required by applicable law or agreed to in writing, software
+ distributed under the License is distributed on an "AS IS" BASIS,
+ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ See the License for the specific language governing permissions and
+ limitations under the License.
+-->
+
+{{ define "cart-operation" }}
+{{ template "header" . }}
+<main role="main">
+    <div class="container py-5">
+        <div class="row justify-content-center">
+            <div class="col-md-8 text-center"
+                 id="cart-operation"
+                 data-operation-url="{{ .operation_url }}"
+                 data-success-location="{{ .success_location }}"
+                 data-failure-location="{{ .failure_location }}"
+                 data-operation-status="{{ .operation.Status }}">
+                {{ if eq .operation.Status "REJECTED" }}
+                <h1 id="operation-heading">We couldn't update your cart</h1>
+                <p id="operation-message">
+                    {{ if .operation.SafeMessage }}{{ .operation.SafeMessage }}{{ else }}Your cart changed before this update could be applied. Please try again.{{ end }}
+                </p>
+                {{ else }}
+                <h1 id="operation-heading">Updating your cart&hellip;</h1>
+                <p id="operation-message">Your update was accepted and will appear in a moment.</p>
+                {{ end }}
+                <p>
+                    <a class="btn btn-primary"
+                       id="operation-link"
+                       href="{{ if eq .operation.Status "REJECTED" }}{{ .failure_location }}{{ else }}{{ .success_location }}{{ end }}">
+                        Continue
+                    </a>
+                </p>
+                {{ if ne .operation.Status "REJECTED" }}
+                <noscript>
+                    <p>JavaScript is required to continue automatically. Use the button above when your cart is ready.</p>
+                </noscript>
+                {{ end }}
+            </div>
+        </div>
+    </div>
+</main>
+{{ if ne .operation.Status "REJECTED" }}
+<script>
+(() => {
+    const container = document.getElementById("cart-operation");
+    const heading = document.getElementById("operation-heading");
+    const message = document.getElementById("operation-message");
+    const link = document.getElementById("operation-link");
+
+    const poll = async () => {
+        try {
+            const response = await fetch(container.dataset.operationUrl, {
+                headers: {"Accept": "application/json"},
+                credentials: "same-origin",
+                cache: "no-store"
+            });
+            if (response.ok) {
+                const operation = await response.json();
+                if (operation.status === "SUCCEEDED") {
+                    window.location.replace(container.dataset.successLocation);
+                    return;
+                }
+                if (operation.status === "REJECTED") {
+                    heading.textContent = "We couldn't update your cart";
+                    message.textContent = operation.safe_message ||
+                        "Your cart changed before this update could be applied. Please try again.";
+                    link.href = container.dataset.failureLocation;
+                    return;
+                }
+            }
+        } catch (_) {
+            // A transient query or network failure is safe to retry.
+        }
+        window.setTimeout(poll, 250);
+    };
+
+    window.setTimeout(poll, 100);
+})();
+</script>
+{{ end }}
+{{ template "footer" . }}
+{{ end }}

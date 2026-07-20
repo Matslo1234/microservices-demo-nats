@@ -26,6 +26,10 @@ spec:
     metadata:
       labels:
         app: adservice
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: /metrics
     spec:
       serviceAccountName: adservice
       terminationGracePeriodSeconds: 5
@@ -43,12 +47,26 @@ spec:
               - ALL
           privileged: false
           readOnlyRootFilesystem: true
-        image: us-central1-docker.pkg.dev/online-boutique-ci/microservices-demo/adservice:v0.10.6
+        image: matslo123/adservice:phase6-20260719-1
         ports:
-        - containerPort: 9555
+        - name: health
+          containerPort: 8080
         env:
         - name: PORT
-          value: "9555"
+          value: "8080"
+        - name: NATS_REQUIRED
+          value: "true"
+        - name: NATS_REQUIRED_SUBSCRIPTIONS
+          value: "ad-page-views-v1"
+        envFrom:
+        - configMapRef:
+            name: nats-client-config
+        - secretRef:
+            name: nats-credentials-adservice
+        volumeMounts:
+        - name: nats-ca
+          mountPath: /etc/nats-ca
+          readOnly: true
         resources:
           requests:
             cpu: 200m
@@ -59,28 +77,19 @@ spec:
         readinessProbe:
           initialDelaySeconds: 20
           periodSeconds: 15
-          grpc:
-            port: 9555
+          httpGet:
+            path: /readyz
+            port: health
         livenessProbe:
           initialDelaySeconds: 20
           periodSeconds: 15
-          grpc:
-            port: 9555
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: adservice
-  labels:
-    app: adservice
-spec:
-  type: ClusterIP
-  selector:
-    app: adservice
-  ports:
-  - name: grpc
-    port: 9555
-    targetPort: 9555
+          httpGet:
+            path: /healthz
+            port: health
+      volumes:
+      - name: nats-ca
+        configMap:
+          name: nats-ca
 ---
 apiVersion: v1
 kind: ServiceAccount

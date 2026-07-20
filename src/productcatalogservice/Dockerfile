@@ -19,11 +19,12 @@ FROM --platform=$BUILDPLATFORM golang:1.26.4-alpine@sha256:3ad57304ad93bbec8548a
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64
 
-WORKDIR /src
+WORKDIR /workspace/src/productcatalogservice
 # restore dependencies
-COPY go.mod go.sum ./
+COPY src/productcatalogservice/go.mod src/productcatalogservice/go.sum ./
+COPY protos /workspace/protos
 RUN go mod download
-COPY . .
+COPY src/productcatalogservice .
 
 # Skaffold passes in debug-oriented compiler flags
 ARG SKAFFOLD_GO_GCFLAGS
@@ -33,12 +34,12 @@ FROM gcr.io/distroless/static
 
 WORKDIR /src
 COPY --from=builder /productcatalogservice ./server
-COPY products.json .
+COPY src/productcatalogservice/products.json .
 
 # Definition of this variable is used by 'skaffold debug' to identify a golang binary.
 # Default behavior - a failure prints a stack trace for the current goroutine.
 # See https://golang.org/pkg/runtime/
 ENV GOTRACEBACK=single
 
-EXPOSE 3550
+EXPOSE 8080
 ENTRYPOINT ["/src/server"]

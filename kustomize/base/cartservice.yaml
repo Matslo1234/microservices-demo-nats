@@ -26,9 +26,13 @@ spec:
     metadata:
       labels:
         app: cartservice
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: /metrics
     spec:
       serviceAccountName: cartservice
-      terminationGracePeriodSeconds: 5
+      terminationGracePeriodSeconds: 35
       securityContext:
         fsGroup: 1000
         runAsGroup: 1000
@@ -43,12 +47,26 @@ spec:
               - ALL
           privileged: false
           readOnlyRootFilesystem: true
-        image: us-central1-docker.pkg.dev/online-boutique-ci/microservices-demo/cartservice:v0.10.6
+        image: matslo123/cartservice:phase6-20260719-1
         ports:
-        - containerPort: 7070
+        - name: health
+          containerPort: 8080
         env:
         - name: REDIS_ADDR
           value: "redis-cart:6379"
+        - name: NATS_REQUIRED
+          value: "true"
+        - name: NATS_REQUIRED_SUBSCRIPTIONS
+          value: "cart-commands-v1"
+        envFrom:
+        - configMapRef:
+            name: nats-client-config
+        - secretRef:
+            name: nats-credentials-cartservice
+        volumeMounts:
+        - name: nats-ca
+          mountPath: /etc/nats-ca
+          readOnly: true
         resources:
           requests:
             cpu: 200m
@@ -58,28 +76,19 @@ spec:
             memory: 128Mi
         readinessProbe:
           initialDelaySeconds: 15
-          grpc:
-            port: 7070
+          httpGet:
+            path: /readyz
+            port: health
         livenessProbe:
           initialDelaySeconds: 15
           periodSeconds: 10
-          grpc:
-            port: 7070
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: cartservice
-  labels:
-    app: cartservice
-spec:
-  type: ClusterIP
-  selector:
-    app: cartservice
-  ports:
-  - name: grpc
-    port: 7070
-    targetPort: 7070
+          httpGet:
+            path: /healthz
+            port: health
+      volumes:
+      - name: nats-ca
+        configMap:
+          name: nats-ca
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -93,6 +102,8 @@ metadata:
   labels:
     app: redis-cart
 spec:
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: redis-cart
@@ -106,6 +117,30 @@ spec:
         runAsGroup: 1000
         runAsNonRoot: true
         runAsUser: 1000
+      initContainers:
+      - name: volume-permissions
+        image: redis:alpine
+        # The Redis process already owns files it creates. Only the newly
+        # provisioned volume root needs ownership repaired.
+        command: ["sh", "-c", "chown 1000:1000 /data"]
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+            add: ["CHOWN"]
+          readOnlyRootFilesystem: true
+          runAsNonRoot: false
+          runAsUser: 0
+        volumeMounts:
+        - mountPath: /data
+          name: redis-data
+        resources:
+          requests:
+            cpu: 5m
+            memory: 8Mi
+          limits:
+            cpu: 50m
+            memory: 32Mi
       containers:
       - name: redis
         securityContext:
@@ -116,16 +151,17 @@ spec:
           privileged: false
           readOnlyRootFilesystem: true
         image: redis:alpine
+        args: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
         ports:
         - containerPort: 6379
         readinessProbe:
           periodSeconds: 5
-          tcpSocket:
-            port: 6379
+          exec:
+            command: ["redis-cli", "ping"]
         livenessProbe:
           periodSeconds: 5
-          tcpSocket:
-            port: 6379
+          exec:
+            command: ["redis-cli", "ping"]
         volumeMounts:
         - mountPath: /data
           name: redis-data
@@ -138,7 +174,8 @@ spec:
             memory: 200Mi
       volumes:
       - name: redis-data
-        emptyDir: {}
+        persistentVolumeClaim:
+          claimName: redis-cart-data
 ---
 apiVersion: v1
 kind: Service
@@ -154,3 +191,15 @@ spec:
   - name: tcp-redis
     port: 6379
     targetPort: 6379
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: redis-cart-data
+  labels:
+    app: redis-cart
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 5Gi

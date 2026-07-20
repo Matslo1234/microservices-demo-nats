@@ -58,7 +58,10 @@ read_manifests_except_kustomization() {
         awk '
         /^[^# ]/ { found = 1 }
         found { print }' "${file}"
-    done < <(find "${dir}" -name '*.yaml' ! -name 'kustomization.yaml' -type f -print0)
+    # Release bundles contain only the declarative resources at the selected
+    # package root. Nested directories can include separately deployed NATS
+    # infrastructure and explicitly gated destructive verification Jobs.
+    done < <(find "${dir}" -maxdepth 1 -name '*.yaml' ! -name 'kustomization.yaml' -type f -print0 | sort -z)
 }
 
 mk_kubernetes_manifests() {

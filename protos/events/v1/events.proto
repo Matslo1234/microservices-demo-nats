@@ -1,0 +1,299 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+syntax = "proto3";
+
+package boutique.events.v1;
+
+import "google/protobuf/timestamp.proto";
+import "protos/common/v1/message.proto";
+
+option go_package = "github.com/GoogleCloudPlatform/microservices-demo/protos/events/v1;eventsv1";
+option java_multiple_files = true;
+option java_package = "boutique.events.v1";
+option csharp_namespace = "Boutique.Events.V1";
+
+message CatalogProductUpsertedEvent {
+  boutique.common.v1.ProductSnapshot product = 1;
+  uint64 catalog_revision = 2;
+}
+
+message CatalogProductRemovedEvent {
+  string product_id = 1;
+  uint64 product_version = 2;
+  uint64 catalog_revision = 3;
+}
+
+message CatalogSnapshotCompletedEvent {
+  uint64 catalog_revision = 1;
+  uint32 product_count = 2;
+  string checksum = 3;
+}
+
+message PackagingProductInfoUpsertedEvent {
+  string product_id = 1;
+  double weight = 2;
+  double width = 3;
+  double height = 4;
+  double depth = 5;
+  uint64 packaging_revision = 6;
+}
+
+message PackagingProductInfoRemovedEvent {
+  string product_id = 1;
+  uint64 packaging_revision = 2;
+}
+
+message PackagingSnapshotCompletedEvent {
+  uint64 packaging_revision = 1;
+  uint32 product_count = 2;
+  string checksum = 3;
+}
+
+message CurrencyRate {
+  string currency_code = 1;
+  double units_per_base = 2;
+}
+
+message CurrencyRatesUpdatedEvent {
+  string base_currency_code = 1;
+  repeated CurrencyRate rates = 2;
+  google.protobuf.Timestamp effective_at = 3;
+  uint64 rate_revision = 4;
+}
+
+message StorefrontPageViewedEvent {
+  string session_id = 1;
+  string page_type = 2;
+  string product_id = 3;
+  repeated string category_ids = 4;
+  uint64 cart_version = 5;
+}
+
+message StorefrontOperationAcceptedEvent {
+  string operation_id = 1;
+  string command_id = 2;
+  string operation_kind = 3;
+  string status = 4;
+  string user_or_session_id = 5;
+  google.protobuf.Timestamp accepted_at = 6;
+}
+
+message CartItemAddedEvent {
+  string command_id = 1;
+  string user_id = 2;
+  string product_id = 3;
+  int32 quantity_delta = 4;
+  int32 resulting_quantity = 5;
+  boutique.common.v1.CartSnapshot cart = 6;
+}
+
+message CartClearedEvent {
+  string command_id = 1;
+  string user_id = 2;
+  repeated string prior_product_ids = 3;
+  boutique.common.v1.CartSnapshot cart = 4;
+  string reason = 5;
+  string order_id = 6;
+}
+
+message CartCommandRejectedEvent {
+  string command_id = 1;
+  string user_id = 2;
+  boutique.common.v1.Failure failure = 3;
+  uint64 current_cart_version = 4;
+}
+
+message RecommendationGeneratedEvent {
+  string session_id = 1;
+  uint64 triggering_context_version = 2;
+  repeated string product_ids = 3;
+  google.protobuf.Timestamp expires_at = 4;
+}
+
+message RecommendationGenerationFailedEvent {
+  string session_id = 1;
+  boutique.common.v1.Failure failure = 2;
+}
+
+message AdSelectionGeneratedEvent {
+  string session_id = 1;
+  string triggering_page_type = 2;
+  repeated boutique.common.v1.AdSelection ads = 3;
+  google.protobuf.Timestamp expires_at = 4;
+}
+
+message AdSelectionFailedEvent {
+  string session_id = 1;
+  boutique.common.v1.Failure failure = 2;
+}
+
+message ShippingCartQuoteUpdatedEvent {
+  string user_id = 1;
+  uint64 cart_version = 2;
+  boutique.common.v1.Money cost_usd = 3;
+  google.protobuf.Timestamp expires_at = 4;
+}
+
+message ShippingCartQuoteFailedEvent {
+  string user_id = 1;
+  uint64 cart_version = 2;
+  boutique.common.v1.Failure failure = 3;
+}
+
+message ShippingOrderQuoteCalculatedEvent {
+  string order_id = 1;
+  boutique.common.v1.Money cost_usd = 2;
+  string quote_id = 3;
+  google.protobuf.Timestamp expires_at = 4;
+}
+
+message ShippingOrderQuoteFailedEvent {
+  string order_id = 1;
+  boutique.common.v1.Failure failure = 2;
+}
+
+message ShippingShipmentCreatedEvent {
+  string order_id = 1;
+  string shipment_id = 2;
+  string tracking_id = 3;
+}
+
+message ShippingShipmentCreationFailedEvent {
+  string order_id = 1;
+  boutique.common.v1.Failure failure = 2;
+}
+
+message ShippingShipmentCancelledEvent {
+  string order_id = 1;
+  string shipment_id = 2;
+}
+
+message ShippingShipmentCancellationFailedEvent {
+  string order_id = 1;
+  string shipment_id = 2;
+  boutique.common.v1.Failure failure = 3;
+}
+
+message OrderSubmittedEvent {
+  string operation_id = 1;
+  boutique.common.v1.SanitizedOrderSnapshot order = 2;
+  uint64 accepted_cart_version = 3;
+  uint64 accepted_catalog_revision = 4;
+  uint64 accepted_rate_revision = 5;
+}
+
+message OrderProcessingStageChangedEvent {
+  string order_id = 1;
+  string stage = 2;
+  google.protobuf.Timestamp changed_at = 3;
+}
+
+message OrderRejectedEvent {
+  string operation_id = 1;
+  string order_id = 2;
+  boutique.common.v1.Failure failure = 3;
+}
+
+message OrderCompletedEvent {
+  boutique.common.v1.SanitizedOrderSnapshot order = 1;
+}
+
+message OrderCancelledEvent {
+  string order_id = 1;
+  boutique.common.v1.Failure failure = 2;
+  repeated string completed_compensations = 3;
+}
+
+message OrderManualReviewRequiredEvent {
+  string order_id = 1;
+  string failed_step = 2;
+  string failed_compensation = 3;
+  repeated string restricted_provider_references = 4;
+}
+
+message OrderStepTimedOutEvent {
+  string order_id = 1;
+  string waiting_stage = 2;
+  google.protobuf.Timestamp deadline = 3;
+  string last_command_id = 4;
+  string chosen_action = 5;
+}
+
+message PaymentAuthorizedEvent {
+  string order_id = 1;
+  string authorization_id = 2;
+  boutique.common.v1.Money amount = 3;
+}
+
+message PaymentAuthorizationDeclinedEvent {
+  string order_id = 1;
+  string decline_category = 2;
+}
+
+message PaymentCapturedEvent {
+  string order_id = 1;
+  string transaction_id = 2;
+  boutique.common.v1.Money amount = 3;
+}
+
+message PaymentCaptureFailedEvent {
+  string order_id = 1;
+  string authorization_id = 2;
+  boutique.common.v1.Failure failure = 3;
+}
+
+message PaymentAuthorizationReleasedEvent {
+  string order_id = 1;
+  string authorization_id = 2;
+}
+
+message PaymentAuthorizationReleaseFailedEvent {
+  string order_id = 1;
+  string authorization_id = 2;
+  boutique.common.v1.Failure failure = 3;
+}
+
+message NotificationOrderConfirmationSentEvent {
+  string order_id = 1;
+  string masked_recipient = 2;
+  string provider_message_id = 3;
+}
+
+message NotificationOrderConfirmationFailedEvent {
+  string order_id = 1;
+  boutique.common.v1.Failure failure = 2;
+  uint32 attempt_count = 3;
+}
+
+message AssistantResponseGeneratedEvent {
+  string operation_id = 1;
+  string generated_text = 2;
+  repeated string referenced_product_ids = 3;
+}
+
+message AssistantResponseFailedEvent {
+  string operation_id = 1;
+  boutique.common.v1.Failure failure = 2;
+}
+
+message OpsMessageDeadLetteredEvent {
+  string original_stream = 1;
+  string original_subject = 2;
+  uint64 original_stream_sequence = 3;
+  string consumer = 4;
+  uint32 attempts = 5;
+  string error_category = 6;
+  string correlation_id = 7;
+}

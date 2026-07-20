@@ -52,14 +52,10 @@ git pull
 # update yaml
 "${SCRIPT_DIR}"/make-release-artifacts.sh
 
-# build and push images
-"${SCRIPT_DIR}"/make-helm-chart.sh
-
 # create git release / push to new branch
 git checkout -b "release/${TAG}"
 git add "${REPO_ROOT}/release/"
 git add "${REPO_ROOT}/kustomize/base/"
-git add "${REPO_ROOT}/helm-chart/"
 git commit --allow-empty -m "Release $TAG"
 log "Pushing k8s manifests to release/${TAG}..."
 git tag "$TAG"

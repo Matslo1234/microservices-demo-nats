@@ -1,0 +1,57 @@
+# On-demand destructive reset of rebuildable Phase 2 projection KV state.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: nats-phase2-projection-reset
+  namespace: nats
+  labels:
+    app.kubernetes.io/name: nats-phase1-verification
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: nats-phase1-verification
+    spec:
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+      containers:
+      - name: reset
+        image: natsio/nats-box:0.19.7-nonroot
+        command:
+        - sh
+        - -ec
+        - |
+          args="--server=${NATS_URL} --user=${NATS_USER} --password=${NATS_PASSWORD} --tlsca=/etc/nats-ca/ca.crt"
+          nats ${args} kv del STOREFRONT_PRODUCTS --force
+          nats ${args} kv del STOREFRONT_CARTS --force
+          nats ${args} kv add STOREFRONT_PRODUCTS --history=5 --replicas=3 --storage=file --ttl=0s --max-bucket-size=536870912
+          nats ${args} kv add STOREFRONT_CARTS --history=2 --replicas=3 --storage=file --ttl=0s --max-bucket-size=536870912
+          nats ${args} consumer rm BOUTIQUE_EVENTS storefront-projection-v1 --force || true
+        envFrom:
+        - secretRef:
+            name: nats-admin-credentials
+        volumeMounts:
+        - name: ca
+          mountPath: /etc/nats-ca
+          readOnly: true
+        resources:
+          requests:
+            cpu: 20m
+            memory: 32Mi
+          limits:
+            cpu: 100m
+            memory: 128Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+          readOnlyRootFilesystem: true
+      volumes:
+      - name: ca
+        configMap:
+          name: nats-ca

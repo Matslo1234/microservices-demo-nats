@@ -1,0 +1,490 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: nats-setup
+  namespace: nats
+  labels:
+    app.kubernetes.io/name: nats
+    app.kubernetes.io/component: setup
+    app.kubernetes.io/part-of: online-boutique
+automountServiceAccountToken: true
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: nats-setup
+  namespace: nats
+  labels:
+    app.kubernetes.io/name: nats
+    app.kubernetes.io/component: setup
+rules:
+- apiGroups: [""]
+  resources: ["secrets", "configmaps"]
+  verbs: ["get", "create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: nats-setup
+  namespace: nats
+  labels:
+    app.kubernetes.io/name: nats
+    app.kubernetes.io/component: setup
+subjects:
+- kind: ServiceAccount
+  name: nats-setup
+  namespace: nats
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: nats-setup
+---
+# Workload credentials and the client CA are consumed from the default
+# namespace, so bind the setup service account to a similarly narrow Role
+# there. Patch is required to synchronize these derived resources when the
+# nats namespace is recreated while the application namespace is retained.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: nats-setup
+  namespace: default
+  labels:
+    app.kubernetes.io/name: nats
+    app.kubernetes.io/component: setup
+rules:
+- apiGroups: [""]
+  resources: ["secrets", "configmaps"]
+  verbs: ["get", "create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: nats-setup
+  namespace: default
+  labels:
+    app.kubernetes.io/name: nats
+    app.kubernetes.io/component: setup
+subjects:
+- kind: ServiceAccount
+  name: nats-setup
+  namespace: nats
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: nats-setup
+---
+# This script uses only the Kubernetes API and OpenSSL supplied by the public
+# image below. Broker auth, TLS, and the JetStream encryption key are
+# create-only. Client CA and credential resources are derived from those
+# broker Secrets and patched back into sync when they already exist.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nats-setup-script
+  namespace: nats
+  labels:
+    app.kubernetes.io/name: nats-setup
+    app.kubernetes.io/component: setup
+    app.kubernetes.io/part-of: online-boutique
+data:
+  reconcile.sh: |
+    #!/bin/sh
+    set -u
+
+    nats_namespace=nats
+    workload_namespace=default
+    nats_url=tls://nats.nats.svc.cluster.local:4222
+    workdir=/tmp/nats-setup
+    ready_file=${workdir}/ready
+    interval=${RECONCILE_INTERVAL_SECONDS:-21600}
+    token_file=/var/run/secrets/kubernetes.io/serviceaccount/token
+    ca_file=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+    api_host=${KUBERNETES_SERVICE_HOST:-kubernetes.default.svc}
+    api_port=${KUBERNETES_SERVICE_PORT_HTTPS:-${KUBERNETES_SERVICE_PORT:-443}}
+    token=$(tr -d '\n' < "${token_file}")
+    services='frontend storefrontprojectionservice productcatalogservice currencyservice cartservice recommendationservice adservice checkoutservice shippingservice paymentservice emailservice messageoperationsservice'
+
+    log() {
+      printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"
+    }
+
+    fail() {
+      log "ERROR: $*"
+      return 1
+    }
+
+    b64_text() {
+      printf '%s' "$1" | base64 | tr -d '\n'
+    }
+
+    b64_file() {
+      base64 < "$1" | tr -d '\n'
+    }
+
+    random_secret() {
+      value=$(openssl rand -hex 32) || return 1
+      printf 's%s' "${value}"
+    }
+
+    # api_request talks to the Kubernetes API with the service-account CA.
+    # BusyBox wget cannot use a custom CA bundle, so use the OpenSSL client
+    # already provided by the public image. The API certificate is verified for
+    # kubernetes.default.svc even when the service environment variable is an IP.
+    api_request() {
+      method=$1
+      path=$2
+      output=$3
+      input=${4:-}
+      content_type=${5:-application/json}
+      raw=${workdir}/api-response.raw
+      clean=${workdir}/api-response.clean
+      error=${workdir}/api-response.error
+
+      if [ -n "${input}" ]; then
+        content_length=$(wc -c < "${input}" | tr -d ' ')
+        {
+          printf '%s\r\n' "${method} ${path} HTTP/1.1"
+          printf '%s\r\n' "Host: ${api_host}"
+          printf '%s\r\n' "Authorization: Bearer ${token}"
+          printf '%s\r\n' 'Accept: application/json'
+          printf '%s\r\n' "Content-Type: ${content_type}"
+          printf '%s\r\n' "Content-Length: ${content_length}"
+          printf '%s\r\n' 'Connection: close'
+          printf '\r\n'
+          cat "${input}"
+        } | openssl s_client -quiet -verify_return_error \
+          -CAfile "${ca_file}" -servername kubernetes.default.svc \
+          -verify_hostname kubernetes.default.svc \
+          -connect "${api_host}:${api_port}" > "${raw}" 2> "${error}"
+      else
+        {
+          printf '%s\r\n' "${method} ${path} HTTP/1.1"
+          printf '%s\r\n' "Host: ${api_host}"
+          printf '%s\r\n' "Authorization: Bearer ${token}"
+          printf '%s\r\n' 'Accept: application/json'
+          printf '%s\r\n' 'Connection: close'
+          printf '\r\n'
+        } | openssl s_client -quiet -verify_return_error \
+          -CAfile "${ca_file}" -servername kubernetes.default.svc \
+          -verify_hostname kubernetes.default.svc \
+          -connect "${api_host}:${api_port}" > "${raw}" 2> "${error}"
+      fi
+
+      tr -d '\r' < "${raw}" > "${clean}"
+      status=$(sed -n '1s|HTTP/[0-9.]* \([0-9][0-9][0-9]\).*|\1|p' "${clean}")
+      if [ -z "${status}" ]; then
+        log "Kubernetes API ${method} ${path} returned no HTTP response: $(tr '\n' ' ' < "${error}")"
+        return 1
+      fi
+      sed '1,/^$/d' "${clean}" > "${output}"
+      printf '%s' "${status}"
+    }
+
+    # api_get returns 0 when a resource exists, 4 for a verified 404, and 1
+    # for every other failure. This prevents a network or authorization error
+    # from being mistaken for an absent Secret.
+    api_get() {
+      path=$1
+      output=$2
+      status=$(api_request GET "${path}" "${output}") || return 1
+      case "${status}" in
+        200) return 0 ;;
+        404) return 4 ;;
+        *) log "Kubernetes API GET ${path} returned HTTP ${status}"; return 1 ;;
+      esac
+    }
+
+    # api_post returns 0 after creation, 9 when another actor won the
+    # create-only race, and 1 for all other errors.
+    api_post() {
+      path=$1
+      input=$2
+      status=$(api_request POST "${path}" "${workdir}/post-response.json" "${input}") || return 1
+      case "${status}" in
+        200|201) return 0 ;;
+        409) return 9 ;;
+        *) log "Kubernetes API POST ${path} returned HTTP ${status}"; return 1 ;;
+      esac
+    }
+
+    api_patch() {
+      path=$1
+      input=$2
+      status=$(api_request PATCH "${path}" "${workdir}/patch-response.json" "${input}" 'application/merge-patch+json') || return 1
+      case "${status}" in
+        200) return 0 ;;
+        *) log "Kubernetes API PATCH ${path} returned HTTP ${status}"; return 1 ;;
+      esac
+    }
+
+    ensure_from_file() {
+      resource=$1
+      namespace=$2
+      name=$3
+      input=$4
+      get_path=/api/v1/namespaces/${namespace}/${resource}/${name}
+      post_path=/api/v1/namespaces/${namespace}/${resource}
+
+      api_get "${get_path}" "${workdir}/existing.json"
+      status=$?
+      if [ "${status}" -eq 0 ]; then
+        log "preserving existing ${resource} ${namespace}/${name}"
+        return 0
+      fi
+      if [ "${status}" -ne 4 ]; then
+        return 1
+      fi
+
+      api_post "${post_path}" "${input}"
+      status=$?
+      if [ "${status}" -eq 0 ]; then
+        log "created ${resource} ${namespace}/${name}"
+        return 0
+      fi
+      if [ "${status}" -eq 9 ]; then
+        log "preserving concurrently created ${resource} ${namespace}/${name}"
+        return 0
+      fi
+      return 1
+    }
+
+    # Client resources are projections of the create-only broker Secrets. They
+    # must be synchronized if the nats namespace is recreated independently of
+    # the application namespace; preserving stale values makes every workload
+    # fail TLS verification and authentication.
+    sync_from_file() {
+      resource=$1
+      namespace=$2
+      name=$3
+      input=$4
+      get_path=/api/v1/namespaces/${namespace}/${resource}/${name}
+      post_path=/api/v1/namespaces/${namespace}/${resource}
+
+      api_get "${get_path}" "${workdir}/existing.json"
+      status=$?
+      if [ "${status}" -eq 0 ]; then
+        api_patch "${get_path}" "${input}" || return 1
+        log "synchronized existing ${resource} ${namespace}/${name}"
+        return 0
+      fi
+      if [ "${status}" -ne 4 ]; then
+        return 1
+      fi
+
+      api_post "${post_path}" "${input}"
+      status=$?
+      if [ "${status}" -eq 0 ]; then
+        log "created ${resource} ${namespace}/${name}"
+        return 0
+      fi
+      if [ "${status}" -eq 9 ]; then
+        api_patch "${get_path}" "${input}" || return 1
+        log "synchronized concurrently created ${resource} ${namespace}/${name}"
+        return 0
+      fi
+      return 1
+    }
+
+    secret_data() {
+      namespace=$1
+      name=$2
+      key=$3
+      if ! api_get "/api/v1/namespaces/${namespace}/secrets/${name}" "${workdir}/${namespace}-${name}.json"; then
+        return 1
+      fi
+      value=$(tr -d '\n' < "${workdir}/${namespace}-${name}.json" | sed -n "s/.*\"${key}\":\"\\([^\"]*\\)\".*/\\1/p")
+      if [ -z "${value}" ]; then
+        fail "Secret ${namespace}/${name} is missing required key ${key}; refusing to change it"
+        return 1
+      fi
+      printf '%s' "${value}"
+    }
+
+    write_auth_secret() {
+      output=$1
+      {
+        printf '%s' '{"apiVersion":"v1","kind":"Secret","metadata":{"name":"nats-server-auth","namespace":"nats","labels":{"app.kubernetes.io/name":"nats","app.kubernetes.io/component":"setup","app.kubernetes.io/part-of":"online-boutique"}},"type":"Opaque","data":{'
+        first=true
+        for key in JETSTREAM_ENCRYPTION_KEY SYS_PASSWORD ADMIN_PASSWORD; do
+          value=$(random_secret) || return 1
+          if [ "${first}" = true ]; then first=false; else printf ','; fi
+          printf '"%s":"%s"' "${key}" "$(b64_text "${value}")"
+        done
+        for service in ${services}; do
+          value=$(random_secret) || return 1
+          key=$(printf '%s' "${service}" | tr '[:lower:]' '[:upper:]')_PASSWORD
+          printf ',"%s":"%s"' "${key}" "$(b64_text "${value}")"
+        done
+        printf '%s\n' '}}'
+      } > "${output}"
+    }
+
+    write_tls_secret() {
+      output=$1
+      umask 077
+      openssl req -x509 -newkey rsa:3072 -nodes -sha256 -days 3650 \
+        -subj '/CN=Online Boutique NATS CA' \
+        -keyout "${workdir}/ca.key" -out "${workdir}/ca.crt" >/dev/null 2>&1 || return 1
+      cat > "${workdir}/server.ext" <<'EOF'
+    basicConstraints=critical,CA:FALSE
+    keyUsage=critical,digitalSignature,keyEncipherment
+    extendedKeyUsage=serverAuth,clientAuth
+    subjectAltName=DNS:nats,DNS:nats.nats,DNS:nats.nats.svc,DNS:nats.nats.svc.cluster.local,DNS:nats-headless,DNS:nats-headless.nats.svc.cluster.local,DNS:*.nats-headless.nats.svc.cluster.local
+    EOF
+      openssl req -newkey rsa:3072 -nodes -sha256 \
+        -subj '/CN=nats.nats.svc.cluster.local' \
+        -keyout "${workdir}/tls.key" -out "${workdir}/tls.csr" >/dev/null 2>&1 || return 1
+      openssl x509 -req -sha256 -days 1095 \
+        -in "${workdir}/tls.csr" -CA "${workdir}/ca.crt" -CAkey "${workdir}/ca.key" -CAcreateserial \
+        -extfile "${workdir}/server.ext" -out "${workdir}/tls.crt" >/dev/null 2>&1 || return 1
+      printf '%s\n' "{\"apiVersion\":\"v1\",\"kind\":\"Secret\",\"metadata\":{\"name\":\"nats-server-tls\",\"namespace\":\"nats\",\"labels\":{\"app.kubernetes.io/name\":\"nats\",\"app.kubernetes.io/component\":\"setup\",\"app.kubernetes.io/part-of\":\"online-boutique\"}},\"type\":\"Opaque\",\"data\":{\"ca.crt\":\"$(b64_file "${workdir}/ca.crt")\",\"tls.crt\":\"$(b64_file "${workdir}/tls.crt")\",\"tls.key\":\"$(b64_file "${workdir}/tls.key")\"}}" > "${output}"
+    }
+
+    pem_json() {
+      base64 -d | awk '{gsub(/\\/, "\\\\"); gsub(/"/, "\\\""); printf "%s\\n", $0}'
+    }
+
+    write_ca_configmap() {
+      namespace=$1
+      output=$2
+      ca_encoded=$(secret_data nats nats-server-tls ca.crt) || return 1
+      ca=$(printf '%s' "${ca_encoded}" | pem_json) || return 1
+      printf '%s\n' "{\"apiVersion\":\"v1\",\"kind\":\"ConfigMap\",\"metadata\":{\"name\":\"nats-ca\",\"namespace\":\"${namespace}\",\"labels\":{\"app.kubernetes.io/name\":\"nats\",\"app.kubernetes.io/component\":\"setup\",\"app.kubernetes.io/part-of\":\"online-boutique\"}},\"data\":{\"ca.crt\":\"${ca}\"}}" > "${output}"
+    }
+
+    write_credentials_secret() {
+      namespace=$1
+      name=$2
+      user=$3
+      password=$4
+      output=$5
+      printf '%s\n' "{\"apiVersion\":\"v1\",\"kind\":\"Secret\",\"metadata\":{\"name\":\"${name}\",\"namespace\":\"${namespace}\",\"labels\":{\"app.kubernetes.io/name\":\"nats\",\"app.kubernetes.io/component\":\"setup\",\"app.kubernetes.io/part-of\":\"online-boutique\"}},\"type\":\"Opaque\",\"data\":{\"NATS_URL\":\"$(b64_text "${nats_url}")\",\"NATS_USER\":\"$(b64_text "${user}")\",\"NATS_PASSWORD\":\"${password}\"}}" > "${output}"
+    }
+
+    reconcile() {
+      write_auth_secret "${workdir}/auth.json" || return 1
+      ensure_from_file secrets nats nats-server-auth "${workdir}/auth.json" || return 1
+      for key in JETSTREAM_ENCRYPTION_KEY SYS_PASSWORD ADMIN_PASSWORD; do
+        secret_data nats nats-server-auth "${key}" >/dev/null || return 1
+      done
+      for service in ${services}; do
+        key=$(printf '%s' "${service}" | tr '[:lower:]' '[:upper:]')_PASSWORD
+        secret_data nats nats-server-auth "${key}" >/dev/null || return 1
+      done
+
+      write_tls_secret "${workdir}/tls.json" || return 1
+      ensure_from_file secrets nats nats-server-tls "${workdir}/tls.json" || return 1
+      for key in ca.crt tls.crt tls.key; do
+        secret_data nats nats-server-tls "${key}" >/dev/null || return 1
+      done
+
+      for namespace in nats default; do
+        write_ca_configmap "${namespace}" "${workdir}/${namespace}-ca.json" || return 1
+        sync_from_file configmaps "${namespace}" nats-ca "${workdir}/${namespace}-ca.json" || return 1
+      done
+
+      admin_password=$(secret_data nats nats-server-auth ADMIN_PASSWORD) || return 1
+      write_credentials_secret nats nats-admin-credentials admin "${admin_password}" "${workdir}/admin.json" || return 1
+      sync_from_file secrets nats nats-admin-credentials "${workdir}/admin.json" || return 1
+
+      for service in ${services}; do
+        key=$(printf '%s' "${service}" | tr '[:lower:]' '[:upper:]')_PASSWORD
+        password=$(secret_data nats nats-server-auth "${key}") || return 1
+        write_credentials_secret default "nats-credentials-${service}" "${service}" "${password}" "${workdir}/credential-${service}.json" || return 1
+        sync_from_file secrets default "nats-credentials-${service}" "${workdir}/credential-${service}.json" || return 1
+      done
+
+      operations_password=$(secret_data nats nats-server-auth MESSAGEOPERATIONSSERVICE_PASSWORD) || return 1
+      write_credentials_secret nats nats-messageoperations-credentials messageoperationsservice "${operations_password}" "${workdir}/operations.json" || return 1
+      sync_from_file secrets nats nats-messageoperations-credentials "${workdir}/operations.json" || return 1
+    }
+
+    mkdir -p "${workdir}" || exit 1
+    chmod 700 "${workdir}" || exit 1
+    while true; do
+      rm -f "${ready_file}"
+      if reconcile; then
+        touch "${ready_file}"
+        log 'NATS setup is reconciled; broker Secrets were preserved and client resources synchronized'
+      else
+        log 'NATS setup reconciliation failed; retrying in 10 seconds'
+        sleep 10
+        continue
+      fi
+      sleep "${interval}"
+    done
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nats-setup
+  namespace: nats
+  labels:
+    app.kubernetes.io/name: nats-setup
+    app.kubernetes.io/component: setup
+    app.kubernetes.io/part-of: online-boutique
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: nats-setup
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: nats-setup
+        app.kubernetes.io/component: setup
+        app.kubernetes.io/part-of: online-boutique
+    spec:
+      serviceAccountName: nats-setup
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: setup
+        # Public, multi-architecture image containing OpenSSL.
+        # This removes the need to build or publish a project-specific image
+        # before applying the NATS manifests.
+        image: alpine/openssl:3.3.3@sha256:0cb8b9948f86d73f196cef2f828ca0b60e40c7c74d8edf9e60d9990cbb7b8b76
+        imagePullPolicy: IfNotPresent
+        command: ["/bin/sh", "/scripts/reconcile.sh"]
+        env:
+        - name: RECONCILE_INTERVAL_SECONDS
+          value: "21600"
+        readinessProbe:
+          exec:
+            command: ["/bin/sh", "-c", "test -f /tmp/nats-setup/ready"]
+          initialDelaySeconds: 1
+          periodSeconds: 2
+          timeoutSeconds: 1
+          failureThreshold: 30
+        resources:
+          requests:
+            cpu: 20m
+            memory: 32Mi
+          limits:
+            cpu: 100m
+            memory: 128Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+          readOnlyRootFilesystem: true
+        volumeMounts:
+        - name: script
+          mountPath: /scripts
+          readOnly: true
+        - name: tmp
+          mountPath: /tmp
+      volumes:
+      - name: script
+        configMap:
+          name: nats-setup-script
+          defaultMode: 0444
+      - name: tmp
+        emptyDir: {}

@@ -1,0 +1,174 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nats-bootstrap
+  namespace: nats
+  labels:
+    app.kubernetes.io/name: nats
+    app.kubernetes.io/component: bootstrap
+data:
+  bootstrap.sh: |
+    #!/bin/sh
+    set -eu
+
+    nats_args="--server=${NATS_URL} --user=${NATS_USER} --password=${NATS_PASSWORD} --tlsca=/etc/nats-ca/ca.crt"
+
+    until nats ${nats_args} account info >/dev/null 2>&1; do
+      echo "waiting for the NATS JetStream account"
+      sleep 2
+    done
+
+    for config in /config/streams/*.json; do
+      stream_name="$(basename "${config}" .json)"
+      if nats ${nats_args} stream info "${stream_name}" >/dev/null 2>&1; then
+        nats ${nats_args} stream update "${stream_name}" --config "${config}" --force
+      else
+        nats ${nats_args} stream add --config "${config}"
+      fi
+    done
+
+    ensure_kv() {
+      bucket="$1"
+      history="$2"
+      ttl="$3"
+      max_bytes="$4"
+      if nats ${nats_args} kv info "${bucket}" >/dev/null 2>&1; then
+        echo "KV bucket ${bucket} already exists"
+      else
+        nats ${nats_args} kv add "${bucket}" \
+          --history="${history}" \
+          --replicas=3 \
+          --storage=file \
+          --ttl="${ttl}" \
+          --max-bucket-size="${max_bytes}"
+      fi
+    }
+
+    ensure_kv STOREFRONT_PRODUCTS 5 0s 536870912
+    ensure_kv STOREFRONT_CARTS 2 0s 536870912
+    ensure_kv STOREFRONT_CONTEXT 2 1h 268435456
+    ensure_kv STOREFRONT_ORDERS 10 0s 536870912
+    ensure_kv STOREFRONT_OPERATIONS 10 24h 268435456
+    nats ${nats_args} stream list
+    nats ${nats_args} kv list
+  BOUTIQUE_COMMANDS.json: |
+    {
+      "name": "BOUTIQUE_COMMANDS",
+      "description": "Durable Online Boutique state-changing commands",
+      "subjects": ["boutique.cmd.>"],
+      "retention": "workqueue",
+      "max_consumers": -1,
+      "max_msgs": 1000000,
+      "max_bytes": 1073741824,
+      "max_age": 604800000000000,
+      "max_msgs_per_subject": -1,
+      "max_msg_size": 262144,
+      "storage": "file",
+      "discard": "new",
+      "num_replicas": 3,
+      "duplicate_window": 120000000000,
+      "allow_direct": false
+    }
+  BOUTIQUE_EVENTS.json: |
+    {
+      "name": "BOUTIQUE_EVENTS",
+      "description": "Replayable Online Boutique integration events",
+      "subjects": ["boutique.evt.>"],
+      "retention": "limits",
+      "max_consumers": -1,
+      "max_msgs": 5000000,
+      "max_bytes": 2147483648,
+      "max_age": 2592000000000000,
+      "max_msgs_per_subject": -1,
+      "max_msg_size": 262144,
+      "storage": "file",
+      "discard": "old",
+      "num_replicas": 3,
+      "duplicate_window": 120000000000,
+      "allow_direct": true
+    }
+  BOUTIQUE_DLQ.json: |
+    {
+      "name": "BOUTIQUE_DLQ",
+      "description": "Restricted terminal message diagnostics without raw sensitive payloads",
+      "subjects": ["boutique.dlq.>"],
+      "retention": "limits",
+      "max_consumers": -1,
+      "max_msgs": 1000000,
+      "max_bytes": 536870912,
+      "max_age": 7776000000000000,
+      "max_msgs_per_subject": -1,
+      "max_msg_size": 262144,
+      "storage": "file",
+      "discard": "old",
+      "num_replicas": 3,
+      "duplicate_window": 120000000000,
+      "allow_direct": false
+    }
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: nats-bootstrap
+  namespace: nats
+  labels:
+    app.kubernetes.io/name: nats
+    app.kubernetes.io/component: bootstrap
+spec:
+  backoffLimit: 6
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: nats-bootstrap
+        app.kubernetes.io/part-of: online-boutique
+    spec:
+      restartPolicy: OnFailure
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: bootstrap
+        image: natsio/nats-box:0.19.7-nonroot
+        command: ["sh", "/config/bootstrap.sh"]
+        envFrom:
+        - secretRef:
+            name: nats-admin-credentials
+        resources:
+          requests:
+            cpu: 20m
+            memory: 32Mi
+          limits:
+            cpu: 100m
+            memory: 128Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+          readOnlyRootFilesystem: true
+        volumeMounts:
+        - name: config
+          mountPath: /config
+          readOnly: true
+        - name: ca
+          mountPath: /etc/nats-ca
+          readOnly: true
+      volumes:
+      - name: config
+        configMap:
+          name: nats-bootstrap
+          items:
+          - key: bootstrap.sh
+            path: bootstrap.sh
+          - key: BOUTIQUE_COMMANDS.json
+            path: streams/BOUTIQUE_COMMANDS.json
+          - key: BOUTIQUE_EVENTS.json
+            path: streams/BOUTIQUE_EVENTS.json
+          - key: BOUTIQUE_DLQ.json
+            path: streams/BOUTIQUE_DLQ.json
+      - name: ca
+        configMap:
+          name: nats-ca

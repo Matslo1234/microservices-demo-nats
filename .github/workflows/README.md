@@ -46,6 +46,5 @@ This workflow is manually triggered via the `workflow_dispatch` event to automat
 1. Validates the release version format.
 2. Automates the build and push of container images to Google Cloud Build.
 3. Automatically regenerates Kubernetes manifests and Kustomize bases.
-4. Packages and pushes the Helm chart.
-5. Branches and tags the repository.
-6. Opens a new Pull Request targeting `main` with the release checklist.
+4. Branches and tags the repository.
+5. Opens a new Pull Request targeting `main` with the release checklist.

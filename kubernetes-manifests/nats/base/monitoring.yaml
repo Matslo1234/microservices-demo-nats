@@ -1,0 +1,232 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: nats-metrics
+  namespace: nats
+  labels:
+    app.kubernetes.io/name: nats
+    app.kubernetes.io/component: metrics
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "7777"
+    prometheus.io/path: /metrics
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: nats
+  ports:
+  - name: metrics
+    port: 7777
+    targetPort: metrics
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nats-prometheus-rules
+  namespace: nats
+  labels:
+    app.kubernetes.io/name: nats
+    app.kubernetes.io/component: monitoring
+data:
+  nats.rules.yaml: |
+    groups:
+    - name: nats-phase1
+      rules:
+      - alert: NatsServerUnavailable
+        expr: up{job=~".*nats.*"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: NATS server metrics target is unavailable
+      - alert: NatsSlowConsumers
+        expr: gnatsd_varz_slow_consumers > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: NATS reports slow consumers
+      - alert: NatsJetStreamStorageHigh
+        expr: gnatsd_varz_jetstream_stats_storage / gnatsd_varz_jetstream_config_max_storage > 0.80
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: JetStream storage is over 80 percent on a server
+      - alert: NatsJetStreamQuorumAtRisk
+        expr: gnatsd_varz_jetstream_meta_cluster_size < 3
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: The JetStream metadata cluster has fewer than three members
+      - alert: NatsJetStreamConsumerRedelivery
+        expr: increase(jetstream_consumer_num_redelivered[10m]) > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: A JetStream consumer is redelivering messages
+      - alert: NatsJetStreamConsumerLag
+        expr: max by (stream_name, consumer_name) (jetstream_consumer_num_pending) > 100
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: A durable NATS consumer has more than 100 pending messages
+      - alert: NatsJetStreamAckBacklog
+        expr: max by (stream_name, consumer_name) (jetstream_consumer_num_ack_pending) > 50
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: A durable NATS consumer has more than 50 unacknowledged messages
+      - alert: BoutiqueDependencyUnavailable
+        expr: boutique_dependency_ready == 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: An Online Boutique NATS worker reports an unavailable dependency
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nats-grafana-dashboard
+  namespace: nats
+  labels:
+    app.kubernetes.io/name: nats
+    app.kubernetes.io/component: monitoring
+    grafana_dashboard: "1"
+data:
+  online-boutique-nats.json: |
+    {
+      "annotations": {"list": []},
+      "editable": true,
+      "graphTooltip": 1,
+      "panels": [
+        {
+          "type": "stat",
+          "title": "NATS servers up",
+          "targets": [{"expr": "sum(up{job=~\".*nats.*\"})", "refId": "A"}],
+          "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0}
+        },
+        {
+          "type": "stat",
+          "title": "Client connections",
+          "targets": [{"expr": "sum(gnatsd_varz_connections)", "refId": "A"}],
+          "gridPos": {"h": 4, "w": 6, "x": 6, "y": 0}
+        },
+        {
+          "type": "stat",
+          "title": "Slow consumers",
+          "targets": [{"expr": "sum(gnatsd_varz_slow_consumers)", "refId": "A"}],
+          "gridPos": {"h": 4, "w": 6, "x": 12, "y": 0}
+        },
+        {
+          "type": "stat",
+          "title": "JetStream bytes",
+          "targets": [{"expr": "sum(gnatsd_varz_jetstream_stats_storage)", "refId": "A"}],
+          "gridPos": {"h": 4, "w": 6, "x": 18, "y": 0}
+        },
+        {
+          "type": "timeseries",
+          "title": "Message rate",
+          "targets": [
+            {"expr": "sum(rate(gnatsd_varz_in_msgs[5m]))", "legendFormat": "in", "refId": "A"},
+            {"expr": "sum(rate(gnatsd_varz_out_msgs[5m]))", "legendFormat": "out", "refId": "B"}
+          ],
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4}
+        },
+        {
+          "type": "timeseries",
+          "title": "Consumer pending and redelivered",
+          "targets": [
+            {"expr": "sum by (stream_name, consumer_name) (jetstream_consumer_num_pending)", "legendFormat": "{{stream_name}}/{{consumer_name}} pending", "refId": "A"},
+            {"expr": "sum by (stream_name, consumer_name) (jetstream_consumer_num_redelivered)", "legendFormat": "{{stream_name}}/{{consumer_name}} redelivered", "refId": "B"},
+            {"expr": "sum by (stream_name, consumer_name) (jetstream_consumer_num_ack_pending)", "legendFormat": "{{stream_name}}/{{consumer_name}} ack pending", "refId": "C"}
+          ],
+          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4}
+        },
+        {
+          "type": "timeseries",
+          "title": "Application dependency readiness",
+          "targets": [
+            {"expr": "min by (service, dependency) (boutique_dependency_ready)", "legendFormat": "{{service}}/{{dependency}}", "refId": "A"}
+          ],
+          "gridPos": {"h": 8, "w": 24, "x": 0, "y": 12}
+        }
+      ],
+      "schemaVersion": 41,
+      "tags": ["nats", "online-boutique"],
+      "templating": {"list": []},
+      "time": {"from": "now-1h", "to": "now"},
+      "title": "Online Boutique NATS",
+      "uid": "online-boutique-nats",
+      "version": 1
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nats-advisory-watcher
+  namespace: nats
+  labels:
+    app.kubernetes.io/name: nats-advisory-watcher
+    app.kubernetes.io/component: alerting
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: nats-advisory-watcher
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: nats-advisory-watcher
+        app.kubernetes.io/component: alerting
+        app.kubernetes.io/part-of: online-boutique
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: watcher
+        image: natsio/nats-box:0.19.7-nonroot
+        command:
+        - sh
+        - -ec
+        - |
+          until nats --server="${NATS_URL}" --user="${NATS_USER}" --password="${NATS_PASSWORD}" \
+            --tlsca=/etc/nats-ca/ca.crt account info >/dev/null 2>&1; do
+            echo "waiting for NATS"
+            sleep 2
+          done
+          echo "watching JetStream max-delivery advisories"
+          exec nats --server="${NATS_URL}" --user="${NATS_USER}" --password="${NATS_PASSWORD}" \
+            --tlsca=/etc/nats-ca/ca.crt sub '$JS.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES.>' --raw
+        envFrom:
+        - secretRef:
+            name: nats-messageoperations-credentials
+        resources:
+          requests:
+            cpu: 10m
+            memory: 16Mi
+          limits:
+            cpu: 50m
+            memory: 64Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+          readOnlyRootFilesystem: true
+        volumeMounts:
+        - name: ca
+          mountPath: /etc/nats-ca
+          readOnly: true
+      volumes:
+      - name: ca
+        configMap:
+          name: nats-ca

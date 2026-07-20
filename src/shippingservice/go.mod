@@ -1,14 +1,15 @@
 module github.com/GoogleCloudPlatform/microservices-demo/src/shippingservice
 
-go 1.25.0
+go 1.25.8
 
 toolchain go1.26.4
 
 require (
 	cloud.google.com/go/profiler v0.6.0
+	github.com/GoogleCloudPlatform/microservices-demo/protos v0.0.0
+	github.com/nats-io/nats.go v1.52.0
 	github.com/sirupsen/logrus v1.9.4
 	golang.org/x/net v0.56.0
-	google.golang.org/grpc v1.80.0
 	google.golang.org/protobuf v1.36.11
 )
 
@@ -24,6 +25,9 @@ require (
 	github.com/google/s2a-go v0.1.9 // indirect
 	github.com/googleapis/enterprise-certificate-proxy v0.3.14 // indirect
 	github.com/googleapis/gax-go/v2 v2.21.0 // indirect
+	github.com/klauspost/compress v1.18.5 // indirect
+	github.com/nats-io/nkeys v0.4.15 // indirect
+	github.com/nats-io/nuid v1.0.1 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.63.0 // indirect
 	go.opentelemetry.io/otel v1.42.0 // indirect
@@ -39,4 +43,7 @@ require (
 	google.golang.org/genproto v0.0.0-20260319201613-d00831a3d3e7 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260401001100-f93e5f3e9f0f // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260401024825-9d38bb4040a9 // indirect
+	google.golang.org/grpc v1.80.0 // indirect
 )
+
+replace github.com/GoogleCloudPlatform/microservices-demo/protos => ../../protos

@@ -1,0 +1,23 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nats-client-config
+  namespace: default
+  labels:
+    app.kubernetes.io/name: nats-client-config
+    app.kubernetes.io/part-of: online-boutique
+data:
+  NATS_URL: tls://nats.nats.svc.cluster.local:4222
+  NATS_CA_FILE: /etc/nats-ca/ca.crt
+  NATS_CONNECT_TIMEOUT: 2s
+  NATS_RECONNECT_WAIT: 2s
+  NATS_MAX_RECONNECTS: "-1"
+  NATS_DRAIN_TIMEOUT: 30s
+  NATS_PUBLISH_TIMEOUT: 5s
+  NATS_REQUEST_TIMEOUT: 2s
+  NATS_PING_INTERVAL: 20s
+  NATS_MAX_PINGS_OUT: "2"
+  NATS_REQUIRED: "false"
+  NATS_REQUIRED_SUBSCRIPTIONS: ""
+  NATS_HEALTH_MAX_DISCONNECTED: 15s
+  NATS_TRACE_PROPAGATION: w3c

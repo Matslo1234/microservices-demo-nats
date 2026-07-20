@@ -11,7 +11,6 @@ This document walks through the process of creating a new release of Online Bout
 2. Ensure that the following commands are in your `PATH`:
    - `gsed` (found in the `gnu-sed` Brew package for macOS, or by symlinking `sed` for Linux)
    - `gcloud`
-   - `helm`
 
 3. Make sure that your `gcloud` is authenticated:
 
@@ -38,9 +37,8 @@ The preferred way to start a new release is to run the **Manual Release Builder*
 This workflow will:
 1. Build and push the container images for all services.
 2. Regenerate YAML manifests and Kustomize bases.
-3. Package and push the Helm chart.
-4. Create and push a new branch `release/vX.Y.Z` and a git tag `vX.Y.Z`.
-5. Automatically open a Pull Request targeting `main` with the release checklist.
+3. Create and push a new branch `release/vX.Y.Z` and a git tag `vX.Y.Z`.
+4. Automatically open a Pull Request targeting `main` with the release checklist.
 
 ### Alternative: Manual release script
 

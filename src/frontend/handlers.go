@@ -15,12 +15,10 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"html/template"
 	"io"
-	"math/rand"
 	"net"
 	"net/http"
 	"os"
@@ -28,6 +26,7 @@ import (
 	"strings"
 	"time"
 
+	commonv1 "github.com/GoogleCloudPlatform/microservices-demo/protos/common/v1"
 	"github.com/gorilla/mux"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
@@ -59,35 +58,18 @@ var validEnvs = []string{"local", "gcp", "azure", "aws", "onprem", "alibaba"}
 func (fe *frontendServer) homeHandler(w http.ResponseWriter, r *http.Request) {
 	log := r.Context().Value(ctxKeyLog{}).(logrus.FieldLogger)
 	log.WithField("currency", currentCurrency(r)).Info("home")
-	currencies, err := fe.getCurrencies(r.Context())
+	view, err := fe.storefrontQuery(r.Context(), "home", storefrontQueryRequest{
+		UserID: sessionID(r), CurrencyCode: currentCurrency(r),
+	})
 	if err != nil {
-		renderHTTPError(log, r, w, errors.Wrap(err, "could not retrieve currencies"), http.StatusInternalServerError)
+		renderStorefrontError(log, r, w, errors.Wrap(err, "could not retrieve home view"))
 		return
 	}
-	products, err := fe.getProducts(r.Context())
-	if err != nil {
-		renderHTTPError(log, r, w, errors.Wrap(err, "could not retrieve products"), http.StatusInternalServerError)
-		return
-	}
-	cart, err := fe.getCart(r.Context(), sessionID(r))
-	if err != nil {
-		renderHTTPError(log, r, w, errors.Wrap(err, "could not retrieve cart"), http.StatusInternalServerError)
-		return
-	}
-
-	type productView struct {
-		Item  *pb.Product
-		Price *pb.Money
-	}
-	ps := make([]productView, len(products))
-	for i, p := range products {
-		price, err := fe.convertCurrency(r.Context(), p.GetPriceUsd(), currentCurrency(r))
-		if err != nil {
-			renderHTTPError(log, r, w, errors.Wrapf(err, "failed to do currency conversion for product %s", p.GetId()), http.StatusInternalServerError)
-			return
+	defer func() {
+		if err := fe.publishPageView(r.Context(), sessionID(r), "home", "", nil, view.CartVersion); err != nil {
+			log.WithError(err).Warn("failed to publish home page view")
 		}
-		ps[i] = productView{p, price}
-	}
+	}()
 
 	// Set ENV_PLATFORM (default to local if not set; use env var if set; otherwise detect GCP, which overrides env)_
 	var env = os.Getenv("ENV_PLATFORM")
@@ -109,11 +91,11 @@ func (fe *frontendServer) homeHandler(w http.ResponseWriter, r *http.Request) {
 
 	if err := templates.ExecuteTemplate(w, "home", injectCommonTemplateData(r, map[string]interface{}{
 		"show_currency": true,
-		"currencies":    currencies,
-		"products":      ps,
-		"cart_size":     cartSize(cart),
+		"currencies":    filterCurrencies(view.Currencies),
+		"products":      view.Products,
+		"cart_size":     view.CartSize,
 		"banner_color":  os.Getenv("BANNER_COLOR"), // illustrates canary deployments
-		"ad":            fe.chooseAd(r.Context(), []string{}, log),
+		"ad":            view.Ad,
 	})); err != nil {
 		log.Error(err)
 	}
@@ -151,58 +133,31 @@ func (fe *frontendServer) productHandler(w http.ResponseWriter, r *http.Request)
 	log.WithField("id", id).WithField("currency", currentCurrency(r)).
 		Debug("serving product page")
 
-	p, err := fe.getProduct(r.Context(), id)
+	view, err := fe.storefrontQuery(r.Context(), "product", storefrontQueryRequest{
+		ProductID: id, UserID: sessionID(r), CurrencyCode: currentCurrency(r),
+	})
 	if err != nil {
-		renderHTTPError(log, r, w, errors.Wrap(err, "could not retrieve product"), http.StatusInternalServerError)
+		renderStorefrontError(log, r, w, errors.Wrap(err, "could not retrieve product view"))
 		return
 	}
-	currencies, err := fe.getCurrencies(r.Context())
-	if err != nil {
-		renderHTTPError(log, r, w, errors.Wrap(err, "could not retrieve currencies"), http.StatusInternalServerError)
+	if view.Product == nil || view.Product.Item == nil {
+		renderStorefrontError(log, r, w, errors.New("product projection is incomplete"))
 		return
 	}
-
-	cart, err := fe.getCart(r.Context(), sessionID(r))
-	if err != nil {
-		renderHTTPError(log, r, w, errors.Wrap(err, "could not retrieve cart"), http.StatusInternalServerError)
-		return
-	}
-
-	price, err := fe.convertCurrency(r.Context(), p.GetPriceUsd(), currentCurrency(r))
-	if err != nil {
-		renderHTTPError(log, r, w, errors.Wrap(err, "failed to convert currency"), http.StatusInternalServerError)
-		return
-	}
-
-	// ignores the error retrieving recommendations since it is not critical
-	recommendations, err := fe.getRecommendations(r.Context(), sessionID(r), []string{id})
-	if err != nil {
-		log.WithField("error", err).Warn("failed to get product recommendations")
-	}
-
-	product := struct {
-		Item  *pb.Product
-		Price *pb.Money
-	}{p, price}
-
-	// Fetch packaging info (weight/dimensions) of the product
-	// The packaging service is an optional microservice you can run as part of a Google Cloud demo.
-	var packagingInfo *PackagingInfo = nil
-	if isPackagingServiceConfigured() {
-		packagingInfo, err = httpGetPackagingInfo(id)
-		if err != nil {
-			fmt.Println("Failed to obtain product's packaging info:", err)
+	defer func() {
+		if err := fe.publishPageView(r.Context(), sessionID(r), "product", id, view.Product.Item.Categories, view.CartVersion); err != nil {
+			log.WithError(err).Warn("failed to publish product page view")
 		}
-	}
+	}()
 
 	if err := templates.ExecuteTemplate(w, "product", injectCommonTemplateData(r, map[string]interface{}{
-		"ad":              fe.chooseAd(r.Context(), p.Categories, log),
+		"ad":              view.Ad,
 		"show_currency":   true,
-		"currencies":      currencies,
-		"product":         product,
-		"recommendations": recommendations,
-		"cart_size":       cartSize(cart),
-		"packagingInfo":   packagingInfo,
+		"currencies":      filterCurrencies(view.Currencies),
+		"product":         view.Product,
+		"recommendations": view.Recommendations,
+		"cart_size":       view.CartSize,
+		"packagingInfo":   nil,
 	})); err != nil {
 		log.Println(err)
 	}
@@ -222,17 +177,40 @@ func (fe *frontendServer) addToCartHandler(w http.ResponseWriter, r *http.Reques
 	}
 	log.WithField("product", payload.ProductID).WithField("quantity", payload.Quantity).Debug("adding to cart")
 
-	p, err := fe.getProduct(r.Context(), payload.ProductID)
+	view, err := fe.storefrontQuery(r.Context(), "product", storefrontQueryRequest{
+		ProductID: payload.ProductID, UserID: sessionID(r), CurrencyCode: currentCurrency(r),
+	})
 	if err != nil {
-		renderHTTPError(log, r, w, errors.Wrap(err, "could not retrieve product"), http.StatusInternalServerError)
+		renderStorefrontError(log, r, w, errors.Wrap(err, "could not validate product"))
+		return
+	}
+	if view.Product == nil || view.Product.Item == nil {
+		renderStorefrontError(log, r, w, errors.New("product projection is incomplete"))
 		return
 	}
 
-	if err := fe.insertCart(r.Context(), sessionID(r), p.GetId(), int32(payload.Quantity)); err != nil {
-		renderHTTPError(log, r, w, errors.Wrap(err, "failed to add to cart"), http.StatusInternalServerError)
+	operationID, err := cartOperationID(r, sessionID(r), "add-item")
+	if err != nil {
+		renderHTTPError(log, r, w, err, http.StatusBadRequest)
 		return
 	}
-	w.Header().Set("location", baseUrl + "/cart")
+	setOperationHeaders(w, operationID)
+	if err := fe.publishCartAdd(r.Context(), operationID, sessionID(r), view.Product.Item.GetId(),
+		int32(payload.Quantity), view.CartVersion); err != nil {
+		w.Header().Set("Retry-After", "1")
+		renderHTTPError(log, r, w, errors.Wrap(err, "failed to queue cart update"), http.StatusServiceUnavailable)
+		return
+	}
+	operation, err := fe.waitForCartOperation(r.Context(), operationID, sessionID(r))
+	if err != nil {
+		writeAcceptedOperation(w, r, operationID, "cart.add-item", baseUrl+"/cart")
+		return
+	}
+	if operation.Status == "REJECTED" {
+		writeRejectedOperation(w, r, operation, baseUrl+"/cart")
+		return
+	}
+	w.Header().Set("location", baseUrl+"/cart")
 	w.WriteHeader(http.StatusFound)
 }
 
@@ -240,77 +218,73 @@ func (fe *frontendServer) emptyCartHandler(w http.ResponseWriter, r *http.Reques
 	log := r.Context().Value(ctxKeyLog{}).(logrus.FieldLogger)
 	log.Debug("emptying cart")
 
-	if err := fe.emptyCart(r.Context(), sessionID(r)); err != nil {
-		renderHTTPError(log, r, w, errors.Wrap(err, "failed to empty cart"), http.StatusInternalServerError)
+	view, err := fe.storefrontQuery(r.Context(), "cart", storefrontQueryRequest{
+		UserID: sessionID(r), CurrencyCode: currentCurrency(r),
+	})
+	if err != nil {
+		renderStorefrontError(log, r, w, errors.Wrap(err, "could not retrieve cart version"))
 		return
 	}
-	w.Header().Set("location", baseUrl + "/")
+	operationID, err := cartOperationID(r, sessionID(r), "clear")
+	if err != nil {
+		renderHTTPError(log, r, w, err, http.StatusBadRequest)
+		return
+	}
+	setOperationHeaders(w, operationID)
+	if err := fe.publishCartClear(r.Context(), operationID, sessionID(r), view.CartVersion); err != nil {
+		w.Header().Set("Retry-After", "1")
+		renderHTTPError(log, r, w, errors.Wrap(err, "failed to queue cart clear"), http.StatusServiceUnavailable)
+		return
+	}
+	operation, err := fe.waitForCartOperation(r.Context(), operationID, sessionID(r))
+	if err != nil {
+		writeAcceptedOperation(w, r, operationID, "cart.clear", baseUrl+"/")
+		return
+	}
+	if operation.Status == "REJECTED" {
+		writeRejectedOperation(w, r, operation, baseUrl+"/")
+		return
+	}
+	w.Header().Set("location", baseUrl+"/")
 	w.WriteHeader(http.StatusFound)
 }
 
 func (fe *frontendServer) viewCartHandler(w http.ResponseWriter, r *http.Request) {
 	log := r.Context().Value(ctxKeyLog{}).(logrus.FieldLogger)
 	log.Debug("view user cart")
-	currencies, err := fe.getCurrencies(r.Context())
+	view, err := fe.storefrontQuery(r.Context(), "cart", storefrontQueryRequest{
+		UserID: sessionID(r), CurrencyCode: currentCurrency(r),
+	})
 	if err != nil {
-		renderHTTPError(log, r, w, errors.Wrap(err, "could not retrieve currencies"), http.StatusInternalServerError)
+		renderStorefrontError(log, r, w, errors.Wrap(err, "could not retrieve cart view"))
 		return
 	}
-	cart, err := fe.getCart(r.Context(), sessionID(r))
-	if err != nil {
-		renderHTTPError(log, r, w, errors.Wrap(err, "could not retrieve cart"), http.StatusInternalServerError)
-		return
-	}
-
-	// ignores the error retrieving recommendations since it is not critical
-	recommendations, err := fe.getRecommendations(r.Context(), sessionID(r), cartIDs(cart))
-	if err != nil {
-		log.WithField("error", err).Warn("failed to get product recommendations")
-	}
-
-	shippingCost, err := fe.getShippingQuote(r.Context(), cart, currentCurrency(r))
-	if err != nil {
-		renderHTTPError(log, r, w, errors.Wrap(err, "failed to get shipping quote"), http.StatusInternalServerError)
-		return
-	}
-
-	type cartItemView struct {
-		Item     *pb.Product
-		Quantity int32
-		Price    *pb.Money
-	}
-	items := make([]cartItemView, len(cart))
+	defer func() {
+		if err := fe.publishPageView(r.Context(), sessionID(r), "cart", "", nil, view.CartVersion); err != nil {
+			log.WithError(err).Warn("failed to publish cart page view")
+		}
+	}()
 	totalPrice := pb.Money{CurrencyCode: currentCurrency(r)}
-	for i, item := range cart {
-		p, err := fe.getProduct(r.Context(), item.GetProductId())
-		if err != nil {
-			renderHTTPError(log, r, w, errors.Wrapf(err, "could not retrieve product #%s", item.GetProductId()), http.StatusInternalServerError)
-			return
-		}
-		price, err := fe.convertCurrency(r.Context(), p.GetPriceUsd(), currentCurrency(r))
-		if err != nil {
-			renderHTTPError(log, r, w, errors.Wrapf(err, "could not convert currency for product #%s", item.GetProductId()), http.StatusInternalServerError)
-			return
-		}
-
-		multPrice := money.MultiplySlow(*price, uint32(item.GetQuantity()))
-		items[i] = cartItemView{
-			Item:     p,
-			Quantity: item.GetQuantity(),
-			Price:    &multPrice}
-		totalPrice = money.Must(money.Sum(totalPrice, multPrice))
+	for _, item := range view.Items {
+		totalPrice = money.Must(money.Sum(totalPrice, *item.Price))
 	}
-	totalPrice = money.Must(money.Sum(totalPrice, *shippingCost))
+	shippingCost := view.ShippingCost
+	if shippingCost == nil {
+		shippingCost = &pb.Money{CurrencyCode: currentCurrency(r)}
+	} else {
+		totalPrice = money.Must(money.Sum(totalPrice, *shippingCost))
+	}
 	year := time.Now().Year()
 
 	if err := templates.ExecuteTemplate(w, "cart", injectCommonTemplateData(r, map[string]interface{}{
-		"currencies":       currencies,
-		"recommendations":  recommendations,
-		"cart_size":        cartSize(cart),
+		"currencies":       filterCurrencies(view.Currencies),
+		"recommendations":  view.Recommendations,
+		"cart_size":        view.CartSize,
 		"shipping_cost":    shippingCost,
+		"shipping_pending": view.ShippingPending,
 		"show_currency":    true,
 		"total_cost":       totalPrice,
-		"items":            items,
+		"items":            view.Items,
 		"expiration_years": []int{year, year + 1, year + 2, year + 3, year + 4},
 	})); err != nil {
 		log.Println(err)
@@ -351,65 +325,59 @@ func (fe *frontendServer) placeOrderHandler(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	order, err := pb.NewCheckoutServiceClient(fe.checkoutSvcConn).
-		PlaceOrder(r.Context(), &pb.PlaceOrderRequest{
-			Email: payload.Email,
-			CreditCard: &pb.CreditCardInfo{
-				CreditCardNumber:          payload.CcNumber,
-				CreditCardExpirationMonth: int32(payload.CcMonth),
-				CreditCardExpirationYear:  int32(payload.CcYear),
-				CreditCardCvv:             int32(payload.CcCVV)},
-			UserId:       sessionID(r),
-			UserCurrency: currentCurrency(r),
-			Address: &pb.Address{
-				StreetAddress: payload.StreetAddress,
-				City:          payload.City,
-				State:         payload.State,
-				ZipCode:       int32(payload.ZipCode),
-				Country:       payload.Country},
-		})
+	orderID, err := checkoutOrderID(r, sessionID(r))
 	if err != nil {
-		renderHTTPError(log, r, w, errors.Wrap(err, "failed to complete the order"), http.StatusInternalServerError)
+		renderHTTPError(log, r, w, err, http.StatusBadRequest)
 		return
 	}
-	log.WithField("order", order.GetOrder().GetOrderId()).Info("order placed")
-
-	order.GetOrder().GetItems()
-	recommendations, _ := fe.getRecommendations(r.Context(), sessionID(r), nil)
-
-	totalPaid := *order.GetOrder().GetShippingCost()
-	for _, v := range order.GetOrder().GetItems() {
-		multPrice := money.MultiplySlow(*v.GetCost(), uint32(v.GetItem().GetQuantity()))
-		totalPaid = money.Must(money.Sum(totalPaid, multPrice))
-	}
-
-	currencies, err := fe.getCurrencies(r.Context())
-	if err != nil {
-		renderHTTPError(log, r, w, errors.Wrap(err, "could not retrieve currencies"), http.StatusInternalServerError)
+	existing, existingErr := fe.storefrontQuery(r.Context(), "order", storefrontQueryRequest{OrderID: orderID, UserID: sessionID(r)})
+	if existingErr == nil && existing.Order != nil {
+		writeOrderResponse(w, r, http.StatusAccepted, existing.Order)
 		return
 	}
-
-	if err := templates.ExecuteTemplate(w, "order", injectCommonTemplateData(r, map[string]interface{}{
-		"show_currency":   false,
-		"currencies":      currencies,
-		"order":           order.GetOrder(),
-		"total_paid":      &totalPaid,
-		"recommendations": recommendations,
-	})); err != nil {
-		log.Println(err)
+	if existingErr != nil && !errors.Is(existingErr, errProjectionNotFound) {
+		w.Header().Set("Retry-After", "1")
+		renderStorefrontError(log, r, w, errors.Wrap(existingErr, "could not verify idempotent order status"))
+		return
 	}
+	view, err := fe.storefrontQuery(r.Context(), "cart", storefrontQueryRequest{UserID: sessionID(r), CurrencyCode: currentCurrency(r)})
+	if err != nil {
+		renderStorefrontError(log, r, w, errors.Wrap(err, "could not retrieve checkout snapshot"))
+		return
+	}
+	if len(view.Items) == 0 {
+		renderHTTPError(log, r, w, errors.New("cannot check out an empty cart"), http.StatusConflict)
+		return
+	}
+	card := paymentCard{Number: payload.CcNumber, ExpirationMonth: int32(payload.CcMonth), ExpirationYear: int32(payload.CcYear), CVV: int32(payload.CcCVV)}
+	token, err := fe.tokenizePayment(r.Context(), orderID, card)
+	if err != nil {
+		renderHTTPError(log, r, w, errors.Wrap(err, "payment tokenization failed"), http.StatusUnprocessableEntity)
+		return
+	}
+	address := &commonv1.PostalAddress{StreetAddress: payload.StreetAddress, City: payload.City, State: payload.State,
+		ZipCode: int32(payload.ZipCode), Country: payload.Country}
+	if err := fe.publishOrder(r.Context(), orderID, sessionID(r), payload.Email, currentCurrency(r), address, token,
+		view.CartVersion, view.CatalogRevision, view.RateRevision); err != nil {
+		w.Header().Set("Retry-After", "1")
+		renderHTTPError(log, r, w, errors.Wrap(err, "could not queue order"), http.StatusServiceUnavailable)
+		return
+	}
+	log.WithField("order_id", orderID).Info("order queued")
+	writeAcceptedOrder(w, r, orderID)
 }
 
 func (fe *frontendServer) assistantHandler(w http.ResponseWriter, r *http.Request) {
-	currencies, err := fe.getCurrencies(r.Context())
+	log := r.Context().Value(ctxKeyLog{}).(logrus.FieldLogger)
+	view, err := fe.storefrontQuery(r.Context(), "currencies", storefrontQueryRequest{CurrencyCode: currentCurrency(r)})
 	if err != nil {
-		renderHTTPError(log, r, w, errors.Wrap(err, "could not retrieve currencies"), http.StatusInternalServerError)
+		renderStorefrontError(log, r, w, errors.Wrap(err, "could not retrieve currencies"))
 		return
 	}
 
 	if err := templates.ExecuteTemplate(w, "assistant", injectCommonTemplateData(r, map[string]interface{}{
 		"show_currency": false,
-		"currencies":    currencies,
+		"currencies":    filterCurrencies(view.Currencies),
 	})); err != nil {
 		log.Println(err)
 	}
@@ -423,7 +391,7 @@ func (fe *frontendServer) logoutHandler(w http.ResponseWriter, r *http.Request) 
 		c.MaxAge = -1
 		http.SetCookie(w, c)
 	}
-	w.Header().Set("Location", baseUrl + "/")
+	w.Header().Set("Location", baseUrl+"/")
 	w.WriteHeader(http.StatusFound)
 }
 
@@ -433,23 +401,37 @@ func (fe *frontendServer) getProductByID(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	p, err := fe.getProduct(r.Context(), id)
+	ids := strings.Split(id, ",")
+	view, err := fe.storefrontQuery(r.Context(), "product-meta", storefrontQueryRequest{ProductIDs: ids})
 	if err != nil {
+		if errors.Is(err, errProjectionNotFound) {
+			http.NotFound(w, r)
+		} else {
+			http.Error(w, "product projection unavailable", http.StatusServiceUnavailable)
+		}
 		return
 	}
-
-	jsonData, err := json.Marshal(p)
+	var payload interface{} = view.ProductMeta
+	if len(ids) == 1 && len(view.ProductMeta) == 1 {
+		payload = view.ProductMeta[0]
+	}
+	jsonData, err := json.Marshal(payload)
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
 
-	w.Write(jsonData)
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(jsonData)
 }
 
 func (fe *frontendServer) chatBotHandler(w http.ResponseWriter, r *http.Request) {
 	log := r.Context().Value(ctxKeyLog{}).(logrus.FieldLogger)
+	if !assistantEnabled || fe.shoppingAssistantSvcAddr == "" {
+		http.Error(w, "shopping assistant is not enabled", http.StatusNotFound)
+		return
+	}
 	type Response struct {
 		Message string `json:"message"`
 	}
@@ -522,17 +504,6 @@ func (fe *frontendServer) setCurrencyHandler(w http.ResponseWriter, r *http.Requ
 	w.WriteHeader(http.StatusFound)
 }
 
-// chooseAd queries for advertisements available and randomly chooses one, if
-// available. It ignores the error retrieving the ad since it is not critical.
-func (fe *frontendServer) chooseAd(ctx context.Context, ctxKeys []string, log logrus.FieldLogger) *pb.Ad {
-	ads, err := fe.getAd(ctx, ctxKeys)
-	if err != nil {
-		log.WithField("error", err).Warn("failed to retrieve ads")
-		return nil
-	}
-	return ads[rand.Intn(len(ads))]
-}
-
 func renderHTTPError(log logrus.FieldLogger, r *http.Request, w http.ResponseWriter, err error, code int) {
 	log.WithField("error", err).Error("request error")
 	errMsg := fmt.Sprintf("%+v", err)
@@ -546,6 +517,16 @@ func renderHTTPError(log logrus.FieldLogger, r *http.Request, w http.ResponseWri
 	})); templateErr != nil {
 		log.Println(templateErr)
 	}
+}
+
+func renderStorefrontError(log logrus.FieldLogger, r *http.Request, w http.ResponseWriter, err error) {
+	code := http.StatusServiceUnavailable
+	if errors.Is(err, errProjectionNotFound) {
+		code = http.StatusNotFound
+	} else if errors.Is(err, errInvalidCurrency) {
+		code = http.StatusUnprocessableEntity
+	}
+	renderHTTPError(log, r, w, err, code)
 }
 
 func injectCommonTemplateData(r *http.Request, payload map[string]interface{}) map[string]interface{} {
@@ -584,23 +565,6 @@ func sessionID(r *http.Request) string {
 		return v.(string)
 	}
 	return ""
-}
-
-func cartIDs(c []*pb.CartItem) []string {
-	out := make([]string, len(c))
-	for i, v := range c {
-		out[i] = v.GetProductId()
-	}
-	return out
-}
-
-// get total # of items in cart
-func cartSize(c []*pb.CartItem) int {
-	cartSize := 0
-	for _, item := range c {
-		cartSize += int(item.GetQuantity())
-	}
-	return cartSize
 }
 
 func renderMoney(money pb.Money) string {
