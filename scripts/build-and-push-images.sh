@@ -16,10 +16,10 @@ builds=(
   "currencyservice . src/currencyservice/Dockerfile"
   "emailservice . src/emailservice/Dockerfile"
   "frontend . src/frontend/Dockerfile"
-  "loadgenerator src/loadgenerator Dockerfile"
+  "loadgenerator src/loadgenerator src/loadgenerator/Dockerfile"
   "paymentservice . src/paymentservice/Dockerfile"
   "productcatalogservice . src/productcatalogservice/Dockerfile"
-  "recommendationservice src/recommendationservice Dockerfile"
+  "recommendationservice src/recommendationservice src/recommendationservice/Dockerfile"
   "shippingservice . src/shippingservice/Dockerfile"
   "storefrontprojectionservice . src/storefrontprojectionservice/Dockerfile"
 )
