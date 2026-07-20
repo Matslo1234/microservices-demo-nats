@@ -5,6 +5,8 @@ Kubernetes cluster. It uses Kubernetes resources, a container registry, and
 NATS for the event-driven workflows; no provider-specific services are
 required.
 
+The goal of the project is to explore how NATS can be used for event-driven architecture. The user-facing functinallity is practically identical to the [original project's](https://github.com/GoogleCloudPlatform/microservices-demo).
+
 ## Architecture
 
 Online Boutique is composed of microservices written in Go, C#, Node.js,
@@ -14,17 +16,28 @@ is used at the frontend edge and for pod-local health/metrics only.
 
 ```mermaid
 flowchart LR
-  Client[Browser / API] -->|HTTP| Frontend
-  Frontend -->|queries + commands| NATS[(NATS JetStream)]
-  NATS <--> Services[Domain workers]
-  NATS <--> Projection[Storefront projection]
-  Frontend -->|projected queries| Projection
-  Cart[Cart worker] --> Redis[(Redis)]
+    User[Browser or API client] -->|HTTP| FE[frontend]
+    Load[loadgenerator] -->|HTTP| FE
+
+    FE -->|Core NATS projected queries| Projection[storefront projection]
+    FE -->|JetStream cart/order commands| NATS[(NATS JetStream)]
+    FE -->|Core NATS tokenization query| Payment[payment]
+
+    Catalog[product catalog] -->|owner snapshots| NATS
+    Currency[currency] -->|owner snapshots| NATS
+    NATS --> Cart[cart]
+    NATS --> Recommendation[recommendation]
+    NATS --> Ad[ad]
+    NATS --> Checkout[checkout process manager]
+    NATS --> Shipping[shipping]
+    NATS --> Payment
+    NATS --> Email[email]
+    NATS --> Projection
+    Cart -->|Redis protocol| Redis[(redis-cart)]
+
+    Apps[All domain workloads] -.->|HTTP health and metrics :8080| Monitor[probes / Prometheus]
 ```
 
-Find Protocol Buffer definitions in [`protos`](protos). The deployed request
-flows are documented in [Current service interactions](docs/current-service-interactions.md),
-and the NATS migration design is in the [NATS event-driven upgrade plan](docs/nats-event-driven-upgrade-plan.md).
 
 | Service | Language | Description |
 | --- | --- | --- |
@@ -80,8 +93,6 @@ for your storage platform and mark its StorageClass as the default instead.
 
 Apply NATS before the application. The setup Deployment creates missing broker
 TLS, auth, and JetStream-encryption Secrets without rotating existing values.
-It synchronizes the client CA and workload credentials from those broker
-Secrets so a retained application namespace cannot keep stale connection data.
 
 ```sh
 kubectl apply -k kubernetes-manifests/nats/fresh-cluster
@@ -101,11 +112,6 @@ bash scripts/nats/verify.sh
 
 Note: the application requires a working NATS setup. Verify that NATS is running before you deploy the application.
 
-The catalog and currency deployments publish their deterministic initial
-snapshots to JetStream during startup. The frontend waits for the storefront
-projection to consume those snapshots before it becomes ready, so a fresh
-installation does not expose an uninitialized storefront.
-
 You can use the release manifest (replace its image prefix/tag when publishing
 your own build):
 
@@ -123,9 +129,6 @@ Once the deploy finishes you can access the application via the ip of the LoadBa
 kubectl get service frontend-external
 ```
 
-## Operations and development
+## Development
 
-- [NATS Phase 1 runbook](docs/development/nats-phase1-runbook.md): deployment,
-  verification, backups, recovery, and credential rotation.
-- [Development guide](docs/development-guide.md): local development workflow.
-- [Kustomize configuration](kustomize): deployment customisation options.
+For local development you will need to build your own Docker images and publish them to your own Docker image repository. You can use [build-and-push-images.sh](scripts/build-and-push-images.sh) to build all of the images but you must provide your own username and image tag.
