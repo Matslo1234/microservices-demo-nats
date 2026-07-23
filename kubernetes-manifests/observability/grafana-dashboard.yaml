@@ -1,0 +1,585 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: grafana
+    app.kubernetes.io/part-of: online-boutique-observability
+data:
+  online-boutique.json: |
+    {
+      "annotations": {
+        "list": []
+      },
+      "description": "Metrics and Kubernetes container logs for Online Boutique and NATS.",
+      "editable": false,
+      "fiscalYearStartMonth": 0,
+      "graphTooltip": 1,
+      "id": null,
+      "links": [],
+      "liveNow": false,
+      "panels": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "thresholds"
+              },
+              "decimals": 0,
+              "max": 100,
+              "min": 0,
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "red",
+                    "value": null
+                  },
+                  {
+                    "color": "orange",
+                    "value": 90
+                  },
+                  {
+                    "color": "green",
+                    "value": 100
+                  }
+                ]
+              },
+              "unit": "percent"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 5,
+            "w": 6,
+            "x": 0,
+            "y": 0
+          },
+          "id": 1,
+          "options": {
+            "colorMode": "background",
+            "graphMode": "area",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "showPercentChange": false,
+            "textMode": "auto",
+            "wideLayout": true
+          },
+          "pluginVersion": "13.1.0",
+          "targets": [
+            {
+              "editorMode": "code",
+              "expr": "100 * sum(up{job=\"kubernetes-pods\",namespace=\"default\"}) / count(up{job=\"kubernetes-pods\",namespace=\"default\"})",
+              "instant": true,
+              "legendFormat": "scrape health",
+              "range": false,
+              "refId": "A"
+            }
+          ],
+          "title": "Application metrics targets",
+          "type": "stat"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "thresholds"
+              },
+              "decimals": 0,
+              "max": 100,
+              "min": 0,
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "red",
+                    "value": null
+                  },
+                  {
+                    "color": "green",
+                    "value": 100
+                  }
+                ]
+              },
+              "unit": "percent"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 5,
+            "w": 6,
+            "x": 6,
+            "y": 0
+          },
+          "id": 2,
+          "options": {
+            "colorMode": "background",
+            "graphMode": "area",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "showPercentChange": false,
+            "textMode": "auto",
+            "wideLayout": true
+          },
+          "pluginVersion": "13.1.0",
+          "targets": [
+            {
+              "editorMode": "code",
+              "expr": "100 * avg(boutique_dependency_ready)",
+              "instant": true,
+              "legendFormat": "dependencies",
+              "range": false,
+              "refId": "A"
+            }
+          ],
+          "title": "Dependency health",
+          "type": "stat"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "thresholds"
+              },
+              "decimals": 0,
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "red",
+                    "value": null
+                  },
+                  {
+                    "color": "green",
+                    "value": 3
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 5,
+            "w": 6,
+            "x": 12,
+            "y": 0
+          },
+          "id": 3,
+          "options": {
+            "colorMode": "background",
+            "graphMode": "area",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "showPercentChange": false,
+            "textMode": "auto",
+            "wideLayout": true
+          },
+          "pluginVersion": "13.1.0",
+          "targets": [
+            {
+              "editorMode": "code",
+              "expr": "sum(up{job=\"nats\"})",
+              "instant": true,
+              "legendFormat": "servers",
+              "range": false,
+              "refId": "A"
+            }
+          ],
+          "title": "NATS exporters up",
+          "type": "stat"
+        },
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "thresholds"
+              },
+              "decimals": 0,
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "orange",
+                    "value": 1
+                  },
+                  {
+                    "color": "red",
+                    "value": 10
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 5,
+            "w": 6,
+            "x": 18,
+            "y": 0
+          },
+          "id": 4,
+          "options": {
+            "colorMode": "background",
+            "graphMode": "area",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "showPercentChange": false,
+            "textMode": "auto",
+            "wideLayout": true
+          },
+          "pluginVersion": "13.1.0",
+          "targets": [
+            {
+              "editorMode": "code",
+              "expr": "sum(count_over_time({namespace=~\"$namespace\"} |~ \"(?i)(error|exception|fatal|panic)\" [5m]))",
+              "queryType": "instant",
+              "refId": "A"
+            }
+          ],
+          "title": "Errors in the last 5 minutes",
+          "type": "stat"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "drawStyle": "line",
+                "fillOpacity": 15,
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "showPoints": "never",
+                "spanNulls": false
+              },
+              "max": 1,
+              "min": 0
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 5
+          },
+          "id": 5,
+          "options": {
+            "legend": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "hideZeros": false,
+              "mode": "multi",
+              "sort": "none"
+            }
+          },
+          "pluginVersion": "13.1.0",
+          "targets": [
+            {
+              "editorMode": "code",
+              "expr": "min by (service, dependency) (boutique_dependency_ready)",
+              "legendFormat": "{{service}} / {{dependency}}",
+              "range": true,
+              "refId": "A"
+            }
+          ],
+          "title": "Application dependency readiness",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "drawStyle": "line",
+                "fillOpacity": 15,
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "showPoints": "never",
+                "spanNulls": false
+              },
+              "min": 0,
+              "unit": "ops"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 5
+          },
+          "id": 6,
+          "options": {
+            "legend": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "hideZeros": false,
+              "mode": "multi",
+              "sort": "none"
+            }
+          },
+          "pluginVersion": "13.1.0",
+          "targets": [
+            {
+              "editorMode": "code",
+              "expr": "sum(rate(gnatsd_varz_in_msgs[5m]))",
+              "legendFormat": "received",
+              "range": true,
+              "refId": "A"
+            },
+            {
+              "editorMode": "code",
+              "expr": "sum(rate(gnatsd_varz_out_msgs[5m]))",
+              "legendFormat": "sent",
+              "range": true,
+              "refId": "B"
+            }
+          ],
+          "title": "NATS message rate",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "drawStyle": "line",
+                "fillOpacity": 20,
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "pointSize": 5,
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "normal"
+                }
+              },
+              "min": 0,
+              "unit": "logs"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 7,
+            "w": 24,
+            "x": 0,
+            "y": 13
+          },
+          "id": 7,
+          "options": {
+            "legend": {
+              "calcs": [],
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "hideZeros": false,
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "pluginVersion": "13.1.0",
+          "targets": [
+            {
+              "editorMode": "code",
+              "expr": "sum by (namespace) (count_over_time({namespace=~\"$namespace\"}[1m]))",
+              "legendFormat": "{{namespace}}",
+              "queryType": "range",
+              "refId": "A"
+            }
+          ],
+          "title": "Log volume by namespace",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "gridPos": {
+            "h": 13,
+            "w": 24,
+            "x": 0,
+            "y": 20
+          },
+          "id": 8,
+          "options": {
+            "dedupStrategy": "none",
+            "enableInfiniteScrolling": false,
+            "enableLogDetails": true,
+            "prettifyLogMessage": false,
+            "showCommonLabels": false,
+            "showLabels": false,
+            "showTime": true,
+            "sortOrder": "Descending",
+            "wrapLogMessage": true
+          },
+          "pluginVersion": "13.1.0",
+          "targets": [
+            {
+              "editorMode": "code",
+              "expr": "{namespace=~\"$namespace\", pod=~\"$pod\"} |~ \"(?i)$search\"",
+              "queryType": "range",
+              "refId": "A"
+            }
+          ],
+          "title": "Container logs",
+          "type": "logs"
+        }
+      ],
+      "refresh": "15s",
+      "schemaVersion": 41,
+      "tags": [
+        "online-boutique",
+        "metrics",
+        "logs",
+        "nats"
+      ],
+      "templating": {
+        "list": [
+          {
+            "allValue": ".+",
+            "current": {
+              "text": "default",
+              "value": "default"
+            },
+            "datasource": {
+              "type": "loki",
+              "uid": "loki"
+            },
+            "definition": "label_values(namespace)",
+            "includeAll": true,
+            "label": "Namespace",
+            "name": "namespace",
+            "options": [],
+            "query": "label_values(namespace)",
+            "refresh": 1,
+            "regex": "",
+            "sort": 1,
+            "type": "query"
+          },
+          {
+            "allValue": ".+",
+            "current": {
+              "text": "All",
+              "value": "$__all"
+            },
+            "datasource": {
+              "type": "loki",
+              "uid": "loki"
+            },
+            "definition": "label_values({namespace=~\"$namespace\"}, pod)",
+            "includeAll": true,
+            "label": "Pod",
+            "name": "pod",
+            "options": [],
+            "query": "label_values({namespace=~\"$namespace\"}, pod)",
+            "refresh": 1,
+            "regex": "",
+            "sort": 1,
+            "type": "query"
+          },
+          {
+            "current": {
+              "text": ".",
+              "value": "."
+            },
+            "label": "Log search",
+            "name": "search",
+            "options": [
+              {
+                "selected": true,
+                "text": ".",
+                "value": "."
+              }
+            ],
+            "query": ".",
+            "type": "textbox"
+          }
+        ]
+      },
+      "time": {
+        "from": "now-1h",
+        "to": "now"
+      },
+      "timepicker": {},
+      "timezone": "browser",
+      "title": "Online Boutique Observability",
+      "uid": "online-boutique-observability",
+      "version": 2,
+      "weekStart": ""
+    }

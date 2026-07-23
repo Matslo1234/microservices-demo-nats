@@ -35,7 +35,12 @@ flowchart LR
     NATS --> Projection
     Cart -->|Redis protocol| Redis[(redis-cart)]
 
-    Apps[All domain workloads] -.->|HTTP health and metrics :8080| Monitor[probes / Prometheus]
+    Apps[All domain workloads] -.->|HTTP health and metrics :8080| Prometheus
+    Kubernetes[Kubernetes pod logs] -.->|Kubernetes API| Alloy
+    Alloy --> Loki
+    Prometheus --> Grafana
+    Loki --> Grafana
+    Operator[Operator browser] --> Grafana
 ```
 
 
@@ -128,6 +133,24 @@ Once the deploy finishes you can access the application via the ip of the LoadBa
 ```sh
 kubectl get service frontend-external
 ```
+
+### 4. Add logs and metrics
+
+An optional, standalone observability stack captures Kubernetes container logs
+and scrapes the application's existing metrics endpoints. It runs entirely in
+the `observability` namespace and provides a preconfigured Grafana frontend:
+
+```sh
+kubectl apply -k kubernetes-manifests/observability
+```
+
+After the deploy finishes you can connect to the cluster ip / extrnal ip of grafana
+```sh
+kubectl get service -n observability grafana
+```
+
+Open <http://localhost:3000>. Deployment, storage, access, and production notes
+are in the [observability stack documentation](kubernetes-manifests/observability/README.md).
 
 ## Development
 

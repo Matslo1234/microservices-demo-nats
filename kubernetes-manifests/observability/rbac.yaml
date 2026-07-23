@@ -1,0 +1,79 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: prometheus
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: prometheus
+    app.kubernetes.io/part-of: online-boutique-observability
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: online-boutique-observability-prometheus
+  labels:
+    app.kubernetes.io/name: prometheus
+    app.kubernetes.io/part-of: online-boutique-observability
+rules:
+- apiGroups: [""]
+  resources: ["pods", "services", "endpoints"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["discovery.k8s.io"]
+  resources: ["endpointslices"]
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: online-boutique-observability-prometheus
+  labels:
+    app.kubernetes.io/name: prometheus
+    app.kubernetes.io/part-of: online-boutique-observability
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: online-boutique-observability-prometheus
+subjects:
+- kind: ServiceAccount
+  name: prometheus
+  namespace: observability
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: alloy
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: alloy
+    app.kubernetes.io/part-of: online-boutique-observability
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: online-boutique-observability-alloy
+  labels:
+    app.kubernetes.io/name: alloy
+    app.kubernetes.io/part-of: online-boutique-observability
+rules:
+- apiGroups: [""]
+  resources: ["nodes", "pods", "namespaces"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: [""]
+  resources: ["pods/log"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: online-boutique-observability-alloy
+  labels:
+    app.kubernetes.io/name: alloy
+    app.kubernetes.io/part-of: online-boutique-observability
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: online-boutique-observability-alloy
+subjects:
+- kind: ServiceAccount
+  name: alloy
+  namespace: observability

@@ -1,0 +1,253 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: prometheus
+    app.kubernetes.io/part-of: online-boutique-observability
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+      evaluation_interval: 15s
+      external_labels:
+        cluster: online-boutique
+
+    rule_files:
+    - /etc/prometheus/rules/*.yaml
+
+    scrape_configs:
+    - job_name: kubernetes-pods
+      kubernetes_sd_configs:
+      - role: pod
+      relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+        action: keep
+        regex: "true"
+      - source_labels: [__meta_kubernetes_pod_phase]
+        action: drop
+        regex: Succeeded|Failed
+      # NATS is scraped through its dedicated metrics Service below. Ignoring
+      # its pod annotation avoids one duplicate target per declared pod port.
+      - source_labels: [__meta_kubernetes_namespace]
+        action: drop
+        regex: nats
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+        action: replace
+        target_label: __metrics_path__
+        regex: (.+)
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scheme]
+        action: replace
+        target_label: __scheme__
+        regex: (https?)
+      - source_labels:
+        - __address__
+        - __meta_kubernetes_pod_annotation_prometheus_io_port
+        action: replace
+        target_label: __address__
+        regex: ([^:]+)(?::\d+)?;(\d+)
+        replacement: $1:$2
+      - source_labels: [__meta_kubernetes_namespace]
+        action: replace
+        target_label: namespace
+      - source_labels: [__meta_kubernetes_pod_name]
+        action: replace
+        target_label: pod
+      - source_labels: [__meta_kubernetes_pod_node_name]
+        action: replace
+        target_label: node
+      - source_labels: [__meta_kubernetes_pod_container_name]
+        action: replace
+        target_label: container
+      - source_labels: [__meta_kubernetes_pod_label_app]
+        action: replace
+        target_label: service
+        regex: (.+)
+      - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
+        action: replace
+        target_label: service
+        regex: (.+)
+
+    - job_name: nats
+      kubernetes_sd_configs:
+      - role: endpoints
+      relabel_configs:
+      - source_labels: [__meta_kubernetes_namespace]
+        action: keep
+        regex: nats
+      - source_labels: [__meta_kubernetes_service_name]
+        action: keep
+        regex: nats-metrics
+      - source_labels: [__meta_kubernetes_endpoint_port_name]
+        action: keep
+        regex: metrics
+      - source_labels: [__meta_kubernetes_namespace]
+        action: replace
+        target_label: namespace
+      - source_labels: [__meta_kubernetes_pod_name]
+        action: replace
+        target_label: pod
+      - target_label: service
+        replacement: nats
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-rules
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: prometheus
+    app.kubernetes.io/part-of: online-boutique-observability
+data:
+  online-boutique.rules.yaml: |
+    groups:
+    - name: online-boutique
+      rules:
+      - alert: BoutiqueMetricsTargetDown
+        expr: up{job="kubernetes-pods",namespace="default"} == 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: Online Boutique metrics target is unavailable
+          description: "{{ $labels.pod }} has not responded to Prometheus for two minutes."
+      - alert: BoutiqueDependencyUnavailable
+        expr: boutique_dependency_ready == 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: Online Boutique dependency is unavailable
+          description: "{{ $labels.service }} reports {{ $labels.dependency }} as unavailable."
+      - alert: NatsMetricsUnavailable
+        expr: up{job="nats"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: NATS metrics are unavailable
+          description: Prometheus cannot scrape the NATS exporter.
+      - alert: NatsSlowConsumers
+        expr: gnatsd_varz_slow_consumers > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: NATS reports slow consumers
+          description: At least one NATS server has reported a slow consumer for five minutes.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: prometheus
+    app.kubernetes.io/part-of: online-boutique-observability
+spec:
+  selector:
+    app.kubernetes.io/name: prometheus
+  ports:
+  - name: http
+    port: 9090
+    targetPort: http
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: prometheus
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: prometheus
+    app.kubernetes.io/part-of: online-boutique-observability
+spec:
+  serviceName: prometheus
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: prometheus
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: prometheus
+        app.kubernetes.io/component: metrics
+        app.kubernetes.io/part-of: online-boutique-observability
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+        prometheus.io/path: /metrics
+    spec:
+      serviceAccountName: prometheus
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: prometheus
+        image: prom/prometheus:v3.10.0-distroless
+        imagePullPolicy: IfNotPresent
+        args:
+        - --config.file=/etc/prometheus/prometheus.yml
+        - --storage.tsdb.path=/prometheus
+        - --storage.tsdb.retention.time=7d
+        - --storage.tsdb.retention.size=8GB
+        - --web.enable-lifecycle
+        ports:
+        - name: http
+          containerPort: 9090
+        readinessProbe:
+          httpGet:
+            path: /-/ready
+            port: http
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /-/healthy
+            port: http
+          initialDelaySeconds: 15
+          periodSeconds: 15
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: "1"
+            memory: 1Gi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+          readOnlyRootFilesystem: true
+        volumeMounts:
+        - name: config
+          mountPath: /etc/prometheus
+          readOnly: true
+        - name: rules
+          mountPath: /etc/prometheus/rules
+          readOnly: true
+        - name: data
+          mountPath: /prometheus
+      volumes:
+      - name: config
+        configMap:
+          name: prometheus-config
+      - name: rules
+        configMap:
+          name: prometheus-rules
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+      labels:
+        app.kubernetes.io/name: prometheus
+        app.kubernetes.io/part-of: online-boutique-observability
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      resources:
+        requests:
+          storage: 10Gi
