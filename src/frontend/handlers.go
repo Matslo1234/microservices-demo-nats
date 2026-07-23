@@ -177,8 +177,15 @@ func (fe *frontendServer) addToCartHandler(w http.ResponseWriter, r *http.Reques
 	}
 	log.WithField("product", payload.ProductID).WithField("quantity", payload.Quantity).Debug("adding to cart")
 
+	operationID, err := cartOperationID(r, sessionID(r), "add-item")
+	if err != nil {
+		renderHTTPError(log, r, w, err, http.StatusBadRequest)
+		return
+	}
+	log = log.WithField("correlation_id", operationID)
 	view, err := fe.storefrontQuery(r.Context(), "product", storefrontQueryRequest{
 		ProductID: payload.ProductID, UserID: sessionID(r), CurrencyCode: currentCurrency(r),
+		CorrelationID: operationID,
 	})
 	if err != nil {
 		renderStorefrontError(log, r, w, errors.Wrap(err, "could not validate product"))
@@ -189,11 +196,6 @@ func (fe *frontendServer) addToCartHandler(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	operationID, err := cartOperationID(r, sessionID(r), "add-item")
-	if err != nil {
-		renderHTTPError(log, r, w, err, http.StatusBadRequest)
-		return
-	}
 	setOperationHeaders(w, operationID)
 	if err := fe.publishCartAdd(r.Context(), operationID, sessionID(r), view.Product.Item.GetId(),
 		int32(payload.Quantity), view.CartVersion); err != nil {
@@ -218,16 +220,17 @@ func (fe *frontendServer) emptyCartHandler(w http.ResponseWriter, r *http.Reques
 	log := r.Context().Value(ctxKeyLog{}).(logrus.FieldLogger)
 	log.Debug("emptying cart")
 
-	view, err := fe.storefrontQuery(r.Context(), "cart", storefrontQueryRequest{
-		UserID: sessionID(r), CurrencyCode: currentCurrency(r),
-	})
-	if err != nil {
-		renderStorefrontError(log, r, w, errors.Wrap(err, "could not retrieve cart version"))
-		return
-	}
 	operationID, err := cartOperationID(r, sessionID(r), "clear")
 	if err != nil {
 		renderHTTPError(log, r, w, err, http.StatusBadRequest)
+		return
+	}
+	log = log.WithField("correlation_id", operationID)
+	view, err := fe.storefrontQuery(r.Context(), "cart", storefrontQueryRequest{
+		UserID: sessionID(r), CurrencyCode: currentCurrency(r), CorrelationID: operationID,
+	})
+	if err != nil {
+		renderStorefrontError(log, r, w, errors.Wrap(err, "could not retrieve cart version"))
 		return
 	}
 	setOperationHeaders(w, operationID)
@@ -330,7 +333,10 @@ func (fe *frontendServer) placeOrderHandler(w http.ResponseWriter, r *http.Reque
 		renderHTTPError(log, r, w, err, http.StatusBadRequest)
 		return
 	}
-	existing, existingErr := fe.storefrontQuery(r.Context(), "order", storefrontQueryRequest{OrderID: orderID, UserID: sessionID(r)})
+	log = log.WithField("correlation_id", orderID)
+	existing, existingErr := fe.storefrontQuery(r.Context(), "order", storefrontQueryRequest{
+		OrderID: orderID, UserID: sessionID(r), CorrelationID: orderID,
+	})
 	if existingErr == nil && existing.Order != nil {
 		writeOrderResponse(w, r, http.StatusAccepted, existing.Order)
 		return
@@ -340,7 +346,9 @@ func (fe *frontendServer) placeOrderHandler(w http.ResponseWriter, r *http.Reque
 		renderStorefrontError(log, r, w, errors.Wrap(existingErr, "could not verify idempotent order status"))
 		return
 	}
-	view, err := fe.storefrontQuery(r.Context(), "cart", storefrontQueryRequest{UserID: sessionID(r), CurrencyCode: currentCurrency(r)})
+	view, err := fe.storefrontQuery(r.Context(), "cart", storefrontQueryRequest{
+		UserID: sessionID(r), CurrencyCode: currentCurrency(r), CorrelationID: orderID,
+	})
 	if err != nil {
 		renderStorefrontError(log, r, w, errors.Wrap(err, "could not retrieve checkout snapshot"))
 		return
@@ -363,7 +371,6 @@ func (fe *frontendServer) placeOrderHandler(w http.ResponseWriter, r *http.Reque
 		renderHTTPError(log, r, w, errors.Wrap(err, "could not queue order"), http.StatusServiceUnavailable)
 		return
 	}
-	log.WithField("order_id", orderID).Info("order queued")
 	writeAcceptedOrder(w, r, orderID)
 }
 

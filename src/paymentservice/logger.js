@@ -18,6 +18,7 @@ const pino = require('pino');
 
 module.exports = pino({
   name: 'paymentservice-server',
+  level: 'debug',
   messageKey: 'message',
   formatters: {
     level (logLevelString, logLevelNum) {

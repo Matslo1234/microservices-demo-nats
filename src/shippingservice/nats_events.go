@@ -15,6 +15,7 @@ import (
 	commonv1 "github.com/GoogleCloudPlatform/microservices-demo/protos/common/v1"
 	eventsv1 "github.com/GoogleCloudPlatform/microservices-demo/protos/events/v1"
 	"github.com/nats-io/nats.go"
+	"github.com/sirupsen/logrus"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -136,12 +137,17 @@ func (worker *shippingEventWorker) runCommands() {
 			continue
 		}
 		for _, message := range messages {
+			entry := shippingMessageLog(message, "command")
+			entry.Debug("NATS command received")
 			if err := worker.handleCommand(message); err != nil {
-				log.Errorf("shipping command failed: %v", err)
+				entry.WithError(err).Error("shipping command processing failed")
 				_ = message.NakWithDelay(time.Second)
 				continue
 			}
-			_ = message.Ack()
+			if err := message.Ack(); err != nil {
+				entry.WithError(err).Error("shipping command acknowledgement failed")
+				continue
+			}
 		}
 	}
 }
@@ -160,14 +166,43 @@ func (worker *shippingEventWorker) run() {
 			continue
 		}
 		for _, message := range messages {
+			entry := shippingMessageLog(message, "event")
+			entry.Debug("NATS event received")
 			if err := worker.handle(message); err != nil {
-				log.Errorf("shipping cart event failed: %v", err)
+				entry.WithError(err).Error("shipping cart event processing failed")
 				_ = message.NakWithDelay(time.Second)
 				continue
 			}
-			_ = message.Ack()
+			if err := message.Ack(); err != nil {
+				entry.WithError(err).Error("shipping cart event acknowledgement failed")
+				continue
+			}
 		}
 	}
+}
+
+func shippingMessageLog(message *nats.Msg, kind string) *logrus.Entry {
+	correlationID, messageID := shippingEnvelopeContext(message.Data)
+	return log.WithFields(logrus.Fields{
+		"message_kind":   kind,
+		"topic":          message.Subject,
+		"message_id":     messageID,
+		"correlation_id": correlationID,
+	})
+}
+
+func shippingEnvelopeContext(data []byte) (string, string) {
+	correlationID, messageID := "unknown", "unknown"
+	envelope := &commonv1.MessageEnvelope{}
+	if err := proto.Unmarshal(data, envelope); err == nil {
+		if envelope.CorrelationId != "" {
+			correlationID = envelope.CorrelationId
+		}
+		if envelope.MessageId != "" {
+			messageID = envelope.MessageId
+		}
+	}
+	return correlationID, messageID
 }
 
 func (worker *shippingEventWorker) handle(message *nats.Msg) error {
@@ -227,7 +262,23 @@ func (worker *shippingEventWorker) handle(message *nats.Msg) error {
 	out := &nats.Msg{Subject: shippingQuoteSubject, Data: encoded, Header: nats.Header{}}
 	out.Header.Set("Nats-Msg-Id", messageID)
 	_, err = worker.js.PublishMsg(out, nats.Context(ctx), nats.MsgId(messageID))
-	return err
+	if err != nil {
+		return err
+	}
+	log.WithFields(logrus.Fields{
+		"topic":          shippingQuoteSubject,
+		"message_kind":   "event",
+		"message_id":     messageID,
+		"correlation_id": shippingCorrelationID(result.CorrelationId),
+	}).Debug("NATS event sent")
+	return nil
+}
+
+func shippingCorrelationID(value string) string {
+	if value == "" {
+		return "unknown"
+	}
+	return value
 }
 
 func (worker *shippingEventWorker) Ready() bool {

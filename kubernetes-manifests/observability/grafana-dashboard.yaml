@@ -280,7 +280,7 @@ data:
           "targets": [
             {
               "editorMode": "code",
-              "expr": "sum(count_over_time({namespace=~\"$namespace\"} |~ \"(?i)(error|exception|fatal|panic)\" [5m]))",
+              "expr": "sum(count_over_time({namespace=~\"$namespace\", app=~\"$app\", app!~\"${exclude_apps:regex}\"} |~ \"(?i)(error|exception|fatal|panic)\" [5m]))",
               "queryType": "instant",
               "refId": "A"
             }
@@ -456,7 +456,7 @@ data:
           "targets": [
             {
               "editorMode": "code",
-              "expr": "sum by (namespace) (count_over_time({namespace=~\"$namespace\"}[1m]))",
+              "expr": "sum by (namespace) (count_over_time({namespace=~\"$namespace\", app=~\"$app\", app!~\"${exclude_apps:regex}\"}[1m]))",
               "legendFormat": "{{namespace}}",
               "queryType": "range",
               "refId": "A"
@@ -492,7 +492,7 @@ data:
           "targets": [
             {
               "editorMode": "code",
-              "expr": "{namespace=~\"$namespace\", pod=~\"$pod\"} |~ \"(?i)$search\"",
+              "expr": "{namespace=~\"$namespace\", app=~\"$app\", app!~\"${exclude_apps:regex}\", pod=~\"$pod\"} |~ \"(?i)$search\" | line_format \"{{ .app }} {{ __line__ }}\"",
               "queryType": "range",
               "refId": "A"
             }
@@ -533,6 +533,49 @@ data:
             "type": "query"
           },
           {
+            "allValue": ".*",
+            "current": {
+              "text": "All",
+              "value": "$__all"
+            },
+            "datasource": {
+              "type": "loki",
+              "uid": "loki"
+            },
+            "definition": "label_values({namespace=~\"$namespace\"}, app)",
+            "includeAll": true,
+            "label": "App",
+            "name": "app",
+            "options": [],
+            "query": "label_values({namespace=~\"$namespace\"}, app)",
+            "refresh": 1,
+            "regex": "",
+            "sort": 1,
+            "type": "query"
+          },
+          {
+            "allValue": "a^",
+            "current": {
+              "text": "None",
+              "value": "$__all"
+            },
+            "datasource": {
+              "type": "loki",
+              "uid": "loki"
+            },
+            "definition": "label_values({namespace=~\"$namespace\", app=~\"$app\"}, app)",
+            "includeAll": true,
+            "label": "Exclude apps",
+            "multi": true,
+            "name": "exclude_apps",
+            "options": [],
+            "query": "label_values({namespace=~\"$namespace\", app=~\"$app\"}, app)",
+            "refresh": 1,
+            "regex": "",
+            "sort": 1,
+            "type": "query"
+          },
+          {
             "allValue": ".+",
             "current": {
               "text": "All",
@@ -542,12 +585,12 @@ data:
               "type": "loki",
               "uid": "loki"
             },
-            "definition": "label_values({namespace=~\"$namespace\"}, pod)",
+            "definition": "label_values({namespace=~\"$namespace\", app=~\"$app\", app!~\"${exclude_apps:regex}\"}, pod)",
             "includeAll": true,
             "label": "Pod",
             "name": "pod",
             "options": [],
-            "query": "label_values({namespace=~\"$namespace\"}, pod)",
+            "query": "label_values({namespace=~\"$namespace\", app=~\"$app\", app!~\"${exclude_apps:regex}\"}, pod)",
             "refresh": 1,
             "regex": "",
             "sort": 1,
@@ -580,6 +623,6 @@ data:
       "timezone": "browser",
       "title": "Online Boutique Observability",
       "uid": "online-boutique-observability",
-      "version": 2,
+      "version": 6,
       "weekStart": ""
     }

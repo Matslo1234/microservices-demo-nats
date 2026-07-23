@@ -136,6 +136,8 @@ namespace cartservice.messaging
                 {
                     if (stoppingToken.IsCancellationRequested) break;
                     var messageId = value.ToString();
+                    var correlationId = "unknown";
+                    var topic = "unknown";
                     var serialized = await _database.HashGetAsync(RedisOutboxCartStore.OutboxKey, messageId);
                     if (!serialized.HasValue)
                     {
@@ -146,6 +148,8 @@ namespace cartservice.messaging
                     try
                     {
                         var record = OutboxRecord.Parse(messageId, serialized.ToString());
+                        topic = record.Subject;
+                        (correlationId, _) = MessageContext(record.Data);
                         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
                         timeout.CancelAfter(Duration("NATS_PUBLISH_TIMEOUT", TimeSpan.FromSeconds(5)));
                         var acknowledgement = await jetStream.PublishAsync(
@@ -154,6 +158,9 @@ namespace cartservice.messaging
                             opts: new NatsJSPubOpts { MsgId = record.MessageId },
                             cancellationToken: timeout.Token);
                         acknowledgement.EnsureSuccess();
+                        _logger.LogDebug(
+                            "NATS event sent (topic={topic}, message_id={message_id}, correlation_id={correlation_id})",
+                            record.Subject, record.MessageId, correlationId);
 
                         var transaction = _database.CreateTransaction();
                         _ = transaction.SortedSetRemoveAsync(RedisOutboxCartStore.PendingKey, messageId);
@@ -162,12 +169,16 @@ namespace cartservice.messaging
                     }
                     catch (OperationCanceledException) when (!stoppingToken.IsCancellationRequested)
                     {
-                        _logger.LogWarning("JetStream publish timed out for {MessageId}; retaining outbox entry", messageId);
+                        _logger.LogWarning(
+                            "JetStream publish timed out for {topic} ({message_id}, correlation_id={correlation_id}); retaining outbox entry",
+                            topic, messageId, correlationId);
                         await Task.Delay(TimeSpan.FromSeconds(1), stoppingToken);
                     }
                     catch (Exception exception)
                     {
-                        _logger.LogError(exception, "JetStream publish failed for {MessageId}; retaining outbox entry", messageId);
+                        _logger.LogError(exception,
+                            "JetStream publish failed for {topic} ({message_id}, correlation_id={correlation_id}); retaining outbox entry",
+                            topic, messageId, correlationId);
                         await Task.Delay(TimeSpan.FromSeconds(1), stoppingToken);
                     }
                 }
@@ -178,6 +189,10 @@ namespace cartservice.messaging
         {
             await foreach (var message in consumer.ConsumeAsync<byte[]>(cancellationToken: stoppingToken))
             {
+                var (correlationId, messageId) = MessageContext(message.Data);
+                _logger.LogDebug(
+                    "NATS command received (topic={topic}, message_id={message_id}, correlation_id={correlation_id})",
+                    message.Subject, messageId, correlationId);
                 try
                 {
                     if (message.Data == null) throw new InvalidOperationException("cart command is empty");
@@ -205,10 +220,27 @@ namespace cartservice.messaging
                 }
                 catch (Exception exception)
                 {
-                    _logger.LogError(exception, "Cart command processing failed for {Subject}; requesting redelivery",
-                        message.Subject);
+                    _logger.LogError(exception,
+                        "Cart command processing failed for {topic} ({message_id}, correlation_id={correlation_id}); requesting redelivery",
+                        message.Subject, messageId, correlationId);
                     await message.NakAsync(cancellationToken: stoppingToken);
                 }
+            }
+        }
+
+        private static (string CorrelationId, string MessageId) MessageContext(byte[] data)
+        {
+            try
+            {
+                if (data == null) return ("unknown", "unknown");
+                var envelope = MessageEnvelope.Parser.ParseFrom(data);
+                return (
+                    string.IsNullOrWhiteSpace(envelope.CorrelationId) ? "unknown" : envelope.CorrelationId,
+                    string.IsNullOrWhiteSpace(envelope.MessageId) ? "unknown" : envelope.MessageId);
+            }
+            catch
+            {
+                return ("unknown", "unknown");
             }
         }
 

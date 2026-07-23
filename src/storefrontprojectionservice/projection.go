@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"log/slog"
 	"time"
 
 	commonv1 "github.com/GoogleCloudPlatform/microservices-demo/protos/common/v1"
@@ -90,18 +91,44 @@ func (p *projector) run(subscription *nats.Subscription, stop <-chan struct{}) {
 			continue
 		}
 		for _, message := range messages {
+			correlationID, messageID := projectionMessageContext(message.Data)
+			slog.Debug("NATS event received",
+				"topic", message.Subject,
+				"message_kind", "event",
+				"message_id", messageID,
+				"correlation_id", correlationID)
 			if err := p.apply(message.Subject, message.Data); err != nil {
-				log.Printf("projection apply failed for %s: %v", message.Subject, err)
+				log.Printf("projection event processing failed topic=%q message_id=%q correlation_id=%q error=%v",
+					message.Subject, messageID, correlationID, err)
 				if nakErr := message.NakWithDelay(time.Second); nakErr != nil {
-					log.Printf("projection NAK failed: %v", nakErr)
+					log.Printf("projection event NAK failed topic=%q message_id=%q correlation_id=%q error=%v",
+						message.Subject, messageID, correlationID, nakErr)
 				}
 				continue
 			}
 			if err := message.Ack(); err != nil {
-				log.Printf("projection ACK failed: %v", err)
+				log.Printf("projection event acknowledgement failed topic=%q message_id=%q correlation_id=%q error=%v",
+					message.Subject, messageID, correlationID, err)
+				continue
 			}
 		}
 	}
+}
+
+func projectionMessageContext(data []byte) (string, string) {
+	envelope := &commonv1.MessageEnvelope{}
+	if err := proto.Unmarshal(data, envelope); err != nil {
+		return "unknown", "unknown"
+	}
+	correlationID := envelope.CorrelationId
+	if correlationID == "" {
+		correlationID = "unknown"
+	}
+	messageID := envelope.MessageId
+	if messageID == "" {
+		messageID = "unknown"
+	}
+	return correlationID, messageID
 }
 
 func (p *projector) apply(subject string, data []byte) error {

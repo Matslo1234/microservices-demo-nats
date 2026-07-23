@@ -29,6 +29,7 @@ import (
 	eventsv1 "github.com/GoogleCloudPlatform/microservices-demo/protos/events/v1"
 	pb "github.com/GoogleCloudPlatform/microservices-demo/src/productcatalogservice/genproto"
 	"github.com/nats-io/nats.go"
+	"github.com/sirupsen/logrus"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -225,9 +226,19 @@ func (p *catalogEventPublisher) publish(subject string, envelope *commonv1.Messa
 		_, publishErr = p.js.PublishMsg(message, nats.Context(ctx))
 		cancel()
 		if publishErr == nil {
+			log.WithFields(logrus.Fields{
+				"topic":          subject,
+				"message_kind":   "event",
+				"message_id":     envelope.MessageId,
+				"correlation_id": correlationID(envelope.CorrelationId),
+			}).Debug("NATS event sent")
 			return nil
 		}
-		log.Warnf("JetStream publish attempt %d failed for %s: %v", attempt, subject, publishErr)
+		log.WithFields(logrus.Fields{
+			"topic":          subject,
+			"message_id":     envelope.MessageId,
+			"correlation_id": correlationID(envelope.CorrelationId),
+		}).Warnf("JetStream publish attempt %d failed: %v", attempt, publishErr)
 	}
 	return fmt.Errorf("publish %s after retries: %w", subject, publishErr)
 }
@@ -239,6 +250,7 @@ func (p *catalogEventPublisher) publishBootstrap(products []*pb.Product) error {
 	}
 	occurredAt := timestamppb.Now()
 	revisionText := strconv.FormatUint(identity.revision, 10)
+	correlationID := deterministicMessageID("catalog-bootstrap", revisionText)
 	for _, product := range identity.products {
 		payload := &eventsv1.CatalogProductUpsertedEvent{
 			Product:         product,
@@ -257,7 +269,7 @@ func (p *catalogEventPublisher) publishBootstrap(products []*pb.Product) error {
 			AggregateType:    "product",
 			AggregateId:      product.ProductId,
 			AggregateVersion: product.ProductVersion,
-			CorrelationId:    deterministicMessageID("catalog-bootstrap", revisionText),
+			CorrelationId:    correlationID,
 			Data:             packed,
 		}
 		if err := p.publish(catalogProductSubject, envelope); err != nil {
@@ -283,14 +295,20 @@ func (p *catalogEventPublisher) publishBootstrap(products []*pb.Product) error {
 		AggregateType:    "catalog",
 		AggregateId:      "catalog",
 		AggregateVersion: identity.revision,
-		CorrelationId:    deterministicMessageID("catalog-bootstrap", revisionText),
+		CorrelationId:    correlationID,
 		Data:             packed,
 	}
 	if err := p.publish(catalogSnapshotSubject, envelope); err != nil {
 		return err
 	}
-	log.Infof("published deterministic catalog revision %d (%d products, checksum %s)", identity.revision, len(identity.products), identity.checksum)
 	return nil
+}
+
+func correlationID(value string) string {
+	if value == "" {
+		return "unknown"
+	}
+	return value
 }
 
 func (p *catalogEventPublisher) drain() {

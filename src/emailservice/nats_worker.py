@@ -38,6 +38,15 @@ def messaging_ready():
   return _ready.is_set()
 
 
+def _message_context(message):
+  try:
+    envelope = message_pb2.MessageEnvelope.FromString(message.data)
+    return (envelope.correlation_id or "unknown",
+            envelope.message_id or "unknown")
+  except Exception:
+    return "unknown", "unknown"
+
+
 def _timestamp_now():
   value = Timestamp()
   value.FromDatetime(datetime.now(timezone.utc))
@@ -157,26 +166,40 @@ async def _run():
       except (NatsTimeoutError, asyncio.TimeoutError):
         continue
       for message in messages:
+        correlation_id, source_event_id = _message_context(message)
+        logger.debug(
+            "NATS event received",
+            extra={
+                "topic": message.subject,
+                "message_kind": "event",
+                "message_id": source_event_id,
+                "correlation_id": correlation_id,
+            })
         try:
           envelope = message_pb2.MessageEnvelope.FromString(message.data)
           outcome = state.outcomes.get(envelope.message_id)
-          replayed = outcome is not None
           if outcome is None:
             outcome = state.record(envelope.message_id, _build_outcome(envelope))
           await js.publish(outcome["subject"], base64.b64decode(outcome["data"]),
                            headers={"Nats-Msg-Id": outcome["message_id"]})
-          await message.ack()
-          logger.info(
-              "Order confirmation processed successfully",
+          logger.debug(
+              "NATS event sent",
               extra={
-                  "order_id": envelope.aggregate_id,
-                  "source_event_id": envelope.message_id,
-                  "notification_event_id": outcome["message_id"],
-                  "notification_subject": outcome["subject"],
-                  "replayed": replayed,
+                  "topic": outcome["subject"],
+                  "message_kind": "event",
+                  "message_id": outcome["message_id"],
+                  "correlation_id": correlation_id,
               })
+          await message.ack()
         except Exception:
-          logger.exception("Order confirmation event failed", extra={"subject": message.subject})
+          logger.exception(
+              "Order confirmation event processing failed",
+              extra={
+                  "topic": message.subject,
+                  "source_event_id": source_event_id,
+                  "message_id": source_event_id,
+                  "correlation_id": correlation_id,
+              })
           await message.nak(delay=1)
   finally:
     _ready.clear()

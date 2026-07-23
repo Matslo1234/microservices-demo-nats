@@ -15,6 +15,7 @@
 using System;
 using Google.Cloud.Spanner.Data;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging;
 using System.Threading.Tasks;
 
 namespace cartservice.cartstore
@@ -25,9 +26,12 @@ namespace cartservice.cartstore
         private static readonly string DefaultInstanceName = "onlineboutique";
         private static readonly string DefaultDatabaseName = "carts";
         private readonly string databaseString;
+        private readonly ILogger<SpannerCartStore> logger;
 
-        public SpannerCartStore(IConfiguration configuration)
+        public SpannerCartStore(IConfiguration configuration, ILogger<SpannerCartStore> logger)
         {
+            this.logger = logger;
+
             string spannerProjectId = configuration["SPANNER_PROJECT"];
             string spannerInstanceId = configuration["SPANNER_INSTANCE"];
             string spannerDatabaseId = configuration["SPANNER_DATABASE"];
@@ -36,7 +40,6 @@ namespace cartservice.cartstore
             if (!string.IsNullOrEmpty(spannerConnectionString)) {
                 builder.DataSource = spannerConnectionString;
                 databaseString = builder.ToString();
-                Console.WriteLine($"Spanner connection string: ${databaseString}");
                 return;
             }
             if (string.IsNullOrEmpty(spannerInstanceId))
@@ -46,13 +49,14 @@ namespace cartservice.cartstore
             builder.DataSource =
                 $"projects/{spannerProjectId}/instances/{spannerInstanceId}/databases/{spannerDatabaseId}";
             databaseString = builder.ToString();
-            Console.WriteLine($"Built Spanner connection string: '{databaseString}'");
         }
 
 
         public async Task AddItemAsync(string userId, string productId, int quantity)
         {
-            Console.WriteLine($"AddItemAsync for {userId} called");
+            logger.LogInformation(
+                "AddItemAsync called (user_id={user_id}, product_id={product_id}, quantity={quantity})",
+                userId, productId, quantity);
             try
             {
                 using SpannerConnection spannerConnection = new(databaseString);
@@ -102,7 +106,7 @@ namespace cartservice.cartstore
 
         public async Task<Hipstershop.Cart> GetCartAsync(string userId)
         {
-            Console.WriteLine($"GetCartAsync called for userId={userId}");
+            logger.LogInformation("GetCartAsync called (user_id={user_id})", userId);
             Hipstershop.Cart cart = new();
             try
             {
@@ -141,7 +145,7 @@ namespace cartservice.cartstore
 
         public async Task EmptyCartAsync(string userId)
         {
-            Console.WriteLine($"EmptyCartAsync called for userId={userId}");
+            logger.LogInformation("EmptyCartAsync called (user_id={user_id})", userId);
 
             try
             {

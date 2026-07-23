@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
+	"log/slog"
 	"sort"
 	"strings"
 	"time"
@@ -21,12 +23,13 @@ import (
 var errInvalidCurrency = errors.New("invalid currency")
 
 type queryRequest struct {
-	ProductID    string   `json:"product_id"`
-	UserID       string   `json:"user_id"`
-	ProductIDs   []string `json:"product_ids"`
-	CurrencyCode string   `json:"currency_code"`
-	OperationID  string   `json:"operation_id"`
-	OrderID      string   `json:"order_id"`
+	ProductID     string   `json:"product_id"`
+	UserID        string   `json:"user_id"`
+	ProductIDs    []string `json:"product_ids"`
+	CurrencyCode  string   `json:"currency_code"`
+	OperationID   string   `json:"operation_id"`
+	OrderID       string   `json:"order_id"`
+	CorrelationID string   `json:"correlation_id"`
 }
 
 type localizedProduct struct {
@@ -88,11 +91,23 @@ func (p *projector) registerQueries(nc *nats.Conn) (micro.Service, int, error) {
 		subject := "boutique.qry.storefront." + name + ".v1"
 		if err := service.AddEndpoint(name, micro.HandlerFunc(func(request micro.Request) {
 			var decoded queryRequest
+			var decodeErr error
 			if len(request.Data()) > 0 {
-				if err := json.Unmarshal(request.Data(), &decoded); err != nil {
-					_ = request.RespondJSON(queryResponse{Error: "INVALID_QUERY"})
-					return
-				}
+				decodeErr = json.Unmarshal(request.Data(), &decoded)
+			}
+			correlationID := decoded.CorrelationID
+			if correlationID == "" {
+				correlationID = "unknown"
+			}
+			slog.Debug("NATS query received",
+				"topic", subject,
+				"message_kind", "query",
+				"correlation_id", correlationID)
+			if decodeErr != nil {
+				respondErr := request.RespondJSON(queryResponse{Error: "INVALID_QUERY"})
+				log.Printf("storefront query processing failed topic=%q correlation_id=%q error_code=%q error=%v response_error=%v",
+					subject, correlationID, "INVALID_QUERY", decodeErr, respondErr)
+				return
 			}
 			response, err := handler(decoded)
 			switch {
@@ -103,7 +118,15 @@ func (p *projector) registerQueries(nc *nats.Conn) (micro.Service, int, error) {
 			case err != nil:
 				response.Error = "PROJECTION_UNAVAILABLE"
 			}
-			_ = request.RespondJSON(response)
+			respondErr := request.RespondJSON(response)
+			switch {
+			case respondErr != nil:
+				log.Printf("storefront query processing failed topic=%q correlation_id=%q error_code=%q error=%v",
+					subject, correlationID, response.Error, respondErr)
+			case err != nil:
+				log.Printf("storefront query processing failed topic=%q correlation_id=%q error_code=%q error=%v",
+					subject, correlationID, response.Error, err)
+			}
 		}), micro.WithEndpointSubject(subject)); err != nil {
 			_ = service.Stop()
 			return nil, 0, fmt.Errorf("register %s: %w", subject, err)

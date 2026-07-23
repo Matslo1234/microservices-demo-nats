@@ -82,6 +82,15 @@ def messaging_ready():
     return _ready.is_set()
 
 
+def _message_context(message):
+    try:
+        envelope = message_pb2.MessageEnvelope.FromString(message.data)
+        return (envelope.correlation_id or "unknown",
+                envelope.message_id or "unknown")
+    except Exception:
+        return "unknown", "unknown"
+
+
 async def _publish_result(js, envelope, session_id, excluded):
     context_version = _context_version(envelope)
     product_ids = recommend_products(set(excluded), envelope.message_id)
@@ -112,6 +121,14 @@ async def _publish_result(js, envelope, session_id, excluded):
         data=wrapped,
     )
     await js.publish(RESULT_SUBJECT, result.SerializeToString(), headers={"Nats-Msg-Id": message_id})
+    logger.debug(
+        "NATS event sent",
+        extra={
+            "topic": RESULT_SUBJECT,
+            "message_kind": "event",
+            "message_id": message_id,
+            "correlation_id": envelope.correlation_id or "unknown",
+        })
 
 
 def _apply_catalog(message):
@@ -158,11 +175,26 @@ async def _consume(subscription, handler):
         except (NatsTimeoutError, asyncio.TimeoutError):
             continue
         for message in messages:
+            correlation_id, message_id = _message_context(message)
+            logger.debug(
+                "NATS event received",
+                extra={
+                    "topic": message.subject,
+                    "message_kind": "event",
+                    "message_id": message_id,
+                    "correlation_id": correlation_id,
+                })
             try:
                 await handler(message)
                 await message.ack()
             except Exception:
-                logger.exception("event processing failed", extra={"subject": message.subject})
+                logger.exception(
+                    "Event processing failed",
+                    extra={
+                        "topic": message.subject,
+                        "message_id": message_id,
+                        "correlation_id": correlation_id,
+                    })
                 await message.nak(delay=1)
 
 
@@ -184,8 +216,28 @@ async def _bootstrap_catalog(js):
         except (NatsTimeoutError, asyncio.TimeoutError):
             continue
         for message in messages:
-            _apply_catalog(message)
-            await message.ack()
+            correlation_id, message_id = _message_context(message)
+            logger.debug(
+                "NATS event received",
+                extra={
+                    "topic": message.subject,
+                    "message_kind": "event",
+                    "message_id": message_id,
+                    "correlation_id": correlation_id,
+                })
+            try:
+                _apply_catalog(message)
+                await message.ack()
+            except Exception:
+                logger.exception(
+                    "Catalog bootstrap event processing failed",
+                    extra={
+                        "topic": message.subject,
+                        "message_id": message_id,
+                        "correlation_id": correlation_id,
+                    })
+                await message.nak(delay=1)
+                raise
     await subscription.unsubscribe()
 
 

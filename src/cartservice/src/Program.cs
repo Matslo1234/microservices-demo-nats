@@ -14,12 +14,21 @@
 
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Console;
 using cartservice;
+using cartservice.logging;
 
 CreateHostBuilder(args).Build().Run();
 
 static IHostBuilder CreateHostBuilder(string[] args) =>
     Host.CreateDefaultBuilder(args)
+        .ConfigureLogging(logging =>
+        {
+            logging.ClearProviders();
+            logging.AddConsoleFormatter<SeverityJsonConsoleFormatter, ConsoleFormatterOptions>();
+            logging.AddConsole(options => options.FormatterName = SeverityJsonConsoleFormatter.FormatterName);
+        })
         .ConfigureWebHostDefaults(webBuilder =>
         {
             webBuilder.UseStartup<Startup>();

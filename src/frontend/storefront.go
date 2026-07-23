@@ -17,6 +17,7 @@ import (
 	pb "github.com/GoogleCloudPlatform/microservices-demo/src/frontend/genproto"
 	"github.com/google/uuid"
 	"github.com/nats-io/nats.go"
+	"github.com/sirupsen/logrus"
 	"go.opentelemetry.io/otel"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
@@ -32,12 +33,13 @@ var (
 )
 
 type storefrontQueryRequest struct {
-	ProductID    string   `json:"product_id,omitempty"`
-	UserID       string   `json:"user_id,omitempty"`
-	ProductIDs   []string `json:"product_ids,omitempty"`
-	CurrencyCode string   `json:"currency_code,omitempty"`
-	OperationID  string   `json:"operation_id,omitempty"`
-	OrderID      string   `json:"order_id,omitempty"`
+	ProductID     string   `json:"product_id,omitempty"`
+	UserID        string   `json:"user_id,omitempty"`
+	ProductIDs    []string `json:"product_ids,omitempty"`
+	CurrencyCode  string   `json:"currency_code,omitempty"`
+	OperationID   string   `json:"operation_id,omitempty"`
+	OrderID       string   `json:"order_id,omitempty"`
+	CorrelationID string   `json:"correlation_id,omitempty"`
 }
 
 type storefrontProductView struct {
@@ -158,13 +160,22 @@ func intEnv(name string, fallback int) (int, error) {
 }
 
 func (fe *frontendServer) storefrontQuery(ctx context.Context, view string, request storefrontQueryRequest) (*storefrontQueryResponse, error) {
+	if request.CorrelationID == "" {
+		request.CorrelationID = requestID(ctx)
+	}
+	topic := "boutique.qry.storefront." + view + ".v1"
 	encoded, err := json.Marshal(request)
 	if err != nil {
 		return nil, err
 	}
 	queryContext, cancel := context.WithTimeout(ctx, fe.natsRequestTimeout)
 	defer cancel()
-	message, err := fe.natsConn.RequestWithContext(queryContext, "boutique.qry.storefront."+view+".v1", encoded)
+	fe.log.WithFields(logrus.Fields{
+		"topic":          topic,
+		"message_kind":   "query",
+		"correlation_id": request.CorrelationID,
+	}).Debug("NATS query sent")
+	message, err := fe.natsConn.RequestWithContext(queryContext, topic, encoded)
 	if err != nil {
 		if errors.Is(err, nats.ErrNoResponders) || errors.Is(err, nats.ErrTimeout) || errors.Is(err, context.DeadlineExceeded) {
 			return nil, fmt.Errorf("%w: %v", errProjectionUnavailable, err)
@@ -229,7 +240,15 @@ func (fe *frontendServer) publishPageView(ctx context.Context, session, pageType
 	message.Header.Set("Nats-Msg-Id", messageID)
 	message.Header.Set("Content-Type", "application/protobuf")
 	_, err = fe.natsJS.PublishMsg(message, nats.Context(publishContext), nats.MsgId(messageID))
-	return err
+	if err != nil {
+		return err
+	}
+	fe.log.WithFields(logrus.Fields{
+		"topic":          pageViewedSubject,
+		"message_kind":   "event",
+		"correlation_id": envelope.CorrelationId,
+	}).Debug("NATS event sent")
+	return nil
 }
 
 func requestID(ctx context.Context) string {

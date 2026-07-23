@@ -110,6 +110,7 @@ function encodeSnapshot(currencyData) {
   })).finish();
   const revisionText = identity.revision.toString();
   const messageId = deterministicMessageId(SUBJECT, revisionText, identity.checksum);
+  const correlationId = deterministicMessageId('currency-bootstrap', revisionText);
   const envelope = Envelope.create({
     messageId,
     messageType: MESSAGE_TYPE,
@@ -119,7 +120,7 @@ function encodeSnapshot(currencyData) {
     aggregateType: 'currency-rates',
     aggregateId: 'EUR',
     aggregateVersion: revisionText,
-    correlationId: deterministicMessageId('currency-bootstrap', revisionText),
+    correlationId,
     data: {
       type_url: `type.googleapis.com/${PAYLOAD_TYPE}`,
       value: eventBytes
@@ -128,6 +129,7 @@ function encodeSnapshot(currencyData) {
   return {
     data: Envelope.encode(envelope).finish(),
     messageId,
+    correlationId,
     revision: revisionText,
     count: rates.length,
     checksum: identity.checksum
@@ -162,18 +164,29 @@ async function connectAndPublish(currencyData, logger) {
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
       await js.publish(SUBJECT, snapshot.data, { msgID: snapshot.messageId });
+      logger.debug({
+        topic: SUBJECT,
+        message_kind: 'event',
+        message_id: snapshot.messageId,
+        correlation_id: snapshot.correlationId,
+      }, 'NATS event sent');
       lastError = null;
       break;
     } catch (err) {
       lastError = err;
-      logger.warn({err, attempt}, 'JetStream rate snapshot publish failed; retrying with the same message ID');
+      logger.warn({
+        err,
+        attempt,
+        topic: SUBJECT,
+        message_id: snapshot.messageId,
+        correlation_id: snapshot.correlationId,
+      }, 'JetStream rate snapshot publish failed; retrying with the same message ID');
     }
   }
   if (lastError) {
     await nc.close();
     throw lastError;
   }
-  logger.info({revision: snapshot.revision, currencies: snapshot.count, checksum: snapshot.checksum}, 'published currency rate snapshot');
   return nc;
 }
 

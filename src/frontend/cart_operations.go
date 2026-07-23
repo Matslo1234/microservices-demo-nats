@@ -18,6 +18,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 	"github.com/nats-io/nats.go"
+	"github.com/sirupsen/logrus"
 	"go.opentelemetry.io/otel"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
@@ -138,7 +139,31 @@ func (fe *frontendServer) publishEnvelope(ctx context.Context, subject, messageI
 	if ack == nil {
 		return fmt.Errorf("JetStream did not acknowledge %s", subject)
 	}
+	kind := messageKind(subject)
+	fe.log.WithFields(logrus.Fields{
+		"topic":          subject,
+		"message_kind":   kind,
+		"correlation_id": correlationID(envelope.CorrelationId),
+	}).Debug("NATS " + kind + " sent")
 	return nil
+}
+
+func messageKind(topic string) string {
+	switch {
+	case strings.HasPrefix(topic, "boutique.cmd."):
+		return "command"
+	case strings.HasPrefix(topic, "boutique.qry."):
+		return "query"
+	default:
+		return "event"
+	}
+}
+
+func correlationID(value string) string {
+	if value == "" {
+		return "unknown"
+	}
+	return value
 }
 
 func setEnvelopeTrace(ctx context.Context, envelope *commonv1.MessageEnvelope) {
@@ -155,7 +180,7 @@ func (fe *frontendServer) waitForCartOperation(ctx context.Context, operationID,
 	defer ticker.Stop()
 	for {
 		response, err := fe.storefrontQuery(waitContext, "operation", storefrontQueryRequest{
-			OperationID: operationID, UserID: userID,
+			OperationID: operationID, UserID: userID, CorrelationID: operationID,
 		})
 		if err == nil && response.Operation != nil {
 			switch response.Operation.Status {
@@ -174,7 +199,7 @@ func (fe *frontendServer) waitForCartOperation(ctx context.Context, operationID,
 func (fe *frontendServer) operationHandler(w http.ResponseWriter, r *http.Request) {
 	operationID := mux.Vars(r)["id"]
 	response, err := fe.storefrontQuery(r.Context(), "operation", storefrontQueryRequest{
-		OperationID: operationID, UserID: sessionID(r),
+		OperationID: operationID, UserID: sessionID(r), CorrelationID: operationID,
 	})
 	if err != nil {
 		switch {

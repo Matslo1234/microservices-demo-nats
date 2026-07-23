@@ -41,6 +41,7 @@ import javax.net.ssl.SSLContext;
 import javax.net.ssl.TrustManagerFactory;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.apache.logging.log4j.ThreadContext;
 
 final class NatsEventWorker implements AutoCloseable {
   private static final Logger logger = LogManager.getLogger(NatsEventWorker.class);
@@ -125,12 +126,43 @@ final class NatsEventWorker implements AutoCloseable {
     while (running.get()) {
       try {
         for (Message message : subscription.fetch(32, Duration.ofSeconds(1))) {
+          ThreadContext.put("correlation_id", "unknown");
+          ThreadContext.put("message_id", "unknown");
+          MessageEnvelope source = null;
+          Exception decodeException = null;
           try {
-            handle(jetStream, message);
+            source = MessageEnvelope.parseFrom(message.getData());
+            if (!source.getCorrelationId().isBlank()) {
+              ThreadContext.put("correlation_id", source.getCorrelationId());
+            }
+            if (!source.getMessageId().isBlank()) {
+              ThreadContext.put("message_id", source.getMessageId());
+            }
+          } catch (Exception exception) {
+            decodeException = exception;
+          }
+          logger.debug(
+              "NATS event received topic={} message_id={} correlation_id={}",
+              message.getSubject(),
+              ThreadContext.get("message_id"),
+              ThreadContext.get("correlation_id"));
+          try {
+            if (decodeException != null) {
+              throw decodeException;
+            }
+            handle(jetStream, source);
             message.ack();
           } catch (Exception exception) {
-            logger.warn("failed to process page-view event", exception);
+            logger.warn(
+                "page-view event processing failed topic={} message_id={} correlation_id={}",
+                message.getSubject(),
+                ThreadContext.get("message_id"),
+                ThreadContext.get("correlation_id"),
+                exception);
             message.nakWithDelay(Duration.ofSeconds(1));
+          } finally {
+            ThreadContext.remove("correlation_id");
+            ThreadContext.remove("message_id");
           }
         }
       } catch (Exception exception) {
@@ -141,8 +173,7 @@ final class NatsEventWorker implements AutoCloseable {
     }
   }
 
-  private void handle(JetStream jetStream, Message message) throws Exception {
-    MessageEnvelope source = MessageEnvelope.parseFrom(message.getData());
+  private void handle(JetStream jetStream, MessageEnvelope source) throws Exception {
     StorefrontPageViewedEvent pageView = source.getData().unpack(StorefrontPageViewedEvent.class);
     long version = source.getAggregateVersion();
     if (version == 0) {
@@ -185,6 +216,11 @@ final class NatsEventWorker implements AutoCloseable {
         RESULT_SUBJECT,
         result.toByteArray(),
         PublishOptions.builder().messageId(messageId).build());
+    logger.debug(
+        "NATS event sent topic={} message_id={} correlation_id={}",
+        RESULT_SUBJECT,
+        messageId,
+        source.getCorrelationId().isBlank() ? "unknown" : source.getCorrelationId());
   }
 
   private static long seed(String messageId) throws Exception {

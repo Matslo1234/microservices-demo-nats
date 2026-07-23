@@ -69,6 +69,7 @@ type frontendServer struct {
 	natsRequestTimeout       time.Duration
 	natsPublishTimeout       time.Duration
 	cartOperationWaitTimeout time.Duration
+	log                      *logrus.Logger
 
 	collectorAddr string
 	collectorConn *grpc.ClientConn
@@ -90,7 +91,7 @@ func main() {
 	}
 	log.Out = os.Stdout
 
-	svc := new(frontendServer)
+	svc := &frontendServer{log: log}
 
 	otel.SetTextMapPropagator(
 		propagation.NewCompositeTextMapPropagator(

@@ -41,6 +41,7 @@ var (
 
 func init() {
 	log = logrus.New()
+	log.Level = logrus.DebugLevel
 	log.Formatter = &logrus.JSONFormatter{
 		FieldMap: logrus.FieldMap{
 			logrus.FieldKeyTime:  "timestamp",
@@ -81,7 +82,7 @@ func main() {
 			log.Fatalf("could not initialize required NATS publisher: %v", err)
 		}
 		if err := catalogNATS.publishBootstrap(catalog.Products); err != nil {
-			log.Fatalf("could not publish catalog bootstrap events: %v", err)
+			log.WithField("correlation_id", "unknown").Fatalf("could not publish catalog bootstrap events: %v", err)
 		}
 	}
 

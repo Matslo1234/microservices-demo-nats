@@ -18,6 +18,7 @@ import (
 	commonv1 "github.com/GoogleCloudPlatform/microservices-demo/protos/common/v1"
 	eventsv1 "github.com/GoogleCloudPlatform/microservices-demo/protos/events/v1"
 	"github.com/nats-io/nats.go"
+	"github.com/sirupsen/logrus"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -190,7 +191,17 @@ func (worker *shippingEventWorker) publishOutcome(outcome shippingOutcome) error
 	message := &nats.Msg{Subject: outcome.Subject, Data: outcome.Data, Header: nats.Header{}}
 	message.Header.Set("Nats-Msg-Id", outcome.MessageID)
 	_, err := worker.js.PublishMsg(message, nats.Context(ctx), nats.MsgId(outcome.MessageID))
-	return err
+	if err != nil {
+		return err
+	}
+	correlationID, _ := shippingEnvelopeContext(outcome.Data)
+	log.WithFields(logrus.Fields{
+		"topic":          outcome.Subject,
+		"message_kind":   "event",
+		"message_id":     outcome.MessageID,
+		"correlation_id": correlationID,
+	}).Debug("NATS event sent")
+	return nil
 }
 
 func shippingStableID(parts ...string) string {

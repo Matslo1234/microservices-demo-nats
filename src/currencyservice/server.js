@@ -9,6 +9,7 @@ const { connectAndPublish } = require('./nats_events');
 
 const logger = pino({
   name: 'currencyservice-server',
+  level: 'debug',
   messageKey: 'message',
   formatters: { level (label) { return { severity: label }; } }
 });
@@ -103,6 +104,6 @@ for (const signal of ['SIGTERM', 'SIGINT']) {
 }
 
 main().catch(err => {
-  logger.fatal({ err }, 'currency service startup failed');
+  logger.fatal({ err, correlation_id: err.correlation_id || 'unknown' }, 'currency service startup failed');
   process.exit(1);
 });

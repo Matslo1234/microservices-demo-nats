@@ -36,6 +36,6 @@ def getJSONLogger(name):
   formatter = CustomJsonFormatter('%(timestamp)s %(severity)s %(name)s %(message)s')
   handler.setFormatter(formatter)
   logger.addHandler(handler)
-  logger.setLevel(logging.INFO)
+  logger.setLevel(logging.DEBUG)
   logger.propagate = False
   return logger

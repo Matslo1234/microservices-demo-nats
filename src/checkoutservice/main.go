@@ -20,7 +20,7 @@ var log = newLogger()
 
 func newLogger() *logrus.Logger {
 	logger := logrus.New()
-	logger.Level = logrus.InfoLevel
+	logger.Level = logrus.DebugLevel
 	logger.Formatter = &logrus.JSONFormatter{TimestampFormat: time.RFC3339Nano}
 	logger.Out = os.Stdout
 	return logger

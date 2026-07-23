@@ -174,8 +174,25 @@ async function runCommandConsumer(commandSubscription, state, contracts, js) {
   // next command without polling or overlapping pull requests.
   commandSubscription.pull({ batch: 1 });
   for await (const message of commandSubscription) {
+    let correlationId = 'unknown';
+    let messageId = 'unknown';
+    let envelope;
+    let decodeError;
     try {
-      const envelope = contracts.Envelope.decode(message.data);
+      envelope = contracts.Envelope.decode(message.data);
+      correlationId = envelope.correlationId || 'unknown';
+      messageId = envelope.messageId || 'unknown';
+    } catch (error) {
+      decodeError = error;
+    }
+    logger.debug({
+      topic: message.subject,
+      message_kind: 'command',
+      message_id: messageId,
+      correlation_id: correlationId,
+    }, 'NATS command received');
+    try {
+      if (decodeError) throw decodeError;
       let result = state.value.outcomes[envelope.messageId];
       if (!result) {
         result = processCommand(state, contracts, message.subject, envelope);
@@ -184,9 +201,20 @@ async function runCommandConsumer(commandSubscription, state, contracts, js) {
       }
       const publishHeaders = headers(); publishHeaders.set('Nats-Msg-Id', result.messageID);
       await js.publish(result.subject, Buffer.from(result.data, 'base64'), { msgID: result.messageID, headers: publishHeaders });
+      logger.debug({
+        topic: result.subject,
+        message_kind: 'event',
+        message_id: result.messageID,
+        correlation_id: correlationId,
+      }, 'NATS event sent');
       message.ack();
     } catch (commandError) {
-      logger.error({ subject: message.subject, error: commandError.message }, 'payment command failed');
+      logger.error({
+        topic: message.subject,
+        message_id: messageId,
+        correlation_id: correlationId,
+        error: commandError.message,
+      }, 'payment command processing failed');
       message.nak(1000);
     } finally {
       if (!commandSubscription.isClosed()) commandSubscription.pull({ batch: 1 });
@@ -208,11 +236,30 @@ async function startPaymentNATS() {
 
   const tokenSubscription = nc.subscribe(TOKEN_SUBJECT, { queue: 'payment-tokenize-v1', callback: (err, message) => {
     if (err) return;
+    let correlationId = 'unknown';
+    let request;
+    let parseError;
     try {
-      const request = JSON.parse(message.string());
+      request = JSON.parse(message.string());
+      correlationId = request.correlation_id || request.order_id || 'unknown';
+    } catch (error) {
+      parseError = error;
+    }
+    logger.debug({
+      topic: message.subject || TOKEN_SUBJECT,
+      message_kind: 'query',
+      correlation_id: correlationId,
+    }, 'NATS query received');
+    try {
+      if (parseError) throw parseError;
       message.respond(JSON.stringify(tokenize(state, request)));
     } catch (tokenError) {
       message.respond(JSON.stringify({ error: tokenError.message, safe_message: 'Payment details could not be tokenized.' }));
+      logger.error({
+        topic: message.subject || TOKEN_SUBJECT,
+        correlation_id: correlationId,
+        error: tokenError.message,
+      }, 'payment tokenization query processing failed');
     }
   }});
 

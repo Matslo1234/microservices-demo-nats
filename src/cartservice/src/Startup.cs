@@ -6,6 +6,7 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using cartservice.cartstore;
 using Microsoft.Extensions.Caching.StackExchangeRedis;
 using StackExchange.Redis;
@@ -15,6 +16,8 @@ namespace cartservice
 {
     public class Startup
     {
+        private string cartStoreDescription;
+
         public Startup(IConfiguration configuration)
         {
             Configuration = configuration;
@@ -35,6 +38,7 @@ namespace cartservice
 
             if (!string.IsNullOrEmpty(redisAddress))
             {
+                cartStoreDescription = "Using Redis cart store";
                 services.AddSingleton<IConnectionMultiplexer>(_ =>
                 {
                     var redisOptions = ConfigurationOptions.Parse(redisAddress);
@@ -50,24 +54,27 @@ namespace cartservice
             }
             else if (!string.IsNullOrEmpty(spannerProjectId) || !string.IsNullOrEmpty(spannerConnectionString))
             {
+                cartStoreDescription = "Using Spanner cart store";
                 services.AddSingleton<ICartStore, SpannerCartStore>();
             }
             else if (!string.IsNullOrEmpty(alloyDBConnectionString))
             {
-                Console.WriteLine("Creating AlloyDB cart store");
+                cartStoreDescription = "Using AlloyDB cart store";
                 services.AddSingleton<ICartStore, AlloyDBCartStore>();
             }
             else
             {
-                Console.WriteLine("Redis cache host(hostname+port) was not specified. Starting a cart service using in memory store");
+                cartStoreDescription = "Redis address was not specified; using the in-memory cart store";
                 services.AddDistributedMemoryCache();
                 services.AddSingleton<ICartStore, RedisCartStore>();
             }
         }
 
         // This method gets called by the runtime. Use this method to configure the HTTP request pipeline.
-        public void Configure(IApplicationBuilder app, IWebHostEnvironment env)
+        public void Configure(IApplicationBuilder app, IWebHostEnvironment env, ILogger<Startup> logger)
         {
+            logger.LogInformation("{CartStoreDescription}", cartStoreDescription);
+
             if (env.IsDevelopment())
             {
                 app.UseDeveloperExceptionPage();

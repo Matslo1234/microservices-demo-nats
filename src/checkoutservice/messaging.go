@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -16,6 +17,7 @@ import (
 	commonv1 "github.com/GoogleCloudPlatform/microservices-demo/protos/common/v1"
 	eventsv1 "github.com/GoogleCloudPlatform/microservices-demo/protos/events/v1"
 	"github.com/nats-io/nats.go"
+	"github.com/sirupsen/logrus"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -107,11 +109,17 @@ func startCheckoutWorker(store *stateStore) (*checkoutWorker, error) {
 	addSubscription := func(definition struct {
 		subject, durable, stream string
 		handler                  func(*nats.Msg) error
-	}) error { subscription, subscribeErr := worker.js.PullSubscribe(definition.subject, definition.durable,
-		nats.BindStream(definition.stream), nats.ManualAck(), nats.AckExplicit(), nats.DeliverAll(),
-		nats.AckWait(30*time.Second), nats.MaxDeliver(10), nats.MaxAckPending(64)); if subscribeErr != nil {
-		return fmt.Errorf("create %s: %w", definition.durable, subscribeErr)
-	}; worker.subscriptions = append(worker.subscriptions, subscription); go worker.consume(subscription, definition.handler); return nil }
+	}) error {
+		subscription, subscribeErr := worker.js.PullSubscribe(definition.subject, definition.durable,
+			nats.BindStream(definition.stream), nats.ManualAck(), nats.AckExplicit(), nats.DeliverAll(),
+			nats.AckWait(30*time.Second), nats.MaxDeliver(10), nats.MaxAckPending(64))
+		if subscribeErr != nil {
+			return fmt.Errorf("create %s: %w", definition.durable, subscribeErr)
+		}
+		worker.subscriptions = append(worker.subscriptions, subscription)
+		go worker.consume(subscription, definition.handler)
+		return nil
+	}
 	for _, definition := range projectionDefinitions {
 		if err := addSubscription(definition); err != nil {
 			nc.Close()
@@ -162,14 +170,53 @@ func (worker *checkoutWorker) consume(subscription *nats.Subscription, handler f
 			continue
 		}
 		for _, message := range messages {
+			correlationID, messageID := checkoutMessageContext(message.Data)
+			kind := checkoutMessageKind(message.Subject)
+			entry := log.WithFields(logrus.Fields{
+				"topic":          message.Subject,
+				"message_kind":   kind,
+				"message_id":     messageID,
+				"correlation_id": correlationID,
+			})
+			entry.Debug("NATS " + kind + " received")
 			if err := handler(message); err != nil {
-				log.WithError(err).WithField("subject", message.Subject).Error("checkout message failed")
+				entry.WithError(err).Error("checkout message processing failed")
 				_ = message.NakWithDelay(time.Second)
 				continue
 			}
-			_ = message.Ack()
+			if err := message.Ack(); err != nil {
+				entry.WithError(err).Error("checkout message acknowledgement failed")
+				continue
+			}
 		}
 	}
+}
+
+func checkoutMessageKind(topic string) string {
+	switch {
+	case strings.HasPrefix(topic, "boutique.cmd."):
+		return "command"
+	case strings.HasPrefix(topic, "boutique.qry."):
+		return "query"
+	default:
+		return "event"
+	}
+}
+
+func checkoutMessageContext(data []byte) (string, string) {
+	envelope := &commonv1.MessageEnvelope{}
+	if err := proto.Unmarshal(data, envelope); err != nil {
+		return "unknown", "unknown"
+	}
+	correlationID := envelope.CorrelationId
+	if correlationID == "" {
+		correlationID = "unknown"
+	}
+	messageID := envelope.MessageId
+	if messageID == "" {
+		messageID = "unknown"
+	}
+	return correlationID, messageID
 }
 
 func (worker *checkoutWorker) handleProjectionMessage(message *nats.Msg) error {
@@ -286,6 +333,14 @@ func (worker *checkoutWorker) relayOutbox() {
 		case <-ticker.C:
 		}
 		for _, message := range worker.store.Outbox() {
+			correlationID, _ := checkoutMessageContext(message.Data)
+			kind := checkoutMessageKind(message.Subject)
+			entry := log.WithFields(logrus.Fields{
+				"topic":          message.Subject,
+				"message_kind":   kind,
+				"message_id":     message.MessageID,
+				"correlation_id": correlationID,
+			})
 			ctx, cancel := context.WithTimeout(context.Background(), worker.publishTimeout)
 			out := &nats.Msg{Subject: message.Subject, Data: message.Data, Header: nats.Header{}}
 			out.Header.Set("Nats-Msg-Id", message.MessageID)
@@ -293,11 +348,12 @@ func (worker *checkoutWorker) relayOutbox() {
 			_, err := worker.js.PublishMsg(out, nats.Context(ctx), nats.MsgId(message.MessageID))
 			cancel()
 			if err != nil {
-				log.WithError(err).WithField("subject", message.Subject).Warn("checkout outbox publish failed")
+				entry.WithError(err).Warn("checkout outbox publish failed")
 				break
 			}
+			entry.Debug("NATS " + kind + " sent")
 			if err := worker.store.RemoveOutbox(message.MessageID); err != nil {
-				log.WithError(err).Error("checkout outbox removal failed")
+				entry.WithError(err).Error("checkout outbox removal failed")
 				break
 			}
 		}

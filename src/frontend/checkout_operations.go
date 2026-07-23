@@ -16,6 +16,7 @@ import (
 	commonv1 "github.com/GoogleCloudPlatform/microservices-demo/protos/common/v1"
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
+	"github.com/sirupsen/logrus"
 	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -59,6 +60,7 @@ func checkoutOrderID(request *http.Request, userID string) (string, error) {
 
 func (fe *frontendServer) tokenizePayment(ctx context.Context, orderID string, card paymentCard) (string, error) {
 	request := map[string]interface{}{"order_id": orderID, "idempotency_key": orderID,
+		"correlation_id":     orderID,
 		"credit_card_number": card.Number, "credit_card_expiration_month": card.ExpirationMonth,
 		"credit_card_expiration_year": card.ExpirationYear, "credit_card_cvv": card.CVV}
 	encoded, err := json.Marshal(request)
@@ -67,7 +69,13 @@ func (fe *frontendServer) tokenizePayment(ctx context.Context, orderID string, c
 	}
 	requestContext, cancel := context.WithTimeout(ctx, fe.natsRequestTimeout)
 	defer cancel()
-	message, err := fe.natsConn.RequestWithContext(requestContext, "boutique.qry.payment.tokenize.v1", encoded)
+	topic := "boutique.qry.payment.tokenize.v1"
+	fe.log.WithFields(logrus.Fields{
+		"topic":          topic,
+		"message_kind":   "query",
+		"correlation_id": orderID,
+	}).Debug("NATS query sent")
+	message, err := fe.natsConn.RequestWithContext(requestContext, topic, encoded)
 	if err != nil {
 		return "", fmt.Errorf("payment tokenization unavailable: %w", err)
 	}
@@ -103,7 +111,9 @@ func (fe *frontendServer) publishOrder(ctx context.Context, orderID, userID, ema
 
 func (fe *frontendServer) orderHandler(response http.ResponseWriter, request *http.Request) {
 	orderID := mux.Vars(request)["id"]
-	view, err := fe.storefrontQuery(request.Context(), "order", storefrontQueryRequest{OrderID: orderID, UserID: sessionID(request)})
+	view, err := fe.storefrontQuery(request.Context(), "order", storefrontQueryRequest{
+		OrderID: orderID, UserID: sessionID(request), CorrelationID: orderID,
+	})
 	if err != nil {
 		if errors.Is(err, errProjectionNotFound) {
 			http.Error(response, "order not found", http.StatusNotFound)
