@@ -20,6 +20,7 @@ const COMMAND_PREFETCH = 256;
 const COMMAND_BATCH_DELAY_MS = 20;
 const COMMAND_PULL_EXPIRES_MS = 1000;
 const COMMAND_PULL_REFRESH_MS = 500;
+const COMMAND_RESTART_DELAY_MS = 1000;
 const TOKEN_BATCH_SIZE = 256;
 const TOKEN_BATCH_DELAY_MS = 20;
 
@@ -465,13 +466,51 @@ async function runCommandConsumer(commandSubscription, state, contracts, js,
     }
   } finally {
     clearInterval(pullWatchdog);
+    if (flushTimer) {
+      clearTimeout(flushTimer);
+      flushTimer = undefined;
+    }
+    flush();
+    await processing;
   }
-  if (flushTimer) {
-    clearTimeout(flushTimer);
-    flushTimer = undefined;
+}
+
+function commandConsumerOptions() {
+  const options = consumerOpts();
+  options.durable(COMMAND_DURABLE); options.manualAck(); options.ackExplicit(); options.ackWait(30000);
+  options.maxDeliver(10); options.maxAckPending(COMMAND_PREFETCH); options.deliverAll();
+  options.bindStream('BOUTIQUE_COMMANDS'); options.filterSubject(COMMAND_SUBJECT);
+  return options;
+}
+
+async function superviseCommandConsumer(nc, js, state, contracts, workerStatus, initialSubscription,
+    restartDelayMs = COMMAND_RESTART_DELAY_MS) {
+  let commandSubscription = initialSubscription;
+  while (!workerStatus.stopping && !nc.isClosed()) {
+    try {
+      if (!commandSubscription) {
+        commandSubscription = await js.pullSubscribe(COMMAND_SUBJECT, commandConsumerOptions());
+      }
+      workerStatus.commandSubscription = commandSubscription;
+      workerStatus.consumerReady = true;
+      await runCommandConsumer(commandSubscription, state, contracts, js);
+      if (workerStatus.stopping || nc.isClosed()) return;
+      throw new Error('payment command consumer closed unexpectedly');
+    } catch (workerError) {
+      workerStatus.consumerReady = false;
+      if (workerStatus.commandSubscription === commandSubscription) {
+        workerStatus.commandSubscription = undefined;
+      }
+      if (commandSubscription && !commandSubscription.isClosed()) {
+        commandSubscription.unsubscribe();
+      }
+      commandSubscription = undefined;
+      if (workerStatus.stopping || nc.isClosed()) return;
+      logger.error({ error: workerError.message, retry_delay_ms: restartDelayMs },
+        'payment consumer interrupted; retrying');
+      await new Promise(resolve => setTimeout(resolve, restartDelayMs));
+    }
   }
-  flush();
-  await processing;
 }
 
 async function startPaymentNATS() {
@@ -484,7 +523,9 @@ async function startPaymentNATS() {
     name: 'paymentservice/phase5', tls: { caFile: process.env.NATS_CA_FILE },
     reconnectTimeWait: 2000, maxReconnectAttempts: -1, pingInterval: 20000, maxPingOut: 2 });
   const js = nc.jetstream({ timeout: 5000 });
-  const workerStatus = { ready: false };
+  const workerStatus = {
+    connectionReady: !nc.isClosed(), consumerReady: false, stopping: false, commandSubscription: undefined,
+  };
   const enqueueTokenization = createTokenBatcher(state);
 
   const tokenSubscription = nc.subscribe(TOKEN_SUBJECT, { queue: 'payment-tokenize-v1', callback: (err, message) => {
@@ -501,37 +542,36 @@ async function startPaymentNATS() {
     enqueueTokenization({ message, request, correlationId, error: parseError });
   }});
 
-  const options = consumerOpts();
-  options.durable(COMMAND_DURABLE); options.manualAck(); options.ackExplicit(); options.ackWait(30000);
-  options.maxDeliver(10); options.maxAckPending(COMMAND_PREFETCH); options.deliverAll();
-  options.bindStream('BOUTIQUE_COMMANDS'); options.filterSubject(COMMAND_SUBJECT);
-  const commandSubscription = await js.pullSubscribe(COMMAND_SUBJECT, options);
-  workerStatus.ready = true;
-  runCommandConsumer(commandSubscription, state, contracts, js)
+  const commandSubscription = await js.pullSubscribe(COMMAND_SUBJECT, commandConsumerOptions());
+  superviseCommandConsumer(nc, js, state, contracts, workerStatus, commandSubscription)
     .catch(workerError => {
-      workerStatus.ready = false;
+      workerStatus.consumerReady = false;
       logger.error({ error: workerError.message }, 'payment consumer stopped');
     });
   (async () => {
     for await (const status of nc.status()) {
-      if (status.type === 'disconnect' || status.type === 'error') workerStatus.ready = false;
-      if (status.type === 'reconnect') workerStatus.ready = true;
+      if (status.type === 'disconnect' || status.type === 'error') workerStatus.connectionReady = false;
+      if (status.type === 'reconnect') workerStatus.connectionReady = true;
     }
   })().catch(statusError => {
-    workerStatus.ready = false;
+    workerStatus.connectionReady = false;
     logger.error({ error: statusError.message }, 'payment NATS status monitor stopped');
   });
   logger.info('Payment tokenization and durable command handlers are ready');
   return {
     nc,
     tokenSubscription,
-    commandSubscription,
-    ready: () => workerStatus.ready && !nc.isClosed(),
-    markNotReady: () => { workerStatus.ready = false; }
+    get commandSubscription() { return workerStatus.commandSubscription; },
+    ready: () => workerStatus.connectionReady && workerStatus.consumerReady && !nc.isClosed(),
+    markNotReady: () => {
+      workerStatus.stopping = true;
+      workerStatus.connectionReady = false;
+      workerStatus.consumerReady = false;
+    }
   };
 }
 
 module.exports = {
   startPaymentNATS, stableID, validateCard, tokenize, PaymentState, loadContracts,
-  processTokenBatch, processCommand, processCommandBatch, runCommandConsumer,
+  processTokenBatch, processCommand, processCommandBatch, runCommandConsumer, superviseCommandConsumer,
 };

@@ -915,7 +915,7 @@ spec:
           type: RuntimeDefault
       containers:
       - name: server
-        image: matslo123/benchmarkservice:v0.1.0
+        image: matslo123/benchmarkservice:v0.1.0@sha256:c489b205bce2dfebbcbd6c3ac8fa9448eff133d1e95cd1af4749058f4286f7c0
         env:
         - name: PORT
           value: "8080"

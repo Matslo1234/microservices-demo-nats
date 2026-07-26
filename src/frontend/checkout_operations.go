@@ -22,8 +22,10 @@ import (
 )
 
 const (
-	orderSubmitSubject  = "boutique.cmd.order.submit.v1"
-	orderPollRetryAfter = "2"
+	orderSubmitSubject      = "boutique.cmd.order.submit.v1"
+	orderAPIPollRetryAfter  = "1"
+	orderQueryAttempts      = 3
+	orderQueryRetryInterval = time.Second
 )
 
 type paymentCard struct {
@@ -116,11 +118,14 @@ func (fe *frontendServer) publishOrder(ctx context.Context, orderID, userID, ema
 
 func (fe *frontendServer) orderHandler(response http.ResponseWriter, request *http.Request) {
 	orderID := mux.Vars(request)["id"]
-	view, err := fe.storefrontQuery(request.Context(), "order", storefrontQueryRequest{
-		OrderID: orderID, UserID: sessionID(request), CorrelationID: orderID,
-	})
+	view, err := queryOrderWithRetry(request.Context(), orderQueryRetryInterval, acceptsHTML(request),
+		func(ctx context.Context) (*storefrontQueryResponse, error) {
+			return fe.storefrontQuery(ctx, "order", storefrontQueryRequest{
+				OrderID: orderID, UserID: sessionID(request), CorrelationID: orderID,
+			})
+		})
 	if err != nil {
-		response.Header().Set("Retry-After", orderPollRetryAfter)
+		response.Header().Set("Retry-After", orderAPIPollRetryAfter)
 		if errors.Is(err, errProjectionNotFound) {
 			http.Error(response, "order not found", http.StatusNotFound)
 			return
@@ -129,7 +134,7 @@ func (fe *frontendServer) orderHandler(response http.ResponseWriter, request *ht
 		return
 	}
 	if orderNeedsPolling(view.Order) {
-		response.Header().Set("Retry-After", orderPollRetryAfter)
+		response.Header().Set("Retry-After", orderAPIPollRetryAfter)
 	}
 	if !acceptsHTML(request) {
 		response.Header().Set("Content-Type", "application/json")
@@ -140,6 +145,29 @@ func (fe *frontendServer) orderHandler(response http.ResponseWriter, request *ht
 	_ = templates.ExecuteTemplate(response, "order", injectCommonTemplateData(request, map[string]interface{}{
 		"show_currency": false, "order": view.Order, "order_url": baseUrl + "/orders/" + orderID,
 	}))
+}
+
+func queryOrderWithRetry(ctx context.Context, retryInterval time.Duration, retryNotFound bool,
+	query func(context.Context) (*storefrontQueryResponse, error)) (*storefrontQueryResponse, error) {
+	attempts := 1
+	if retryNotFound {
+		attempts = orderQueryAttempts
+	}
+	for attempt := 1; attempt <= attempts; attempt++ {
+		view, err := query(ctx)
+		if err == nil || !errors.Is(err, errProjectionNotFound) || attempt == attempts {
+			return view, err
+		}
+
+		timer := time.NewTimer(retryInterval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return nil, errProjectionNotFound
 }
 
 func orderNeedsPolling(order *orderStatus) bool {
@@ -176,7 +204,7 @@ func writeOrderResponse(response http.ResponseWriter, request *http.Request, cod
 		response.WriteHeader(http.StatusSeeOther)
 		return
 	}
-	response.Header().Set("Retry-After", orderPollRetryAfter)
+	response.Header().Set("Retry-After", orderAPIPollRetryAfter)
 	response.Header().Set("Content-Type", "application/json")
 	response.WriteHeader(code)
 	_ = json.NewEncoder(response).Encode(status)

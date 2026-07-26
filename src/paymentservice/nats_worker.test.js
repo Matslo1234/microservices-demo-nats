@@ -7,6 +7,7 @@ const os = require('os');
 const path = require('path');
 const {
   PaymentState, tokenize, processTokenBatch, loadContracts, processCommand, runCommandConsumer,
+  superviseCommandConsumer,
 } = require('./nats_worker');
 
 async function main() {
@@ -130,6 +131,77 @@ async function main() {
   assert(watchdogPulls.length >= 3, 'worker did not refresh pull credit while idle');
   assert(watchdogPulls.every(pull => pull.expires === 1000),
     'worker watchdog created an unbounded pull request');
+
+  let interruptedAcknowledgements = 0;
+  let interruptedPublishes = 0;
+  const interruptedSubscription = {
+    pull: () => {},
+    isClosed: () => false,
+    async *[Symbol.asyncIterator]() {
+      yield {
+        ...messages[0],
+        ack: () => { interruptedAcknowledgements++; },
+      };
+      throw new Error('503');
+    },
+  };
+  await assert.rejects(
+    runCommandConsumer(
+      interruptedSubscription,
+      state,
+      contracts,
+      {publish: async () => { interruptedPublishes++; }},
+    ),
+    /503/,
+  );
+  assert.equal(interruptedAcknowledgements, 1,
+    'buffered command was not completed before the failed consumer stopped');
+  assert.equal(interruptedPublishes, 1,
+    'buffered command outcome was not published before the failed consumer stopped');
+
+  let failedSubscriptionClosed = false;
+  const failedSubscription = {
+    pull: () => {},
+    isClosed: () => failedSubscriptionClosed,
+    unsubscribe: () => { failedSubscriptionClosed = true; },
+    async *[Symbol.asyncIterator]() {
+      const error = new Error('503');
+      error.code = '503';
+      throw error;
+    },
+  };
+  const recoveredStatus = {
+    connectionReady: true, consumerReady: false, stopping: false, commandSubscription: undefined,
+  };
+  let recreatedSubscriptions = 0;
+  const recoveredSubscription = {
+    pull: () => {},
+    isClosed: () => false,
+    unsubscribe: () => {},
+    async *[Symbol.asyncIterator]() {
+      recoveredStatus.stopping = true;
+    },
+  };
+  await superviseCommandConsumer(
+    {isClosed: () => false},
+    {
+      pullSubscribe: async () => {
+        recreatedSubscriptions++;
+        return recoveredSubscription;
+      },
+      publish: async () => {},
+    },
+    state,
+    contracts,
+    recoveredStatus,
+    failedSubscription,
+    0,
+  );
+  assert(failedSubscriptionClosed, 'failed command subscription was not closed');
+  assert.equal(recreatedSubscriptions, 1, 'failed command subscription was not recreated');
+  assert.equal(recoveredStatus.commandSubscription, recoveredSubscription,
+    'recreated command subscription was not tracked for readiness');
+  assert(recoveredStatus.consumerReady, 'recreated command subscription did not restore readiness');
 
   const legacyFilename = path.join(directory, 'legacy.json');
   fs.writeFileSync(legacyFilename, JSON.stringify(state.value), {mode: 0o600});

@@ -317,7 +317,11 @@ data:
       ttl="$3"
       max_bytes="$4"
       if nats ${nats_args} kv info "${bucket}" >/dev/null 2>&1; then
-        echo "KV bucket ${bucket} already exists"
+        nats ${nats_args} kv edit "${bucket}" \
+          --history="${history}" \
+          --replicas=3 \
+          --ttl="${ttl}" \
+          --max-bucket-size="${max_bytes}"
       else
         nats ${nats_args} kv add "${bucket}" \
           --history="${history}" \
@@ -331,8 +335,8 @@ data:
     ensure_kv STOREFRONT_PRODUCTS 5 0s 536870912
     ensure_kv STOREFRONT_CARTS 2 0s 536870912
     ensure_kv STOREFRONT_CONTEXT 2 1h 268435456
-    ensure_kv STOREFRONT_ORDERS 10 0s 536870912
-    ensure_kv STOREFRONT_OPERATIONS 10 24h 268435456
+    ensure_kv STOREFRONT_ORDERS 10 0s 1610612736
+    ensure_kv STOREFRONT_OPERATIONS 10 24h 805306368
     nats ${nats_args} stream list
     nats ${nats_args} kv list
 kind: ConfigMap
@@ -1418,7 +1422,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-checkoutservice
-        image: matslo123/checkoutservice@sha256:6ba43f6d22fbd377090a000fd29838491f0e86f6f07cf672277f9e3cfde6270a
+        image: matslo123/checkoutservice@sha256:6538b9da2f2a20e026c91e2390f4add931fce169e982e69b25e81de730cffbc4
         livenessProbe:
           httpGet:
             path: /healthz
@@ -1610,7 +1614,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-emailservice
-        image: matslo123/emailservice@sha256:7aacf56a103ac4a8ec481cc8b9f3d66913b2f72837c3fd9e42851c25de163962
+        image: matslo123/emailservice@sha256:6b94ffe384f7465e2fdfc073454cd29ee29236a6b844e29c680b03cecfdcf98a
         livenessProbe:
           httpGet:
             path: /healthz
@@ -1762,7 +1766,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-frontend
-        image: matslo123/frontend@sha256:b485f60fdd4752a2a3a01605aaa61884f7e8ebb67a5a3c1c7154ffa3fc90d70e
+        image: matslo123/frontend@sha256:743977754f40aea7bcc5a5352feba39d9d5badf526533f3c32d681f6fc7523ed
         livenessProbe:
           httpGet:
             httpHeaders:
@@ -1893,7 +1897,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-paymentservice
-        image: matslo123/paymentservice@sha256:a12afe0b79d46b89998d567edff9a860cf33d6796cf55d722a27cd1cf8c1c1f4
+        image: matslo123/paymentservice@sha256:156c4747e072ced9249f93ec9850d1e486bf88efba98110f0a5cabac89d3b79f
         livenessProbe:
           httpGet:
             path: /healthz
@@ -2077,7 +2081,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-recommendationservice
-        image: matslo123/recommendationservice@sha256:1e5cf59f7dcebcba2ce4aa1af9a3c3dd0d3236b754ad7c6fd67369532232578d
+        image: matslo123/recommendationservice@sha256:5ca40086d2de5f92afa420f706ed9d32758c6edb30e840d452dae73b37f1a60a
         livenessProbe:
           httpGet:
             path: /healthz
@@ -2254,7 +2258,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-shippingservice
-        image: matslo123/shippingservice@sha256:6292e61707730dd021ec636973ad258cdaac3d5b723231a6dd55f26f186bca20
+        image: matslo123/shippingservice@sha256:bdd29df408409b1f8dc1ce73f79f11329cf303d5740f53564db6f31f49ebcf75
         livenessProbe:
           httpGet:
             path: /healthz
@@ -2361,7 +2365,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-storefrontprojectionservice
-        image: matslo123/storefrontprojectionservice@sha256:ca60c104402309c1a1204c80e08497edd4209b7b8dab7cc4ba91b191259e625a
+        image: matslo123/storefrontprojectionservice@sha256:ce7adb0824edc145f00be3a820414e98292552c02539a9b35f4a2c14e12782a7
         livenessProbe:
           httpGet:
             path: /healthz

@@ -355,7 +355,7 @@ spec:
                 - ALL
             privileged: false
             readOnlyRootFilesystem: true
-          image: matslo123/checkoutservice:v0.2.0@sha256:d3b2a3a425bc5cb16eef28630781bef44a7b73962dc88b1d0e49deb8fd9baf21
+          image: matslo123/checkoutservice:v0.2.0@sha256:6538b9da2f2a20e026c91e2390f4add931fce169e982e69b25e81de730cffbc4
           ports:
           - name: health
             containerPort: 8080
@@ -567,7 +567,7 @@ spec:
               - ALL
           privileged: false
           readOnlyRootFilesystem: true
-        image: matslo123/emailservice:v0.2.0@sha256:05b6a2bb73f03445e1a5c0befc42d6a1b948d7529cc52f778d9bcfdb6495687c
+        image: matslo123/emailservice:v0.2.0@sha256:6b94ffe384f7465e2fdfc073454cd29ee29236a6b844e29c680b03cecfdcf98a
         ports:
         - name: health
           containerPort: 8080
@@ -709,7 +709,7 @@ spec:
                 - ALL
             privileged: false
             readOnlyRootFilesystem: true
-          image: matslo123/frontend:v0.2.0@sha256:9c7731e45c499ad5b0615c1f97c1d6f2f7f74522a4723be4b276de7eac266bfa
+          image: matslo123/frontend:v0.2.0@sha256:743977754f40aea7bcc5a5352feba39d9d5badf526533f3c32d681f6fc7523ed
           ports:
           - containerPort: 8080
           readinessProbe:
@@ -1126,7 +1126,7 @@ spec:
               - ALL
           privileged: false
           readOnlyRootFilesystem: true
-        image: matslo123/paymentservice:v0.2.0@sha256:15d24f688a33485a4fd6b9b0557e14a5e6a25a66e13c07132671a3248f2e8c7c
+        image: matslo123/paymentservice:v0.2.0@sha256:156c4747e072ced9249f93ec9850d1e486bf88efba98110f0a5cabac89d3b79f
         ports:
         - name: health
           containerPort: 8080
@@ -1305,7 +1305,7 @@ spec:
               - ALL
           privileged: false
           readOnlyRootFilesystem: true
-        image: matslo123/recommendationservice:v0.2.0@sha256:1e5cf59f7dcebcba2ce4aa1af9a3c3dd0d3236b754ad7c6fd67369532232578d
+        image: matslo123/recommendationservice:v0.2.0@sha256:5ca40086d2de5f92afa420f706ed9d32758c6edb30e840d452dae73b37f1a60a
         ports:
         - name: health
           containerPort: 8080
@@ -1414,7 +1414,7 @@ spec:
               - ALL
           privileged: false
           readOnlyRootFilesystem: true
-        image: matslo123/shippingservice:v0.2.0@sha256:948774f09a812a23b12e5bcd3d4d7d1ca34e7512aa3adfafcb4a78659ebb1117
+        image: matslo123/shippingservice:v0.2.0@sha256:bdd29df408409b1f8dc1ce73f79f11329cf303d5740f53564db6f31f49ebcf75
         ports:
         - name: health
           containerPort: 8080
@@ -1508,7 +1508,7 @@ spec:
         runAsUser: 1000
       containers:
       - name: server
-        image: matslo123/storefrontprojectionservice:v0.2.0@sha256:07d8a60eaf9d444792d2073cb4c7ae36af6da220c968001c69a85b88708cfe17
+        image: matslo123/storefrontprojectionservice:v0.2.0@sha256:ce7adb0824edc145f00be3a820414e98292552c02539a9b35f4a2c14e12782a7
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:

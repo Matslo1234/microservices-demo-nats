@@ -33,7 +33,11 @@ data:
       ttl="$3"
       max_bytes="$4"
       if nats ${nats_args} kv info "${bucket}" >/dev/null 2>&1; then
-        echo "KV bucket ${bucket} already exists"
+        nats ${nats_args} kv edit "${bucket}" \
+          --history="${history}" \
+          --replicas=3 \
+          --ttl="${ttl}" \
+          --max-bucket-size="${max_bytes}"
       else
         nats ${nats_args} kv add "${bucket}" \
           --history="${history}" \
@@ -47,8 +51,8 @@ data:
     ensure_kv STOREFRONT_PRODUCTS 5 0s 536870912
     ensure_kv STOREFRONT_CARTS 2 0s 536870912
     ensure_kv STOREFRONT_CONTEXT 2 1h 268435456
-    ensure_kv STOREFRONT_ORDERS 10 0s 536870912
-    ensure_kv STOREFRONT_OPERATIONS 10 24h 268435456
+    ensure_kv STOREFRONT_ORDERS 10 0s 1610612736
+    ensure_kv STOREFRONT_OPERATIONS 10 24h 805306368
     nats ${nats_args} stream list
     nats ${nats_args} kv list
   BOUTIQUE_COMMANDS.json: |

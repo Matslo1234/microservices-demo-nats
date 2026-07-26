@@ -7,6 +7,7 @@ import base64
 import hashlib
 import json
 import os
+import sqlite3
 import ssl
 import threading
 import uuid
@@ -18,6 +19,7 @@ from google.protobuf.any_pb2 import Any
 from google.protobuf.timestamp_pb2 import Timestamp
 from nats.errors import TimeoutError as NatsTimeoutError
 from nats.js.api import AckPolicy, ConsumerConfig, DeliverPolicy
+from nats.js.errors import ServiceUnavailableError
 
 from logger import getJSONLogger
 from protos.common.v1 import message_pb2
@@ -28,8 +30,6 @@ ORDER_SUBJECT = "boutique.evt.order.completed.v1"
 DURABLE = "email-order-completed-v1"
 SENT_SUBJECT = "boutique.evt.notification.order-confirmation-sent.v1"
 FAILED_SUBJECT = "boutique.evt.notification.order-confirmation-failed.v1"
-STATE_VERSION = 1
-
 _ready = threading.Event()
 _stop = threading.Event()
 _thread = None
@@ -70,95 +70,68 @@ def _mask_recipient(address):
 
 class _State:
   def __init__(self, filename):
-    self.path = Path(filename)
+    configured_path = Path(filename)
+    self.path = self._database_path(configured_path)
     self.path.parent.mkdir(parents=True, exist_ok=True)
-    self.outcomes = {}
-    if self.path.exists():
-      self._load()
+    self.connection = sqlite3.connect(self.path)
+    self.connection.execute("PRAGMA journal_mode=WAL")
+    self.connection.execute("PRAGMA synchronous=FULL")
+    self.connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS outcomes (
+          source_message_id TEXT PRIMARY KEY,
+          outcome_json TEXT NOT NULL
+        ) WITHOUT ROWID
+        """)
+    self.connection.commit()
 
-  def _load(self):
-    encoded = self.path.read_bytes()
-    if not encoded.strip():
-      return
-    try:
-      document = json.loads(encoded)
-    except (json.JSONDecodeError, UnicodeDecodeError):
-      document = None
-    if (isinstance(document, dict) and "version" not in document
-        and isinstance(document.get("outcomes"), dict)):
-      self.outcomes = document["outcomes"]
-      self._write_snapshot()
-      return
+  @staticmethod
+  def _database_path(configured_path):
+    if not configured_path.exists():
+      return configured_path
+    with configured_path.open("rb") as state_file:
+      if state_file.read(16) == b"SQLite format 3\x00":
+        return configured_path
+    # Older images stored every outcome in one JSON journal and rebuilt the
+    # entire index in memory at startup. Keep that file available for rollback,
+    # but use an on-disk index from this version onward. The durable consumer
+    # only redelivers unacknowledged events, so acknowledged legacy entries do
+    # not need to be copied before consumption resumes.
+    return configured_path.with_name(configured_path.name + ".sqlite3")
 
-    lines = encoded.splitlines(keepends=True)
-    valid_bytes = 0
-    for index, line in enumerate(lines):
-      if not line.strip():
-        valid_bytes += len(line)
-        continue
-      try:
-        record = json.loads(line)
-      except (json.JSONDecodeError, UnicodeDecodeError) as error:
-        if any(candidate.strip() for candidate in lines[index + 1:]):
-          raise ValueError(
-              f"invalid email state journal record {index + 1}") from error
-        with self.path.open("r+b") as output:
-          output.truncate(valid_bytes)
-          output.flush()
-          os.fsync(output.fileno())
-        break
-      if record.get("version") != STATE_VERSION:
-        raise ValueError(
-            f"unsupported email state version {record.get('version')}")
-      if isinstance(record.get("snapshot"), dict):
-        self.outcomes = record["snapshot"]
-      elif (isinstance(record.get("message_id"), str)
-            and isinstance(record.get("outcome"), dict)):
-        self.outcomes[record["message_id"]] = record["outcome"]
-      else:
-        raise ValueError(
-            f"incomplete email state journal record {index + 1}")
-      valid_bytes += len(line)
-
-  def _write_snapshot(self):
-    temporary = self.path.with_suffix(self.path.suffix + ".tmp")
-    with temporary.open("w") as output:
-      json.dump(
-          {"version": STATE_VERSION, "snapshot": self.outcomes},
-          output, separators=(",", ":"))
-      output.write("\n")
-      output.flush()
-      os.fsync(output.fileno())
-    temporary.replace(self.path)
+  def get(self, message_id):
+    row = self.connection.execute(
+        "SELECT outcome_json FROM outcomes WHERE source_message_id = ?",
+        (message_id,)).fetchone()
+    if row is None:
+      return None
+    outcome = json.loads(row[0])
+    if not isinstance(outcome, dict):
+      raise ValueError(f"invalid stored outcome for {message_id}")
+    return outcome
 
   def record(self, message_id, outcome):
-    if message_id in self.outcomes:
-      return self.outcomes[message_id]
-    encoded = (
-        json.dumps(
-            {
-                "version": STATE_VERSION,
-                "message_id": message_id,
-                "outcome": outcome,
-            },
-            separators=(",", ":"),
-        )
-        + "\n"
-    ).encode()
-    with self.path.open("ab") as output:
-      start = output.tell()
-      try:
-        output.write(encoded)
-        output.flush()
-        os.fsync(output.fileno())
-      except Exception:
-        output.seek(start)
-        output.truncate()
-        output.flush()
-        os.fsync(output.fileno())
-        raise
-    self.outcomes[message_id] = outcome
-    return outcome
+    return self.record_many([(message_id, outcome)])[message_id]
+
+  def record_many(self, entries):
+    encoded = [
+        (message_id, json.dumps(outcome, separators=(",", ":")))
+        for message_id, outcome in entries
+    ]
+    with self.connection:
+      self.connection.executemany(
+          """
+          INSERT OR IGNORE INTO outcomes (source_message_id, outcome_json)
+          VALUES (?, ?)
+          """,
+          encoded)
+    return {
+        message_id: self.get(message_id)
+        for message_id, _ in entries
+    }
+
+  def close(self):
+    self.connection.close()
 
 
 def _build_outcome(envelope):
@@ -209,6 +182,28 @@ def _build_outcome(envelope):
           "data": base64.b64encode(result.SerializeToString()).decode()}
 
 
+async def _fetch_messages(subscription, retry_delay=0.1):
+  while not _stop.is_set():
+    try:
+      messages = await subscription.fetch(batch=16, timeout=1)
+    except (NatsTimeoutError, asyncio.TimeoutError):
+      _ready.set()
+      continue
+    except (nats.errors.Error, ServiceUnavailableError) as error:
+      # Pull requests can fail during a JetStream leader transition while the
+      # NATS connection itself remains open. Keep the durable consumer alive
+      # instead of leaving the health server running with no event worker.
+      _ready.clear()
+      logger.warning(
+          "Email consumer fetch interrupted; retrying",
+          extra={"error": str(error), "retry_delay_seconds": retry_delay})
+      await asyncio.sleep(retry_delay)
+      continue
+    _ready.set()
+    return messages
+  return []
+
+
 async def _run():
   for name in ("NATS_URL", "NATS_USER", "NATS_PASSWORD", "NATS_CA_FILE"):
     if not os.getenv(name):
@@ -232,10 +227,8 @@ async def _run():
   logger.info("Email order-completed consumer is ready")
   try:
     while not _stop.is_set():
-      try:
-        messages = await subscription.fetch(batch=16, timeout=1)
-      except (NatsTimeoutError, asyncio.TimeoutError):
-        continue
+      messages = await _fetch_messages(subscription)
+      prepared = []
       for message in messages:
         correlation_id, source_event_id = _message_context(message)
         logger.debug(
@@ -248,9 +241,42 @@ async def _run():
             })
         try:
           envelope = message_pb2.MessageEnvelope.FromString(message.data)
-          outcome = state.outcomes.get(envelope.message_id)
-          if outcome is None:
-            outcome = state.record(envelope.message_id, _build_outcome(envelope))
+          prepared.append({
+              "message": message,
+              "correlation_id": correlation_id,
+              "source_event_id": source_event_id,
+              "outcome": _build_outcome(envelope),
+          })
+        except Exception:
+          logger.exception(
+              "Order confirmation event preparation failed",
+              extra={
+                  "topic": message.subject,
+                  "source_event_id": source_event_id,
+                  "message_id": source_event_id,
+                  "correlation_id": correlation_id,
+              })
+          await message.nak(delay=1)
+      if not prepared:
+        continue
+      try:
+        outcomes = state.record_many([
+            (item["source_event_id"], item["outcome"])
+            for item in prepared
+        ])
+      except Exception:
+        logger.exception(
+            "Order confirmation outcome batch persistence failed",
+            extra={"batch_size": len(prepared)})
+        for item in prepared:
+          await item["message"].nak(delay=1)
+        continue
+      for item in prepared:
+        message = item["message"]
+        correlation_id = item["correlation_id"]
+        source_event_id = item["source_event_id"]
+        outcome = outcomes[source_event_id]
+        try:
           await js.publish(outcome["subject"], base64.b64decode(outcome["data"]),
                            headers={"Nats-Msg-Id": outcome["message_id"]})
           logger.debug(
@@ -275,6 +301,7 @@ async def _run():
   finally:
     _ready.clear()
     await connection.drain()
+    state.close()
 
 
 def start_nats_worker():

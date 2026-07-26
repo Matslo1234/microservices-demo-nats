@@ -49,6 +49,7 @@ var (
 	templates        = template.Must(template.New("").
 				Funcs(template.FuncMap{
 			"renderMoney":        renderMoney,
+			"renderCommonMoney":  renderCommonMoney,
 			"renderCurrencyLogo": renderCurrencyLogo,
 		}).ParseGlob("templates/*.html"))
 	plat platformDetails
@@ -589,8 +590,19 @@ func sessionID(r *http.Request) string {
 }
 
 func renderMoney(money pb.Money) string {
-	currencyLogo := renderCurrencyLogo(money.GetCurrencyCode())
-	return fmt.Sprintf("%s%d.%02d", currencyLogo, money.GetUnits(), money.GetNanos()/10000000)
+	return formatMoney(money.GetCurrencyCode(), money.GetUnits(), money.GetNanos())
+}
+
+func renderCommonMoney(money *commonv1.Money) string {
+	if money == nil {
+		return ""
+	}
+	return formatMoney(money.GetCurrencyCode(), money.GetUnits(), money.GetNanos())
+}
+
+func formatMoney(currencyCode string, units int64, nanos int32) string {
+	currencyLogo := renderCurrencyLogo(currencyCode)
+	return fmt.Sprintf("%s%d.%02d", currencyLogo, units, nanos/10000000)
 }
 
 func renderCurrencyLogo(currencyCode string) string {

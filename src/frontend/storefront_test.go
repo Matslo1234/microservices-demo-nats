@@ -6,11 +6,14 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"strings"
 	"testing"
+
+	commonv1 "github.com/GoogleCloudPlatform/microservices-demo/protos/common/v1"
 )
 
 func TestFilterCurrenciesPreservesProjectionOrder(t *testing.T) {
@@ -151,8 +154,11 @@ func TestWriteAcceptedOrderKeepsJSONForAPIClient(t *testing.T) {
 	if contentType := response.Header.Get("Content-Type"); contentType != "application/json" {
 		t.Fatalf("got content type %q, want JSON", contentType)
 	}
-	if retryAfter := response.Header.Get("Retry-After"); retryAfter != orderPollRetryAfter {
-		t.Fatalf("got Retry-After %q, want %q", retryAfter, orderPollRetryAfter)
+	if retryAfter := response.Header.Get("Retry-After"); retryAfter != orderAPIPollRetryAfter {
+		t.Fatalf("got Retry-After %q, want %q", retryAfter, orderAPIPollRetryAfter)
+	}
+	if orderAPIPollRetryAfter != "1" {
+		t.Fatalf("API clients must poll orders after one second, got %q", orderAPIPollRetryAfter)
 	}
 	var order orderStatus
 	if err := json.NewDecoder(response.Body).Decode(&order); err != nil {
@@ -160,6 +166,75 @@ func TestWriteAcceptedOrderKeepsJSONForAPIClient(t *testing.T) {
 	}
 	if order.OrderID != "order-2" || order.Status != "QUEUED" || order.UpdatedAt.IsZero() {
 		t.Fatalf("unexpected queued order: %+v", order)
+	}
+}
+
+func TestQueryOrderRetriesNotFoundThreeTimes(t *testing.T) {
+	attempts := 0
+	expected := &storefrontQueryResponse{
+		Order: &orderStatus{OrderID: "order-3", Status: "PROCESSING"},
+	}
+
+	actual, err := queryOrderWithRetry(context.Background(), 0, true, func(context.Context) (*storefrontQueryResponse, error) {
+		attempts++
+		if attempts < orderQueryAttempts {
+			return nil, errProjectionNotFound
+		}
+		return expected, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attempts != orderQueryAttempts {
+		t.Fatalf("got %d query attempts, want %d", attempts, orderQueryAttempts)
+	}
+	if actual != expected {
+		t.Fatalf("got response %p, want %p", actual, expected)
+	}
+}
+
+func TestQueryOrderReturnsNotFoundAfterThreeAttempts(t *testing.T) {
+	attempts := 0
+
+	_, err := queryOrderWithRetry(context.Background(), 0, true, func(context.Context) (*storefrontQueryResponse, error) {
+		attempts++
+		return nil, errProjectionNotFound
+	})
+	if !errors.Is(err, errProjectionNotFound) {
+		t.Fatalf("got error %v, want projection not found", err)
+	}
+	if attempts != orderQueryAttempts {
+		t.Fatalf("got %d query attempts, want %d", attempts, orderQueryAttempts)
+	}
+}
+
+func TestQueryOrderDoesNotRetryNotFoundForAPIClient(t *testing.T) {
+	attempts := 0
+
+	_, err := queryOrderWithRetry(context.Background(), 0, false, func(context.Context) (*storefrontQueryResponse, error) {
+		attempts++
+		return nil, errProjectionNotFound
+	})
+	if !errors.Is(err, errProjectionNotFound) {
+		t.Fatalf("got error %v, want projection not found", err)
+	}
+	if attempts != 1 {
+		t.Fatalf("got %d query attempts, want 1", attempts)
+	}
+}
+
+func TestQueryOrderDoesNotRetryOtherErrors(t *testing.T) {
+	attempts := 0
+
+	_, err := queryOrderWithRetry(context.Background(), 0, true, func(context.Context) (*storefrontQueryResponse, error) {
+		attempts++
+		return nil, errProjectionUnavailable
+	})
+	if !errors.Is(err, errProjectionUnavailable) {
+		t.Fatalf("got error %v, want projection unavailable", err)
+	}
+	if attempts != 1 {
+		t.Fatalf("got %d query attempts, want 1", attempts)
 	}
 }
 
@@ -212,6 +287,41 @@ func TestOrderProgressPageNavigatesToGetResource(t *testing.T) {
 	}
 	if strings.Contains(body, "location.reload") {
 		t.Fatal("order progress page can still reload the checkout POST response")
+	}
+}
+
+func TestOrderCompletePageShowsTotalPaidAfterTracking(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "/orders/order-4", nil)
+	request = request.WithContext(context.WithValue(request.Context(), ctxKeySessionID{}, "user-1"))
+	recorder := httptest.NewRecorder()
+	order := &orderStatus{
+		OrderID: "order-4",
+		Status:  "COMPLETED",
+		Snapshot: &commonv1.SanitizedOrderSnapshot{
+			TrackingId: "tracking-4",
+			Total:      &commonv1.Money{CurrencyCode: "EUR", Units: 42, Nanos: 990000000},
+		},
+	}
+
+	if err := templates.ExecuteTemplate(recorder, "order", injectCommonTemplateData(request, map[string]interface{}{
+		"show_currency": false,
+		"order":         order,
+		"order_url":     "/orders/order-4",
+	})); err != nil {
+		t.Fatal(err)
+	}
+
+	body := recorder.Body.String()
+	trackingPosition := strings.Index(body, "Tracking #")
+	totalPosition := strings.Index(body, "Total Paid")
+	if trackingPosition == -1 || totalPosition == -1 {
+		t.Fatalf("order complete page is missing tracking or total paid row: %q", body)
+	}
+	if totalPosition < trackingPosition {
+		t.Fatal("total paid row appears before tracking row")
+	}
+	if !strings.Contains(body, "€42.99") {
+		t.Fatalf("order complete page has incorrectly formatted total: %q", body)
 	}
 }
 
