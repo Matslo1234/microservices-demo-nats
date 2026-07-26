@@ -73,6 +73,52 @@ func submitTestOrder(t *testing.T, worker *checkoutWorker, orderID string) {
 	}
 }
 
+func TestOrderTotalDoesNotOverflowFractionalNanos(t *testing.T) {
+	state := &persistedState{
+		Rates: &eventsv1.CurrencyRatesUpdatedEvent{
+			BaseCurrencyCode: "EUR",
+			Rates: []*eventsv1.CurrencyRate{
+				{CurrencyCode: "EUR", UnitsPerBase: 1},
+				{CurrencyCode: "USD", UnitsPerBase: 1.1305},
+			},
+		},
+		Products: map[string]*commonv1.ProductSnapshot{
+			"1YMWWN1N4O": {
+				ProductId: "1YMWWN1N4O",
+				PriceUsd:  &commonv1.Money{CurrencyCode: "USD", Units: 109, Nanos: 990_000_000},
+			},
+			"9SIQT8TOJO": {
+				ProductId: "9SIQT8TOJO",
+				PriceUsd:  &commonv1.Money{CurrencyCode: "USD", Units: 5, Nanos: 490_000_000},
+			},
+		},
+	}
+	cart := &commonv1.CartSnapshot{
+		UserId: "user-1",
+		Items: []*commonv1.CartLine{
+			{ProductId: "1YMWWN1N4O", Quantity: 3},
+			{ProductId: "9SIQT8TOJO", Quantity: 3},
+		},
+	}
+	command := &commandsv1.OrderSubmitCommand{
+		OrderId: "order-1", UserId: "user-1", CurrencyCode: "EUR",
+	}
+
+	snapshot, err := buildOrderSnapshot(state, cart, command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shipping := convertMoney(state.Rates,
+		&commonv1.Money{CurrencyCode: "USD", Units: 8, Nanos: 990_000_000}, "EUR")
+	snapshot.ShippingCost = shipping
+	snapshot.Total = addMoney(snapshot.Total, shipping)
+
+	want := &commonv1.Money{CurrencyCode: "EUR", Units: 314, Nanos: 400_707_653}
+	if !proto.Equal(snapshot.Total, want) {
+		t.Fatalf("order total = %v, want %v", snapshot.Total, want)
+	}
+}
+
 func progressToCapture(t *testing.T, worker *checkoutWorker, orderID string) {
 	t.Helper()
 	submitTestOrder(t, worker, orderID)

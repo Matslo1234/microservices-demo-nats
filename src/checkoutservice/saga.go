@@ -540,8 +540,10 @@ func addMoney(left, right *commonv1.Money) *commonv1.Money {
 }
 
 func multiplyMoney(value *commonv1.Money, quantity int32) *commonv1.Money {
-	result := &commonv1.Money{CurrencyCode: value.CurrencyCode, Units: value.Units * int64(quantity), Nanos: value.Nanos * quantity}
-	result.Units += int64(result.Nanos / 1e9)
-	result.Nanos %= 1e9
-	return result
+	nanos := int64(value.Nanos) * int64(quantity)
+	return &commonv1.Money{
+		CurrencyCode: value.CurrencyCode,
+		Units:        value.Units*int64(quantity) + nanos/1e9,
+		Nanos:        int32(nanos % 1e9),
+	}
 }
