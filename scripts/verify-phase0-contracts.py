@@ -382,6 +382,7 @@ def main() -> int:
             current = compile_contracts(Path(raw_temp_dir))
         validate_registry(current)
         validate_baselines()
+        run([sys.executable, "scripts/verify-stateless-phase0.py"])
         if args.print_lock:
             print(json.dumps(current, separators=(",", ":"), sort_keys=True))
             return 0
@@ -391,7 +392,10 @@ def main() -> int:
     except (ContractError, json.JSONDecodeError, OSError) as error:
         print(f"Phase 0 contract verification failed: {error}", file=sys.stderr)
         return 1
-    print("Phase 0 contracts, language targets, registry, baselines, and golden lock verified")
+    print(
+        "Phase 0 contracts, language targets, registry, baselines, golden lock, "
+        "and stateless guardrails verified"
+    )
     return 0
 
 

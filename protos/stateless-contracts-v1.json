@@ -1,0 +1,288 @@
+{
+  "schema_version": 1,
+  "result_message_id": {
+    "algorithm": "sha256-length-prefixed-v1",
+    "domain": "boutique.result.v1",
+    "encoding": "br1_<base64url-without-padding>",
+    "inputs": [
+      "input_message_id",
+      "result_slot"
+    ],
+    "test_vectors": [
+      {
+        "input_message_id": "01J0INPUT000000000000000001",
+        "result_slot": "cart.mutation",
+        "message_id": "br1_cfipIWfz73yXKiJIc0nF-uV6vnx5kWbMUG2_o-ukd50"
+      },
+      {
+        "input_message_id": "event-order-completed-42",
+        "result_slot": "notification.order-confirmation",
+        "message_id": "br1_BipmFE_ifI2JqRb67NFrgisjZYeejPTlkKhojRP1Mz8"
+      }
+    ]
+  },
+  "retention": {
+    "formula": "max(stream_max_age_seconds, ack_wait_seconds * max_deliver) + max(86400, ceil(stream_max_age_seconds / 10))",
+    "streams": [
+      {
+        "name": "BOUTIQUE_COMMANDS",
+        "max_age_seconds": 604800,
+        "ack_wait_seconds": 30,
+        "max_deliver": 10,
+        "minimum_record_retention_seconds": 691200
+      },
+      {
+        "name": "BOUTIQUE_EVENTS",
+        "max_age_seconds": 2592000,
+        "ack_wait_seconds": 30,
+        "max_deliver": 10,
+        "minimum_record_retention_seconds": 2851200
+      }
+    ]
+  },
+  "command_results": [
+    {
+      "input_subject": "boutique.cmd.cart.add-item.v1",
+      "handler_service": "cartservice",
+      "aggregate_key": "user_id",
+      "results": [
+        {
+          "slot": "cart.mutation",
+          "subjects": [
+            "boutique.evt.cart.item-added.v1",
+            "boutique.evt.cart.command-rejected.v1"
+          ]
+        }
+      ]
+    },
+    {
+      "input_subject": "boutique.cmd.cart.clear.v1",
+      "handler_service": "cartservice",
+      "aggregate_key": "user_id",
+      "results": [
+        {
+          "slot": "cart.mutation",
+          "subjects": [
+            "boutique.evt.cart.cleared.v1",
+            "boutique.evt.cart.command-rejected.v1"
+          ]
+        }
+      ]
+    },
+    {
+      "input_subject": "boutique.cmd.order.submit.v1",
+      "handler_service": "checkoutservice",
+      "aggregate_key": "order_id",
+      "results": [
+        {
+          "slot": "order.decision",
+          "subjects": [
+            "boutique.evt.order.submitted.v1",
+            "boutique.evt.order.rejected.v1"
+          ]
+        },
+        {
+          "slot": "order.stage",
+          "subjects": [
+            "boutique.evt.order.processing-stage-changed.v1"
+          ]
+        },
+        {
+          "slot": "order.quote-command",
+          "subjects": [
+            "boutique.cmd.shipping.calculate-order-quote.v1"
+          ]
+        }
+      ]
+    },
+    {
+      "input_subject": "boutique.cmd.shipping.calculate-order-quote.v1",
+      "handler_service": "shippingservice",
+      "aggregate_key": "order_id",
+      "results": [
+        {
+          "slot": "shipping.order-quote",
+          "subjects": [
+            "boutique.evt.shipping.order-quote-calculated.v1",
+            "boutique.evt.shipping.order-quote-failed.v1"
+          ]
+        }
+      ]
+    },
+    {
+      "input_subject": "boutique.cmd.shipping.create-shipment.v1",
+      "handler_service": "shippingservice",
+      "aggregate_key": "order_id",
+      "provider_idempotency_key": "idempotency_key",
+      "results": [
+        {
+          "slot": "shipping.create-shipment",
+          "subjects": [
+            "boutique.evt.shipping.shipment-created.v1",
+            "boutique.evt.shipping.shipment-creation-failed.v1"
+          ]
+        }
+      ]
+    },
+    {
+      "input_subject": "boutique.cmd.shipping.cancel-shipment.v1",
+      "handler_service": "shippingservice",
+      "aggregate_key": "order_id",
+      "provider_idempotency_key": "idempotency_key",
+      "results": [
+        {
+          "slot": "shipping.cancel-shipment",
+          "subjects": [
+            "boutique.evt.shipping.shipment-cancelled.v1",
+            "boutique.evt.shipping.shipment-cancellation-failed.v1"
+          ]
+        }
+      ]
+    },
+    {
+      "input_subject": "boutique.cmd.payment.authorize.v1",
+      "handler_service": "paymentservice",
+      "aggregate_key": "order_id",
+      "provider_idempotency_key": "idempotency_key",
+      "results": [
+        {
+          "slot": "payment.authorize",
+          "subjects": [
+            "boutique.evt.payment.authorized.v1",
+            "boutique.evt.payment.authorization-declined.v1"
+          ]
+        }
+      ]
+    },
+    {
+      "input_subject": "boutique.cmd.payment.capture.v1",
+      "handler_service": "paymentservice",
+      "aggregate_key": "order_id",
+      "provider_idempotency_key": "idempotency_key",
+      "results": [
+        {
+          "slot": "payment.capture",
+          "subjects": [
+            "boutique.evt.payment.captured.v1",
+            "boutique.evt.payment.capture-failed.v1"
+          ]
+        }
+      ]
+    },
+    {
+      "input_subject": "boutique.cmd.payment.release-authorization.v1",
+      "handler_service": "paymentservice",
+      "aggregate_key": "order_id",
+      "provider_idempotency_key": "idempotency_key",
+      "results": [
+        {
+          "slot": "payment.release-authorization",
+          "subjects": [
+            "boutique.evt.payment.authorization-released.v1",
+            "boutique.evt.payment.authorization-release-failed.v1"
+          ]
+        }
+      ]
+    },
+    {
+      "input_subject": "boutique.cmd.assistant.generate-response.v1",
+      "handler_service": "shoppingassistantservice",
+      "aggregate_key": "operation_id",
+      "results": [
+        {
+          "slot": "assistant.response",
+          "subjects": [
+            "boutique.evt.assistant.response-generated.v1",
+            "boutique.evt.assistant.response-failed.v1"
+          ]
+        }
+      ]
+    }
+  ],
+  "service_state_inventory": [
+    {
+      "service": "adservice",
+      "current_correctness_state": "Configured ads and transient request data in memory; no durable local state.",
+      "target_store": "Immutable configuration plus shared event context; pod memory is disposable.",
+      "idempotency_contract": "Derive selection and result from page-view message ID and configuration revision."
+    },
+    {
+      "service": "benchmarkservice",
+      "current_correctness_state": "Run registry, active-run lock, subprocess ownership, logs, and artifacts live in one pod and emptyDir.",
+      "target_store": "Shared run/lease store, object storage, and one Kubernetes Job per run.",
+      "idempotency_contract": "Run ID is the submission key; lease CAS makes create, cancel, observe, and finalize repeatable."
+    },
+    {
+      "service": "cartservice",
+      "current_correctness_state": "Carts, versions, inbox entries, and a globally scanned outbox are in Redis; catalog validation also uses pod-local projection state.",
+      "target_store": "Cart-keyed clustered Redis records with atomic inbox, aggregate transition, and stored deterministic results; catalog validation uses shared KV.",
+      "idempotency_contract": "Input message ID is the inbox key, user ID is the transaction partition, and duplicate inputs republish stored result slots."
+    },
+    {
+      "service": "checkoutservice",
+      "current_correctness_state": "Orders, projections, inbox, deadlines, and outbox are external but serialized through one Redis revision and whole-store records.",
+      "target_store": "Order-keyed clustered Redis saga/result records, per-key shared projections, and leased partitioned deadline indexes.",
+      "idempotency_contract": "Input message ID or stable synthetic deadline ID is committed with all results in the order partition; provider keys are order ID plus step."
+    },
+    {
+      "service": "currencyservice",
+      "current_correctness_state": "Configured rates and bootstrap state are held in each process.",
+      "target_store": "Immutable configured snapshot with a content revision and shared NATS KV bootstrap claim.",
+      "idempotency_contract": "Snapshot and rate event IDs derive from the content revision; concurrent bootstrap republishes the same logical revision."
+    },
+    {
+      "service": "emailservice",
+      "current_correctness_state": "Notification inbox and provider outcomes are in pod-mounted SQLite.",
+      "target_store": "Deterministic demo provider behavior or provider receipts in an email-owned external store.",
+      "idempotency_contract": "Order ID plus notification type is the provider key; retries reuse the stored or deterministic result."
+    },
+    {
+      "service": "frontend",
+      "current_correctness_state": "Signed client identity, request-scoped data, and disposable polling/SSE connections; authoritative reads use storefront queries.",
+      "target_store": "Signed cookies/request IDs and shared storefront views only.",
+      "idempotency_contract": "HTTP retries reuse the original operation/command ID and never require replica affinity."
+    },
+    {
+      "service": "loadgenerator",
+      "current_correctness_state": "Disposable Locust worker state and benchmark inputs supplied at process start.",
+      "target_store": "External run definition and output destination; workers remain disposable.",
+      "idempotency_contract": "Each simulated retry retains its original business idempotency key and operation ID."
+    },
+    {
+      "service": "paymentservice",
+      "current_correctness_state": "Shared signing-key configuration and deterministic token/provider calculations; no outcome registry.",
+      "target_store": "Identical active signing-key set on every replica; no pod-owned provider state.",
+      "idempotency_contract": "Validated input and business idempotency key fully determine authorization, capture, and release results."
+    },
+    {
+      "service": "productcatalogservice",
+      "current_correctness_state": "Configured catalog is loaded into memory and snapshots are published during startup.",
+      "target_store": "Immutable configured snapshot with content revision and shared NATS KV bootstrap claim.",
+      "idempotency_contract": "Product and snapshot event IDs derive from the catalog content revision and product identity."
+    },
+    {
+      "service": "recommendationservice",
+      "current_correctness_state": "Each pod has an in-memory product set while a shared durable sends later catalog updates to only one replica.",
+      "target_store": "Shared JetStream KV catalog projection with optional revision-aware disposable cache.",
+      "idempotency_contract": "Trigger message ID plus model/configuration revision determines the result ID and candidates."
+    },
+    {
+      "service": "shippingservice",
+      "current_correctness_state": "Provider outcomes are in a pod-mounted append-only JSON journal and process-local map.",
+      "target_store": "Deterministic demo provider behavior or shipping-owned external receipts for a non-idempotent real provider.",
+      "idempotency_contract": "Command business key and stable input time reproduce quote, shipment, tracking, cancellation, and result values."
+    },
+    {
+      "service": "shoppingassistantservice",
+      "current_correctness_state": "Optional undeployed service keeps request work in process memory.",
+      "target_store": "External operation state and object references before the service is enabled.",
+      "idempotency_contract": "Operation ID is the request key and result message ID derives from the triggering command."
+    },
+    {
+      "service": "storefrontprojectionservice",
+      "current_correctness_state": "JetStream KV contains views, but order, operation, and cart maps on each pod are authoritative on cache hits.",
+      "target_store": "JetStream KV is authoritative; any cache is revision-aware and populated from KV.",
+      "idempotency_contract": "Source event ID and aggregate version are stored in each view; stale or duplicate events are no-ops under CAS."
+    }
+  ]
+}
