@@ -18,6 +18,7 @@ is used at the frontend edge and for pod-local health/metrics only.
 flowchart LR
     User[Browser or API client] -->|HTTP| FE[frontend]
     Load[loadgenerator] -->|HTTP| FE
+    Benchmark[benchmarkservice] -->|manually triggered HTTP load| FE
 
     FE -->|Core NATS projected queries| Projection[storefront projection]
     FE -->|JetStream cart/order commands| NATS[(NATS JetStream)]
@@ -47,6 +48,7 @@ flowchart LR
 | Service | Language | Description |
 | --- | --- | --- |
 | [frontend](src/frontend) | Go | Browser-facing web application. |
+| [benchmarkservice](src/benchmarkservice) | Python | Manually triggered parity and capacity benchmarks. |
 | [cartservice](src/cartservice) | C# | Shopping cart storage and cart commands. |
 | [productcatalogservice](src/productcatalogservice) | Go | Product catalogue. |
 | [currencyservice](src/currencyservice) | Node.js | Currency conversion. |

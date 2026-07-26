@@ -28,6 +28,7 @@ ORDER_SUBJECT = "boutique.evt.order.completed.v1"
 DURABLE = "email-order-completed-v1"
 SENT_SUBJECT = "boutique.evt.notification.order-confirmation-sent.v1"
 FAILED_SUBJECT = "boutique.evt.notification.order-confirmation-failed.v1"
+STATE_VERSION = 1
 
 _ready = threading.Event()
 _stop = threading.Event()
@@ -73,20 +74,90 @@ class _State:
     self.path.parent.mkdir(parents=True, exist_ok=True)
     self.outcomes = {}
     if self.path.exists():
-      self.outcomes = json.loads(self.path.read_text()).get("outcomes", {})
+      self._load()
+
+  def _load(self):
+    encoded = self.path.read_bytes()
+    if not encoded.strip():
+      return
+    try:
+      document = json.loads(encoded)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+      document = None
+    if (isinstance(document, dict) and "version" not in document
+        and isinstance(document.get("outcomes"), dict)):
+      self.outcomes = document["outcomes"]
+      self._write_snapshot()
+      return
+
+    lines = encoded.splitlines(keepends=True)
+    valid_bytes = 0
+    for index, line in enumerate(lines):
+      if not line.strip():
+        valid_bytes += len(line)
+        continue
+      try:
+        record = json.loads(line)
+      except (json.JSONDecodeError, UnicodeDecodeError) as error:
+        if any(candidate.strip() for candidate in lines[index + 1:]):
+          raise ValueError(
+              f"invalid email state journal record {index + 1}") from error
+        with self.path.open("r+b") as output:
+          output.truncate(valid_bytes)
+          output.flush()
+          os.fsync(output.fileno())
+        break
+      if record.get("version") != STATE_VERSION:
+        raise ValueError(
+            f"unsupported email state version {record.get('version')}")
+      if isinstance(record.get("snapshot"), dict):
+        self.outcomes = record["snapshot"]
+      elif (isinstance(record.get("message_id"), str)
+            and isinstance(record.get("outcome"), dict)):
+        self.outcomes[record["message_id"]] = record["outcome"]
+      else:
+        raise ValueError(
+            f"incomplete email state journal record {index + 1}")
+      valid_bytes += len(line)
+
+  def _write_snapshot(self):
+    temporary = self.path.with_suffix(self.path.suffix + ".tmp")
+    with temporary.open("w") as output:
+      json.dump(
+          {"version": STATE_VERSION, "snapshot": self.outcomes},
+          output, separators=(",", ":"))
+      output.write("\n")
+      output.flush()
+      os.fsync(output.fileno())
+    temporary.replace(self.path)
 
   def record(self, message_id, outcome):
     if message_id in self.outcomes:
       return self.outcomes[message_id]
-    next_outcomes = dict(self.outcomes)
-    next_outcomes[message_id] = outcome
-    temporary = self.path.with_suffix(self.path.suffix + ".tmp")
-    with temporary.open("w") as output:
-      json.dump({"outcomes": next_outcomes}, output, separators=(",", ":"))
-      output.flush()
-      os.fsync(output.fileno())
-    temporary.replace(self.path)
-    self.outcomes = next_outcomes
+    encoded = (
+        json.dumps(
+            {
+                "version": STATE_VERSION,
+                "message_id": message_id,
+                "outcome": outcome,
+            },
+            separators=(",", ":"),
+        )
+        + "\n"
+    ).encode()
+    with self.path.open("ab") as output:
+      start = output.tell()
+      try:
+        output.write(encoded)
+        output.flush()
+        os.fsync(output.fileno())
+      except Exception:
+        output.seek(start)
+        output.truncate()
+        output.flush()
+        os.fsync(output.fileno())
+        raise
+    self.outcomes[message_id] = outcome
     return outcome
 
 

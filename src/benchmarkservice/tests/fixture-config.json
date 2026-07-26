@@ -1,0 +1,17 @@
+{
+  "application_type": "NATS",
+  "target_url": "http://frontend:80",
+  "workload": "closed",
+  "warmup_seconds": 1,
+  "duration_seconds": 1,
+  "drain_seconds": 1,
+  "users": 1,
+  "spawn_rate": 1.0,
+  "arrival_rate": 1.0,
+  "outcome_timeout_seconds": 1.0,
+  "settlement_timeout_seconds": 1.0,
+  "resource_sample_interval_seconds": 5.0,
+  "seed": 1,
+  "collect_resources": false,
+  "collect_nats_metrics": false
+}

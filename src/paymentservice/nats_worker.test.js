@@ -5,7 +5,9 @@ const assert = require('assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { PaymentState, tokenize, loadContracts, processCommand, runCommandConsumer } = require('./nats_worker');
+const {
+  PaymentState, tokenize, processTokenBatch, loadContracts, processCommand, runCommandConsumer,
+} = require('./nats_worker');
 
 async function main() {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'payment-phase5-'));
@@ -21,7 +23,30 @@ async function main() {
   assert.equal(first.payment_token, second.payment_token, 'tokenization retry changed the token');
   const persisted = fs.readFileSync(filename, 'utf8');
   assert(!persisted.includes(request.credit_card_number), 'PAN was persisted');
-  assert(!persisted.includes(request.credit_card_cvv), 'CVV was persisted');
+  assert(!/"(?:credit_card_cvv|creditCardCvv|cvv)"\s*:/.test(persisted), 'CVV field was persisted');
+  assert.deepEqual(Object.keys(state.value.tokens[first.payment_token]).sort(),
+    ['cardType', 'consumed', 'expiresAt', 'last4', 'orderId'],
+    'persisted token contains unexpected card data');
+
+  const tokenBatchState = new PaymentState(path.join(directory, 'token-batch.json'));
+  const tokenResponses = [];
+  const tokenPersist = tokenBatchState.persist.bind(tokenBatchState);
+  let tokenPersistCalls = 0;
+  tokenBatchState.persist = () => {
+    tokenPersistCalls++;
+    tokenPersist();
+  };
+  processTokenBatch(Array.from({length: 32}, (_, index) => ({
+    request: {...request, order_id: `token-batch-${index}`, idempotency_key: `token-batch-${index}`},
+    correlationId: `token-batch-${index}`,
+    message: {
+      subject: 'boutique.qry.payment.tokenize.v1',
+      respond: encoded => tokenResponses.push(JSON.parse(encoded)),
+    },
+  })), tokenBatchState);
+  assert.equal(tokenPersistCalls, 1, 'token batch was not made durable with one persist');
+  assert.equal(tokenResponses.filter(response => response.payment_token).length, 32,
+    'token batch did not return every token');
 
   const contracts = await loadContracts();
   const authorize = { commandId: 'authorize-1', orderId: 'order-1', paymentToken: first.payment_token,
@@ -33,9 +58,11 @@ async function main() {
   const decodedResult = contracts.Envelope.decode(Buffer.from(result.data, 'base64'));
   assert.equal(decodedResult.data.type_url, 'type.googleapis.com/boutique.events.v1.PaymentAuthorizedEvent',
     'payment result omitted the protobuf Any type URL');
-  state.value.outcomes[envelope.messageId] = result;
+  state.set('outcomes', envelope.messageId, result);
   state.persist();
   assert.deepEqual(state.value.outcomes[envelope.messageId], result, 'idempotent outcome was not retained');
+  const reopened = new PaymentState(filename);
+  assert.deepEqual(reopened.value.outcomes[envelope.messageId], result, 'journaled outcome was not restored');
 
   process.env.PAYMENT_FAILURE_MODE = 'authorization_declined';
   const declined = processCommand(state, contracts, 'boutique.cmd.payment.authorize.v1', {
@@ -57,21 +84,64 @@ async function main() {
   assert.equal(releaseFailed.subject, 'boutique.evt.payment.authorization-release-failed.v1');
   delete process.env.PAYMENT_FAILURE_MODE;
 
-  const workerRequest = {...request, order_id: 'order-worker', idempotency_key: 'order-worker'};
-  const workerToken = tokenize(state, workerRequest).payment_token;
-  const workerCommand = {...authorize, commandId: 'authorize-worker', orderId: 'order-worker',
-    paymentToken: workerToken, idempotencyKey: 'order-worker/authorize'};
-  const workerEnvelope = contracts.Envelope.encode({messageId: 'authorize-worker-message', aggregateId: 'order-worker',
-    aggregateVersion: 2, correlationId: 'order-worker', data: {value: contracts.Authorize.encode(workerCommand).finish()}}).finish();
-  let pulls = 0, acknowledgements = 0, publishes = 0;
-  const message = {data: workerEnvelope, subject: 'boutique.cmd.payment.authorize.v1',
-    ack: () => { acknowledgements++; }, nak: () => { throw new Error('worker unexpectedly NAKed the command'); }};
-  const subscription = {pull: () => { pulls++; }, isClosed: () => false,
-    async *[Symbol.asyncIterator]() { yield message; }};
+  const pulls = [];
+  let acknowledgements = 0, publishes = 0;
+  const messages = [];
+  for (let index = 0; index < 32; index++) {
+    const orderID = `order-worker-${index}`;
+    const workerRequest = {...request, order_id: orderID, idempotency_key: orderID};
+    const workerToken = tokenize(state, workerRequest).payment_token;
+    const workerCommand = {...authorize, commandId: `authorize-worker-${index}`, orderId: orderID,
+      paymentToken: workerToken, idempotencyKey: `${orderID}/authorize`};
+    const workerEnvelope = contracts.Envelope.encode({messageId: `authorize-worker-message-${index}`,
+      aggregateId: orderID, aggregateVersion: 2, correlationId: orderID,
+      data: {value: contracts.Authorize.encode(workerCommand).finish()}}).finish();
+    messages.push({data: workerEnvelope, subject: 'boutique.cmd.payment.authorize.v1',
+      ack: () => { acknowledgements++; },
+      nak: () => { throw new Error('worker unexpectedly NAKed the command'); }});
+  }
+  const subscription = {pull: options => { pulls.push(options); }, isClosed: () => false,
+    async *[Symbol.asyncIterator]() {
+      for (const message of messages) yield message;
+    }};
+  let persistCalls = 0;
+  const persist = state.persist.bind(state);
+  state.persist = () => {
+    persistCalls++;
+    persist();
+  };
   await runCommandConsumer(subscription, state, contracts, {publish: async () => { publishes++; }});
-  assert.equal(pulls, 2, 'worker did not keep a pull request outstanding');
-  assert.equal(acknowledgements, 1, 'worker did not ACK the command');
-  assert.equal(publishes, 1, 'worker did not publish the persisted outcome');
+  const expectedPull = [{batch: 256, expires: 1000, idle_heartbeat: 500},
+    {batch: 256, expires: 1000, idle_heartbeat: 500}];
+  assert.deepEqual(pulls, expectedPull, 'worker did not replenish expiring command pull credit');
+  assert.equal(persistCalls, 1, 'worker did not persist the command batch once');
+  assert.equal(acknowledgements, 32, 'worker did not ACK every command in the batch');
+  assert.equal(publishes, 32, 'worker did not publish every persisted outcome');
+
+  const watchdogPulls = [];
+  const waitingSubscription = {
+    pull: options => { watchdogPulls.push(options); },
+    isClosed: () => false,
+    async *[Symbol.asyncIterator]() {
+      await new Promise(resolve => setTimeout(resolve, 16));
+    },
+  };
+  await runCommandConsumer(waitingSubscription, state, contracts, {publish: async () => {}}, 5);
+  assert(watchdogPulls.length >= 3, 'worker did not refresh pull credit while idle');
+  assert(watchdogPulls.every(pull => pull.expires === 1000),
+    'worker watchdog created an unbounded pull request');
+
+  const legacyFilename = path.join(directory, 'legacy.json');
+  fs.writeFileSync(legacyFilename, JSON.stringify(state.value), {mode: 0o600});
+  const migrated = new PaymentState(legacyFilename);
+  assert.deepEqual(migrated.value.outcomes[envelope.messageId], result, 'legacy JSON state was not migrated');
+  assert.equal(JSON.parse(fs.readFileSync(legacyFilename, 'utf8').trim()).version, 1,
+    'legacy state was not rewritten as a versioned journal snapshot');
+  fs.appendFileSync(legacyFilename, '{"version":1,"sets":');
+  const recovered = new PaymentState(legacyFilename);
+  assert.deepEqual(recovered.value.outcomes[envelope.messageId], result, 'valid state before a torn append was not restored');
+  assert(!fs.readFileSync(legacyFilename, 'utf8').includes('{"version":1,"sets":'),
+    'torn final journal append was not removed');
   console.log('Payment Phase 5 tokenization and idempotency tests passed.');
 }
 

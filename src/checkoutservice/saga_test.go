@@ -4,6 +4,7 @@
 package main
 
 import (
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -11,6 +12,7 @@ import (
 	commandsv1 "github.com/GoogleCloudPlatform/microservices-demo/protos/commands/v1"
 	commonv1 "github.com/GoogleCloudPlatform/microservices-demo/protos/common/v1"
 	eventsv1 "github.com/GoogleCloudPlatform/microservices-demo/protos/events/v1"
+	"github.com/nats-io/nats.go"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -22,6 +24,11 @@ func testWorker(t *testing.T) *checkoutWorker {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Error(err)
+		}
+	})
 	if err := store.Update(func(state *persistedState) error {
 		state.CatalogRevision = 7
 		state.Rates = &eventsv1.CurrencyRatesUpdatedEvent{BaseCurrencyCode: "USD", RateRevision: 9,
@@ -45,6 +52,15 @@ func testEnvelope(t *testing.T, messageID, orderID string, version uint64, paylo
 	}
 	return &commonv1.MessageEnvelope{MessageId: messageID, SchemaVersion: 1, OccurredAt: timestamppb.Now(),
 		AggregateType: "order", AggregateId: orderID, AggregateVersion: version, CorrelationId: orderID, Data: wrapped}
+}
+
+func testNATSMessage(t *testing.T, subject string, envelope *commonv1.MessageEnvelope) *nats.Msg {
+	t.Helper()
+	encoded, err := proto.Marshal(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &nats.Msg{Subject: subject, Data: encoded}
 }
 
 func submitTestOrder(t *testing.T, worker *checkoutWorker, orderID string) {
@@ -195,6 +211,69 @@ func TestOrderRejectsStaleCartWithoutPaymentCommand(t *testing.T) {
 		if output.Subject == "boutique.cmd.payment.authorize.v1" {
 			t.Fatal("rejected order queued payment")
 		}
+	}
+}
+
+func TestOrderWaitsForCartProjectionInsteadOfRejectingEmptyCart(t *testing.T) {
+	worker := testWorker(t)
+	command := &commandsv1.OrderSubmitCommand{CommandId: "future", OperationId: "future", OrderId: "future", UserId: "user-1",
+		ExpectedCartVersion: 4, ExpectedCatalogRevision: 7, ExpectedRateRevision: 9, CurrencyCode: "USD", PaymentToken: "ptok",
+		ShippingAddress: &commonv1.PostalAddress{StreetAddress: "1 Main"}, Email: "buyer@example.com"}
+	err := worker.handleOrderCommand(testEnvelope(t, "future-submit", "future", 0, command))
+	if !errors.Is(err, errCheckoutProjectionLag) {
+		t.Fatalf("handleOrderCommand() error = %v, want projection lag", err)
+	}
+	state, snapshotErr := worker.store.Snapshot()
+	if snapshotErr != nil {
+		t.Fatal(snapshotErr)
+	}
+	if state.Orders["future"] != nil {
+		t.Fatal("projection lag created a rejected order")
+	}
+}
+
+func TestCommandBatchCommitsReadyOrdersWhileLaggingOrdersWait(t *testing.T) {
+	worker := testWorker(t)
+	command := func(orderID string, expectedCartVersion uint64) *commandsv1.OrderSubmitCommand {
+		return &commandsv1.OrderSubmitCommand{
+			CommandId: orderID, OperationId: orderID, OrderId: orderID, UserId: "user-1",
+			ExpectedCartVersion: expectedCartVersion, ExpectedCatalogRevision: 7, ExpectedRateRevision: 9,
+			CurrencyCode: "USD", PaymentToken: "ptok",
+			ShippingAddress: &commonv1.PostalAddress{StreetAddress: "1 Main"}, Email: "buyer@example.com",
+		}
+	}
+	messages := []*nats.Msg{
+		testNATSMessage(t, "boutique.cmd.order.submit.v1",
+			testEnvelope(t, "lagging-submit", "lagging", 0, command("lagging", 4))),
+		testNATSMessage(t, "boutique.cmd.order.submit.v1",
+			testEnvelope(t, "ready-submit", "ready", 0, command("ready", 3))),
+	}
+
+	results := worker.handleCommandMessages(messages)
+	if !errors.Is(results[0], errCheckoutProjectionLag) {
+		t.Fatalf("lagging command error = %v, want projection lag", results[0])
+	}
+	if results[1] != nil {
+		t.Fatalf("ready command error = %v", results[1])
+	}
+	state, err := worker.store.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Orders["lagging"] != nil {
+		t.Fatal("lagging order was persisted")
+	}
+	if state.Orders["ready"] == nil || state.Orders["ready"].Stage != stageWaitingQuote {
+		t.Fatalf("ready order was not committed: %#v", state.Orders["ready"])
+	}
+}
+
+func TestCheckoutSagaEventFilterExcludesCartQuotes(t *testing.T) {
+	if isCheckoutSagaEvent("boutique.evt.shipping.cart-quote-updated.v1") {
+		t.Fatal("cart quote event should not enter the order saga state store")
+	}
+	if !isCheckoutSagaEvent("boutique.evt.shipping.order-quote-calculated.v1") {
+		t.Fatal("order quote event should enter the order saga state store")
 	}
 }
 

@@ -53,11 +53,14 @@ spec:
           containerPort: 8080
         readinessProbe:
           periodSeconds: 5
+          timeoutSeconds: 5
           httpGet:
             path: /readyz
             port: health
         livenessProbe:
           periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 6
           httpGet:
             path: /healthz
             port: health
@@ -81,11 +84,11 @@ spec:
           readOnly: true
         resources:
           requests:
-            cpu: 100m
-            memory: 220Mi
+            cpu: 500m
+            memory: 256Mi
           limits:
-            cpu: 200m
-            memory: 450Mi
+            cpu: "2"
+            memory: 1Gi
       volumes:
       - name: nats-ca
         configMap:

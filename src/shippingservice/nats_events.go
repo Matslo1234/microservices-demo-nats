@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -22,9 +23,11 @@ import (
 )
 
 const (
-	shippingCartConsumer    = "shipping-cart-quotes-v1"
-	shippingQuoteSubject    = "boutique.evt.shipping.cart-quote-updated.v1"
-	shippingCommandConsumer = "shipping-commands-v1"
+	shippingCartConsumer      = "shipping-cart-quotes-v1"
+	shippingQuoteSubject      = "boutique.evt.shipping.cart-quote-updated.v1"
+	shippingCommandConsumer   = "shipping-commands-v1"
+	shippingCommandBatchSize  = 256
+	shippingCommandMaxPending = 512
 )
 
 type shippingEventWorker struct {
@@ -108,10 +111,24 @@ func startShippingEvents() (*shippingEventWorker, error) {
 		nc.Close()
 		return nil, fmt.Errorf("create shipping cart consumer: %w", err)
 	}
+	commandInfo, err := worker.js.ConsumerInfo("BOUTIQUE_COMMANDS", shippingCommandConsumer)
+	if err != nil && !errors.Is(err, nats.ErrConsumerNotFound) {
+		nc.Close()
+		return nil, fmt.Errorf("inspect shipping command consumer: %w", err)
+	}
+	if commandInfo != nil && commandInfo.Config.MaxAckPending != shippingCommandMaxPending {
+		config := commandInfo.Config
+		config.MaxAckPending = shippingCommandMaxPending
+		if _, err := worker.js.UpdateConsumer("BOUTIQUE_COMMANDS", &config); err != nil {
+			nc.Close()
+			return nil, fmt.Errorf("update shipping command consumer: %w", err)
+		}
+	}
 	worker.commandSubscription, err = worker.js.PullSubscribe(
 		"boutique.cmd.shipping.>", shippingCommandConsumer,
 		nats.BindStream("BOUTIQUE_COMMANDS"), nats.ManualAck(), nats.AckExplicit(),
 		nats.DeliverAll(), nats.AckWait(30*time.Second), nats.MaxDeliver(10),
+		nats.MaxAckPending(shippingCommandMaxPending),
 	)
 	if err != nil {
 		nc.Close()
@@ -130,7 +147,7 @@ func (worker *shippingEventWorker) runCommands() {
 			return
 		default:
 		}
-		messages, err := worker.commandSubscription.Fetch(16, nats.MaxWait(time.Second))
+		messages, err := worker.commandSubscription.Fetch(shippingCommandBatchSize, nats.MaxWait(time.Second))
 		if err != nil && err != nats.ErrTimeout {
 			log.Errorf("shipping command fetch failed: %v", err)
 			time.Sleep(time.Second)
@@ -139,7 +156,11 @@ func (worker *shippingEventWorker) runCommands() {
 		for _, message := range messages {
 			entry := shippingMessageLog(message, "command")
 			entry.Debug("NATS command received")
-			if err := worker.handleCommand(message); err != nil {
+		}
+		results := worker.handleCommandBatch(messages)
+		for index, message := range messages {
+			entry := shippingMessageLog(message, "command")
+			if err := results[index]; err != nil {
 				entry.WithError(err).Error("shipping command processing failed")
 				_ = message.NakWithDelay(time.Second)
 				continue

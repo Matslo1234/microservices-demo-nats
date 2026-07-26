@@ -63,6 +63,46 @@ spec:
           limits:
             cpu: 50m
             memory: 32Mi
+      # The email worker does not retry its initial durable-consumer creation.
+      # Gate it on the stream created by nats-bootstrap so a single-file/fresh
+      # cluster deployment cannot strand the health server in NotReady.
+      - name: wait-for-boutique-events
+        image: natsio/nats-box:0.19.7-nonroot
+        command:
+        - sh
+        - -ec
+        - |
+          until nats \
+            --server="${NATS_URL}" \
+            --user="${NATS_USER}" \
+            --password="${NATS_PASSWORD}" \
+            --tlsca="${NATS_CA_FILE}" \
+            --timeout=2s \
+            stream info BOUTIQUE_EVENTS >/dev/null 2>&1; do
+            echo "waiting for the BOUTIQUE_EVENTS stream"
+            sleep 2
+          done
+        envFrom:
+        - configMapRef:
+            name: nats-client-config
+        - secretRef:
+            name: nats-credentials-emailservice
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+          readOnlyRootFilesystem: true
+        volumeMounts:
+        - name: nats-ca
+          mountPath: /etc/nats-ca
+          readOnly: true
+        resources:
+          requests:
+            cpu: 5m
+            memory: 16Mi
+          limits:
+            cpu: 50m
+            memory: 64Mi
       containers:
       - name: server
         securityContext:

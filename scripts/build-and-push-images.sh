@@ -11,6 +11,7 @@ target_platform="${PLATFORM:-linux/amd64}"
 
 builds=(
   "adservice . src/adservice/Dockerfile"
+  "benchmarkservice . src/benchmarkservice/Dockerfile"
   "cartservice . src/cartservice/src/Dockerfile"
   "checkoutservice . src/checkoutservice/Dockerfile"
   "currencyservice . src/currencyservice/Dockerfile"

@@ -62,6 +62,16 @@ spec:
     ports:
     - protocol: TCP
       port: 7777
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: default
+      podSelector:
+        matchLabels:
+          app: benchmarkservice
+    ports:
+    - protocol: TCP
+      port: 7777
   egress:
   - to:
     - namespaceSelector:

@@ -4,13 +4,6 @@
 package main
 
 import (
-	"encoding/json"
-	"errors"
-	"fmt"
-	"os"
-	"path/filepath"
-	"sort"
-	"sync"
 	"time"
 
 	commonv1 "github.com/GoogleCloudPlatform/microservices-demo/protos/common/v1"
@@ -25,12 +18,37 @@ type persistedState struct {
 	CatalogRevision uint64                               `json:"catalog_revision"`
 	Inbox           map[string]time.Time                 `json:"inbox"`
 	Outbox          map[string]outboxMessage             `json:"outbox"`
+	changes         *stateChanges
 }
 
 type outboxMessage struct {
 	MessageID string `json:"message_id"`
 	Subject   string `json:"subject"`
 	Data      []byte `json:"data"`
+}
+
+type stateChanges struct {
+	metadata bool
+	products map[string]struct{}
+	carts    map[string]struct{}
+	orders   map[string]struct{}
+	inbox    map[string]struct{}
+	outbox   map[string]struct{}
+}
+
+func newStateChanges() *stateChanges {
+	return &stateChanges{
+		products: make(map[string]struct{}),
+		carts:    make(map[string]struct{}),
+		orders:   make(map[string]struct{}),
+		inbox:    make(map[string]struct{}),
+		outbox:   make(map[string]struct{}),
+	}
+}
+
+func (changes *stateChanges) empty() bool {
+	return !changes.metadata && len(changes.products) == 0 && len(changes.carts) == 0 &&
+		len(changes.orders) == 0 && len(changes.inbox) == 0 && len(changes.outbox) == 0
 }
 
 func newPersistedState() *persistedState {
@@ -59,106 +77,69 @@ func (state *persistedState) normalize() {
 	}
 }
 
-type stateStore struct {
-	mu    sync.Mutex
-	path  string
-	state *persistedState
+func (state *persistedState) setCatalogRevision(revision uint64) {
+	state.CatalogRevision = revision
+	if state.changes != nil {
+		state.changes.metadata = true
+	}
 }
 
-func openStateStore(path string) (*stateStore, error) {
-	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
-		return nil, fmt.Errorf("create checkout store directory: %w", err)
+func (state *persistedState) setRates(rates *eventsv1.CurrencyRatesUpdatedEvent) {
+	state.Rates = rates
+	if state.changes != nil {
+		state.changes.metadata = true
 	}
-	state := newPersistedState()
-	encoded, err := os.ReadFile(path)
-	if err == nil {
-		if err := json.Unmarshal(encoded, state); err != nil {
-			return nil, fmt.Errorf("decode checkout state: %w", err)
-		}
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return nil, fmt.Errorf("read checkout state: %w", err)
-	}
-	state.normalize()
-	return &stateStore{path: path, state: state}, nil
 }
 
-func (store *stateStore) Update(update func(*persistedState) error) error {
-	store.mu.Lock()
-	defer store.mu.Unlock()
-	encoded, err := json.Marshal(store.state)
-	if err != nil {
-		return err
+func (state *persistedState) setProduct(productID string, product *commonv1.ProductSnapshot) {
+	state.Products[productID] = product
+	if state.changes != nil {
+		state.changes.products[productID] = struct{}{}
 	}
-	copyState := newPersistedState()
-	if err := json.Unmarshal(encoded, copyState); err != nil {
-		return err
-	}
-	copyState.normalize()
-	if err := update(copyState); err != nil {
-		return err
-	}
-	if err := store.persist(copyState); err != nil {
-		return err
-	}
-	store.state = copyState
-	return nil
 }
 
-func (store *stateStore) Snapshot() (*persistedState, error) {
-	store.mu.Lock()
-	defer store.mu.Unlock()
-	encoded, err := json.Marshal(store.state)
-	if err != nil {
-		return nil, err
+func (state *persistedState) deleteProduct(productID string) {
+	delete(state.Products, productID)
+	if state.changes != nil {
+		state.changes.products[productID] = struct{}{}
 	}
-	copyState := newPersistedState()
-	if err := json.Unmarshal(encoded, copyState); err != nil {
-		return nil, err
-	}
-	copyState.normalize()
-	return copyState, nil
 }
 
-func (store *stateStore) Outbox() []outboxMessage {
-	store.mu.Lock()
-	defer store.mu.Unlock()
-	messages := make([]outboxMessage, 0, len(store.state.Outbox))
-	for _, message := range store.state.Outbox {
-		messages = append(messages, message)
+func (state *persistedState) setCart(userID string, cart *commonv1.CartSnapshot) {
+	state.Carts[userID] = cart
+	if state.changes != nil {
+		state.changes.carts[userID] = struct{}{}
 	}
-	sort.Slice(messages, func(i, j int) bool { return messages[i].MessageID < messages[j].MessageID })
-	return messages
 }
 
-func (store *stateStore) RemoveOutbox(messageID string) error {
-	return store.Update(func(state *persistedState) error { delete(state.Outbox, messageID); return nil })
+func (state *persistedState) setOrder(orderID string, order *orderSaga) {
+	state.Orders[orderID] = order
+	state.markOrder(orderID)
 }
 
-func (store *stateStore) persist(state *persistedState) error {
-	temporary := store.path + ".tmp"
-	file, err := os.OpenFile(temporary, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
-	if err != nil {
-		return fmt.Errorf("open checkout state temp file: %w", err)
+func (state *persistedState) markOrder(orderID string) {
+	if state.changes != nil {
+		state.changes.orders[orderID] = struct{}{}
 	}
-	encoder := json.NewEncoder(file)
-	if err := encoder.Encode(state); err != nil {
-		_ = file.Close()
-		return err
+}
+
+func (state *persistedState) setInbox(messageID string, receivedAt time.Time) {
+	state.Inbox[messageID] = receivedAt
+	if state.changes != nil {
+		state.changes.inbox[messageID] = struct{}{}
 	}
-	if err := file.Sync(); err != nil {
-		_ = file.Close()
-		return err
+}
+
+func (state *persistedState) setOutbox(message outboxMessage) {
+	state.Outbox[message.MessageID] = message
+	if state.changes != nil {
+		state.changes.outbox[message.MessageID] = struct{}{}
 	}
-	if err := file.Close(); err != nil {
-		return err
+}
+
+func (state *persistedState) deleteOutbox(messageID string) {
+	delete(state.Outbox, messageID)
+	if state.changes != nil {
+		state.changes.outbox[messageID] = struct{}{}
 	}
-	if err := os.Rename(temporary, store.path); err != nil {
-		return err
-	}
-	directory, err := os.Open(filepath.Dir(store.path))
-	if err == nil {
-		_ = directory.Sync()
-		_ = directory.Close()
-	}
-	return nil
 }

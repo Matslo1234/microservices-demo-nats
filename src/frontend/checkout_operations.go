@@ -21,7 +21,10 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-const orderSubmitSubject = "boutique.cmd.order.submit.v1"
+const (
+	orderSubmitSubject  = "boutique.cmd.order.submit.v1"
+	orderPollRetryAfter = "2"
+)
 
 type paymentCard struct {
 	Number                               string
@@ -35,16 +38,18 @@ type paymentTokenResponse struct {
 }
 
 type orderStatus struct {
-	OrderID            string                           `json:"order_id"`
-	UserID             string                           `json:"user_id,omitempty"`
-	Status             string                           `json:"status"`
-	Stage              string                           `json:"stage,omitempty"`
-	Snapshot           *commonv1.SanitizedOrderSnapshot `json:"snapshot,omitempty"`
-	FailureCode        string                           `json:"failure_code,omitempty"`
-	Retryable          bool                             `json:"retryable,omitempty"`
-	SafeMessage        string                           `json:"safe_message,omitempty"`
-	NotificationStatus string                           `json:"notification_status,omitempty"`
-	UpdatedAt          time.Time                        `json:"updated_at"`
+	OrderID              string                           `json:"order_id"`
+	UserID               string                           `json:"user_id,omitempty"`
+	Status               string                           `json:"status"`
+	Stage                string                           `json:"stage,omitempty"`
+	Snapshot             *commonv1.SanitizedOrderSnapshot `json:"snapshot,omitempty"`
+	FailureCode          string                           `json:"failure_code,omitempty"`
+	Retryable            bool                             `json:"retryable,omitempty"`
+	SafeMessage          string                           `json:"safe_message,omitempty"`
+	NotificationStatus   string                           `json:"notification_status,omitempty"`
+	CartClearStatus      string                           `json:"cart_clear_status,omitempty"`
+	CartClearFailureCode string                           `json:"cart_clear_failure_code,omitempty"`
+	UpdatedAt            time.Time                        `json:"updated_at"`
 }
 
 func checkoutOrderID(request *http.Request, userID string) (string, error) {
@@ -106,7 +111,7 @@ func (fe *frontendServer) publishOrder(ctx context.Context, orderID, userID, ema
 	if err := fe.publishEnvelope(ctx, orderSubmitSubject, orderID, envelope); err != nil {
 		return err
 	}
-	return fe.publishOperationAccepted(context.Background(), ctx, orderID, orderID, "order.submit", userID, now)
+	return nil
 }
 
 func (fe *frontendServer) orderHandler(response http.ResponseWriter, request *http.Request) {
@@ -115,13 +120,16 @@ func (fe *frontendServer) orderHandler(response http.ResponseWriter, request *ht
 		OrderID: orderID, UserID: sessionID(request), CorrelationID: orderID,
 	})
 	if err != nil {
+		response.Header().Set("Retry-After", orderPollRetryAfter)
 		if errors.Is(err, errProjectionNotFound) {
 			http.Error(response, "order not found", http.StatusNotFound)
 			return
 		}
-		response.Header().Set("Retry-After", "1")
 		http.Error(response, "order status unavailable", http.StatusServiceUnavailable)
 		return
+	}
+	if orderNeedsPolling(view.Order) {
+		response.Header().Set("Retry-After", orderPollRetryAfter)
 	}
 	if !acceptsHTML(request) {
 		response.Header().Set("Content-Type", "application/json")
@@ -132,6 +140,22 @@ func (fe *frontendServer) orderHandler(response http.ResponseWriter, request *ht
 	_ = templates.ExecuteTemplate(response, "order", injectCommonTemplateData(request, map[string]interface{}{
 		"show_currency": false, "order": view.Order, "order_url": baseUrl + "/orders/" + orderID,
 	}))
+}
+
+func orderNeedsPolling(order *orderStatus) bool {
+	if order == nil {
+		return true
+	}
+	switch order.Status {
+	case "CANCELLED", "REJECTED", "MANUAL_REVIEW":
+		return false
+	case "COMPLETED":
+		notificationDone := order.NotificationStatus == "SENT" || order.NotificationStatus == "FAILED"
+		cartClearDone := order.CartClearStatus == "SUCCEEDED" || order.CartClearStatus == "REJECTED"
+		return !notificationDone || !cartClearDone
+	default:
+		return true
+	}
 }
 
 func writeAcceptedOrder(response http.ResponseWriter, request *http.Request, orderID string) {
@@ -152,7 +176,7 @@ func writeOrderResponse(response http.ResponseWriter, request *http.Request, cod
 		response.WriteHeader(http.StatusSeeOther)
 		return
 	}
-	response.Header().Set("Retry-After", "1")
+	response.Header().Set("Retry-After", orderPollRetryAfter)
 	response.Header().Set("Content-Type", "application/json")
 	response.WriteHeader(code)
 	_ = json.NewEncoder(response).Encode(status)

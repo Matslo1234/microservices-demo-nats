@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"log"
 	"log/slog"
+	"strings"
+	"sync"
 	"time"
 
 	commonv1 "github.com/GoogleCloudPlatform/microservices-demo/protos/common/v1"
@@ -20,6 +22,26 @@ import (
 
 const projectionDurable = "storefront-projection-v1"
 
+const (
+	projectionFetchSize   = 1024
+	projectionParallelism = 128
+	projectionMaxPending  = 4096
+)
+
+var projectionFilterSubjects = []string{
+	"boutique.evt.catalog.>",
+	"boutique.evt.currency.rates-updated.v1",
+	"boutique.evt.cart.>",
+	"boutique.evt.storefront.operation-accepted.v1",
+	"boutique.evt.recommendation.>",
+	"boutique.evt.ad.>",
+	"boutique.evt.shipping.cart-quote-updated.v1",
+	"boutique.evt.shipping.cart-quote-failed.v1",
+	"boutique.evt.order.>",
+	"boutique.evt.notification.order-confirmation-sent.v1",
+	"boutique.evt.notification.order-confirmation-failed.v1",
+}
+
 type projector struct {
 	js         nats.JetStreamContext
 	products   nats.KeyValue
@@ -27,6 +49,13 @@ type projector struct {
 	context    nats.KeyValue
 	operations nats.KeyValue
 	orders     nats.KeyValue
+
+	// Order, operation, and cart state are read while their events are still
+	// being projected. Keep the latest durable values local so those reads do
+	// not compete with projection writes or observe a lagging KV replica.
+	orderViews     sync.Map
+	operationViews sync.Map
+	cartViews      sync.Map
 }
 
 func newProjector(js nats.JetStreamContext) (*projector, error) {
@@ -61,15 +90,31 @@ func (p *projector) subscribe() (*nats.Subscription, bool, error) {
 			return nil, false, fmt.Errorf("reset projection consumer: %w", err)
 		}
 	}
+	info, err := p.js.ConsumerInfo("BOUTIQUE_EVENTS", projectionDurable)
+	if err != nil && !errors.Is(err, nats.ErrConsumerNotFound) {
+		return nil, rebuilding, fmt.Errorf("inspect projection consumer: %w", err)
+	}
+	if info != nil && (!projectionFiltersMatch(info.Config.FilterSubject, info.Config.FilterSubjects) ||
+		info.Config.MaxAckPending != projectionMaxPending) {
+		config := info.Config
+		config.FilterSubject = ""
+		config.FilterSubjects = append([]string(nil), projectionFilterSubjects...)
+		config.MaxAckPending = projectionMaxPending
+		if _, err := p.js.UpdateConsumer("BOUTIQUE_EVENTS", &config); err != nil {
+			return nil, rebuilding, fmt.Errorf("update projection consumer: %w", err)
+		}
+	}
 	subscription, err := p.js.PullSubscribe(
-		"boutique.evt.>",
+		"",
 		projectionDurable,
 		nats.BindStream("BOUTIQUE_EVENTS"),
+		nats.ConsumerFilterSubjects(projectionFilterSubjects...),
 		nats.ManualAck(),
 		nats.AckExplicit(),
 		nats.DeliverAll(),
 		nats.AckWait(30*time.Second),
 		nats.MaxDeliver(10),
+		nats.MaxAckPending(projectionMaxPending),
 	)
 	if err != nil {
 		return nil, rebuilding, fmt.Errorf("create projection consumer: %w", err)
@@ -84,35 +129,101 @@ func (p *projector) run(subscription *nats.Subscription, stop <-chan struct{}) {
 			return
 		default:
 		}
-		messages, err := subscription.Fetch(64, nats.MaxWait(time.Second))
+		messages, err := subscription.Fetch(projectionFetchSize, nats.MaxWait(time.Second))
 		if err != nil && !errors.Is(err, nats.ErrTimeout) {
 			log.Printf("projection fetch failed: %v", err)
 			time.Sleep(time.Second)
 			continue
 		}
-		for _, message := range messages {
-			correlationID, messageID := projectionMessageContext(message.Data)
-			slog.Debug("NATS event received",
-				"topic", message.Subject,
-				"message_kind", "event",
-				"message_id", messageID,
-				"correlation_id", correlationID)
-			if err := p.apply(message.Subject, message.Data); err != nil {
-				log.Printf("projection event processing failed topic=%q message_id=%q correlation_id=%q error=%v",
-					message.Subject, messageID, correlationID, err)
-				if nakErr := message.NakWithDelay(time.Second); nakErr != nil {
-					log.Printf("projection event NAK failed topic=%q message_id=%q correlation_id=%q error=%v",
-						message.Subject, messageID, correlationID, nakErr)
-				}
-				continue
-			}
+		p.applyBatch(messages)
+	}
+}
+
+type projectionMessage struct {
+	message       *nats.Msg
+	correlationID string
+	messageID     string
+}
+
+func (p *projector) applyBatch(messages []*nats.Msg) {
+	groups := make(map[string][]projectionMessage, len(messages))
+	for _, message := range messages {
+		if !projectionHandlesSubject(message.Subject) {
 			if err := message.Ack(); err != nil {
-				log.Printf("projection event acknowledgement failed topic=%q message_id=%q correlation_id=%q error=%v",
-					message.Subject, messageID, correlationID, err)
-				continue
+				log.Printf("ignored projection event acknowledgement failed topic=%q error=%v", message.Subject, err)
 			}
+			continue
+		}
+		correlationID, messageID := projectionMessageContext(message.Data)
+		groups[correlationID] = append(groups[correlationID], projectionMessage{
+			message: message, correlationID: correlationID, messageID: messageID,
+		})
+	}
+	if len(messages) != 0 {
+		slog.Debug("NATS projection batch received", "message_kind", "event",
+			"messages", len(messages), "correlation_groups", len(groups))
+	}
+
+	parallel := make(chan struct{}, projectionParallelism)
+	var running sync.WaitGroup
+	for _, group := range groups {
+		group := group
+		running.Add(1)
+		go func() {
+			defer running.Done()
+			parallel <- struct{}{}
+			defer func() { <-parallel }()
+			for _, item := range group {
+				if err := p.apply(item.message.Subject, item.message.Data); err != nil {
+					log.Printf("projection event processing failed topic=%q message_id=%q correlation_id=%q error=%v",
+						item.message.Subject, item.messageID, item.correlationID, err)
+					if nakErr := item.message.NakWithDelay(time.Second); nakErr != nil {
+						log.Printf("projection event NAK failed topic=%q message_id=%q correlation_id=%q error=%v",
+							item.message.Subject, item.messageID, item.correlationID, nakErr)
+					}
+					continue
+				}
+				if err := item.message.Ack(); err != nil {
+					log.Printf("projection event acknowledgement failed topic=%q message_id=%q correlation_id=%q error=%v",
+						item.message.Subject, item.messageID, item.correlationID, err)
+				}
+			}
+		}()
+	}
+	running.Wait()
+}
+
+func projectionFiltersMatch(single string, multiple []string) bool {
+	if single != "" || len(multiple) != len(projectionFilterSubjects) {
+		return false
+	}
+	wanted := make(map[string]struct{}, len(projectionFilterSubjects))
+	for _, subject := range projectionFilterSubjects {
+		wanted[subject] = struct{}{}
+	}
+	for _, subject := range multiple {
+		if _, ok := wanted[subject]; !ok {
+			return false
 		}
 	}
+	return true
+}
+
+func projectionHandlesSubject(subject string) bool {
+	switch subject {
+	case "boutique.evt.currency.rates-updated.v1",
+		"boutique.evt.storefront.operation-accepted.v1",
+		"boutique.evt.shipping.cart-quote-updated.v1",
+		"boutique.evt.shipping.cart-quote-failed.v1",
+		"boutique.evt.notification.order-confirmation-sent.v1",
+		"boutique.evt.notification.order-confirmation-failed.v1":
+		return true
+	}
+	return strings.HasPrefix(subject, "boutique.evt.catalog.") ||
+		strings.HasPrefix(subject, "boutique.evt.cart.") ||
+		strings.HasPrefix(subject, "boutique.evt.recommendation.") ||
+		strings.HasPrefix(subject, "boutique.evt.ad.") ||
+		strings.HasPrefix(subject, "boutique.evt.order.")
 }
 
 func projectionMessageContext(data []byte) (string, string) {
@@ -211,11 +322,17 @@ func (p *projector) apply(subject string, data []byte) error {
 		if err := p.updateCart(payload.Cart, updatedAt); err != nil {
 			return err
 		}
-		return p.updateOperation(storefront.OperationView{
+		if err := p.updateOperation(storefront.OperationView{
 			OperationID: payload.CommandId, CommandID: payload.CommandId, Kind: "cart.clear",
 			Status: "SUCCEEDED", UserID: payload.UserId,
 			CartVersion: payload.Cart.GetCartVersion(), UpdatedAt: updatedAt,
-		})
+		}); err != nil {
+			return err
+		}
+		if payload.OrderId != "" {
+			return p.updateOrderSettlement(payload.OrderId, "SUCCEEDED", "", updatedAt)
+		}
+		return nil
 	case "boutique.evt.cart.command-rejected.v1":
 		payload := &eventsv1.CartCommandRejectedEvent{}
 		if err := envelope.Data.UnmarshalTo(payload); err != nil {
@@ -230,7 +347,16 @@ func (p *projector) apply(subject string, data []byte) error {
 			view.Retryable = payload.Failure.Retryable
 			view.SafeMessage = payload.Failure.SafeMessage
 		}
-		return p.updateOperation(view)
+		if err := p.updateOperation(view); err != nil {
+			return err
+		}
+		// Checkout uses the order ID as the correlation ID for its independent
+		// cart-clear command. User-initiated cart operations correlate to their
+		// own command ID and must not create an order settlement record.
+		if envelope.CorrelationId != "" && envelope.CorrelationId != payload.CommandId {
+			return p.updateOrderSettlement(envelope.CorrelationId, "REJECTED", view.FailureCode, updatedAt)
+		}
+		return nil
 	case "boutique.evt.storefront.operation-accepted.v1":
 		payload := &eventsv1.StorefrontOperationAcceptedEvent{}
 		if err := envelope.Data.UnmarshalTo(payload); err != nil {
@@ -406,10 +532,15 @@ func applyOrderFailure(view *storefront.OrderView, failure *commonv1.Failure) {
 }
 
 func (p *projector) operationUser(operationID string) string {
-	operation, err := getJSON[storefront.OperationView](p.operations, storefront.OperationKey(operationID))
+	key := storefront.OperationKey(operationID)
+	if cached, ok := p.cachedOperation(key); ok {
+		return cached.UserID
+	}
+	operation, err := getJSON[storefront.OperationView](p.operations, key)
 	if err != nil {
 		return ""
 	}
+	p.operationViews.LoadOrStore(key, *operation)
 	return operation.UserID
 }
 
@@ -426,6 +557,7 @@ func (p *projector) updateOrder(incoming storefront.OrderView) error {
 				return marshalErr
 			}
 			if _, err := p.orders.Create(key, encoded); err == nil {
+				p.orderViews.Store(key, incoming)
 				return nil
 			} else if !errors.Is(err, nats.ErrKeyExists) {
 				return err
@@ -441,6 +573,7 @@ func (p *projector) updateOrder(incoming storefront.OrderView) error {
 		}
 		if incoming.AggregateVersion < current.AggregateVersion {
 			if current.UserID != "" || incoming.UserID == "" {
+				p.orderViews.Store(key, current)
 				return nil
 			}
 			incoming.AggregateVersion = current.AggregateVersion
@@ -454,6 +587,7 @@ func (p *projector) updateOrder(incoming storefront.OrderView) error {
 			return err
 		}
 		if _, err := p.orders.Update(key, encoded, entry.Revision()); err == nil {
+			p.orderViews.Store(key, next)
 			return nil
 		} else if !errors.Is(err, nats.ErrKeyExists) {
 			return err
@@ -483,6 +617,10 @@ func mergeOrder(current, incoming storefront.OrderView) storefront.OrderView {
 	if incoming.NotificationStatus == "" {
 		incoming.NotificationStatus = current.NotificationStatus
 	}
+	if incoming.CartClearStatus == "" {
+		incoming.CartClearStatus = current.CartClearStatus
+		incoming.CartClearFailureCode = current.CartClearFailureCode
+	}
 	if incoming.AggregateVersion < current.AggregateVersion {
 		incoming.AggregateVersion = current.AggregateVersion
 	}
@@ -494,6 +632,55 @@ func mergeOrder(current, incoming storefront.OrderView) storefront.OrderView {
 		incoming.Stage = current.Stage
 	}
 	return incoming
+}
+
+func (p *projector) updateOrderSettlement(orderID, status, failureCode string, updatedAt time.Time) error {
+	if orderID == "" || status == "" {
+		return fmt.Errorf("order settlement identity is incomplete")
+	}
+	key := storefront.OrderKey(orderID)
+	for attempt := 0; attempt < 20; attempt++ {
+		entry, err := p.orders.Get(key)
+		if errors.Is(err, nats.ErrKeyNotFound) {
+			view := storefront.OrderView{
+				OrderID: orderID, CartClearStatus: status, CartClearFailureCode: failureCode, UpdatedAt: updatedAt,
+			}
+			encoded, marshalErr := json.Marshal(view)
+			if marshalErr != nil {
+				return marshalErr
+			}
+			if _, err := p.orders.Create(key, encoded); err == nil {
+				p.orderViews.Store(key, view)
+				return nil
+			} else if !errors.Is(err, nats.ErrKeyExists) {
+				return err
+			}
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		var current storefront.OrderView
+		if err := json.Unmarshal(entry.Value(), &current); err != nil {
+			return err
+		}
+		current.CartClearStatus = status
+		current.CartClearFailureCode = failureCode
+		if updatedAt.After(current.UpdatedAt) {
+			current.UpdatedAt = updatedAt
+		}
+		encoded, err := json.Marshal(current)
+		if err != nil {
+			return err
+		}
+		if _, err := p.orders.Update(key, encoded, entry.Revision()); err == nil {
+			p.orderViews.Store(key, current)
+			return nil
+		} else if !errors.Is(err, nats.ErrKeyExists) {
+			return err
+		}
+	}
+	return fmt.Errorf("order settlement KV update conflicted too many times for %s", key)
 }
 
 func (p *projector) updateOperation(incoming storefront.OperationView) error {
@@ -512,6 +699,7 @@ func (p *projector) updateOperation(incoming storefront.OperationView) error {
 				return marshalErr
 			}
 			if _, err := p.operations.Create(key, encoded); err == nil {
+				p.operationViews.Store(key, incoming)
 				return nil
 			} else if !errors.Is(err, nats.ErrKeyExists) {
 				return err
@@ -531,6 +719,7 @@ func (p *projector) updateOperation(incoming storefront.OperationView) error {
 			return err
 		}
 		if _, err := p.operations.Update(key, encoded, entry.Revision()); err == nil {
+			p.operationViews.Store(key, next)
 			return nil
 		} else if !errors.Is(err, nats.ErrKeyExists) {
 			return err
@@ -560,13 +749,92 @@ func mergeOperation(current, incoming storefront.OperationView) storefront.Opera
 	return incoming
 }
 
+func (p *projector) cachedOrder(key string) (*storefront.OrderView, bool) {
+	value, ok := p.orderViews.Load(key)
+	if !ok {
+		return nil, false
+	}
+	view := value.(storefront.OrderView)
+	return &view, true
+}
+
+func (p *projector) cachedOperation(key string) (*storefront.OperationView, bool) {
+	value, ok := p.operationViews.Load(key)
+	if !ok {
+		return nil, false
+	}
+	view := value.(storefront.OperationView)
+	return &view, true
+}
+
+func (p *projector) cachedCart(key string) (*storefront.CartView, bool) {
+	value, ok := p.cartViews.Load(key)
+	if !ok {
+		return nil, false
+	}
+	view := value.(storefront.CartView)
+	return &view, true
+}
+
+func (p *projector) storeCartView(key string, next storefront.CartView) {
+	for {
+		value, ok := p.cartViews.Load(key)
+		if !ok {
+			if _, loaded := p.cartViews.LoadOrStore(key, next); !loaded {
+				return
+			}
+			continue
+		}
+		current := value.(storefront.CartView)
+		if next.Cart.GetCartVersion() < current.Cart.GetCartVersion() {
+			return
+		}
+		if p.cartViews.CompareAndSwap(key, current, next) {
+			return
+		}
+	}
+}
+
 func (p *projector) updateCart(cart *commonv1.CartSnapshot, updatedAt time.Time) error {
 	if cart == nil || cart.UserId == "" {
 		return fmt.Errorf("cart snapshot is missing user ID")
 	}
-	return updateJSON(p.carts, cart.UserId, cart.CartVersion,
-		func(current storefront.CartView) uint64 { return current.Cart.GetCartVersion() },
-		storefront.CartView{Cart: cart, UpdatedAt: updatedAt})
+	key := cart.UserId
+	next := storefront.CartView{Cart: cart, UpdatedAt: updatedAt}
+	encoded, err := json.Marshal(next)
+	if err != nil {
+		return err
+	}
+	for attempt := 0; attempt < 20; attempt++ {
+		entry, err := p.carts.Get(key)
+		if errors.Is(err, nats.ErrKeyNotFound) {
+			if _, err := p.carts.Create(key, encoded); err == nil {
+				p.storeCartView(key, next)
+				return nil
+			} else if !errors.Is(err, nats.ErrKeyExists) {
+				return err
+			}
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		var current storefront.CartView
+		if err := json.Unmarshal(entry.Value(), &current); err != nil {
+			return err
+		}
+		if cart.CartVersion <= current.Cart.GetCartVersion() {
+			p.storeCartView(key, current)
+			return nil
+		}
+		if _, err := p.carts.Update(key, encoded, entry.Revision()); err == nil {
+			p.storeCartView(key, next)
+			return nil
+		} else if !errors.Is(err, nats.ErrKeyExists) {
+			return err
+		}
+	}
+	return fmt.Errorf("cart KV update conflicted too many times for %s", key)
 }
 
 func updateJSON[T any](bucket nats.KeyValue, key string, incomingVersion uint64,

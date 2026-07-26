@@ -15,6 +15,9 @@
 package main
 
 import (
+	"encoding/json"
+	"fmt"
+	"os"
 	"path/filepath"
 	"regexp"
 	"testing"
@@ -51,6 +54,116 @@ func TestShippingCommandOutcomesAreStableAndPersistent(t *testing.T) {
 	second, ok := reopened.outcome(envelope.MessageId)
 	if !ok || first.MessageID != second.MessageID || string(first.Data) != string(second.Data) {
 		t.Fatal("stored provider outcome changed after restart")
+	}
+}
+
+func TestShippingProviderStoreMigratesLegacyStateAndRecoversTornAppend(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "provider.json")
+	expected := shippingOutcome{MessageID: "event-1", Subject: "subject", Data: []byte("payload")}
+	legacy, err := json.Marshal(struct {
+		Outcomes map[string]shippingOutcome `json:"outcomes"`
+	}{Outcomes: map[string]shippingOutcome{"command-1": expected}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(storePath, legacy, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := openShippingProviderStore(storePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if actual, ok := store.outcome("command-1"); !ok || actual.MessageID != expected.MessageID {
+		t.Fatal("legacy shipping outcome was not restored")
+	}
+	encoded, err := os.ReadFile(storePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := shippingStoreRecord{}
+	if err := json.Unmarshal(encoded, &record); err != nil || record.Version != shippingStoreVersion {
+		t.Fatalf("legacy shipping state was not migrated: record=%#v error=%v", record, err)
+	}
+
+	if err := os.WriteFile(storePath, append(encoded, []byte(`{"version":1,"command_id":`)...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := openShippingProviderStore(storePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if actual, ok := recovered.outcome("command-1"); !ok || actual.MessageID != expected.MessageID {
+		t.Fatal("shipping outcome before torn append was not recovered")
+	}
+	repaired, err := os.ReadFile(storePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(repaired) != string(encoded) {
+		t.Fatalf("torn append was not removed: got %q, want %q", repaired, encoded)
+	}
+}
+
+func TestShippingProviderStorePersistsBatch(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "provider.json")
+	store, err := openShippingProviderStore(storePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outcomes := map[string]shippingOutcome{}
+	for index := 0; index < shippingCommandBatchSize; index++ {
+		commandID := fmt.Sprintf("command-%d", index)
+		outcomes[commandID] = shippingOutcome{
+			MessageID: "event-" + commandID,
+			Subject:   "subject",
+			Data:      []byte("payload-" + commandID),
+		}
+	}
+	if err := store.recordBatch(outcomes); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := openShippingProviderStore(storePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for commandID, expected := range outcomes {
+		actual, ok := reopened.outcome(commandID)
+		if !ok || actual.MessageID != expected.MessageID || string(actual.Data) != string(expected.Data) {
+			t.Fatalf("batched outcome %s was not restored", commandID)
+		}
+	}
+}
+
+func BenchmarkShippingProviderStoreRecordWithHistory(b *testing.B) {
+	storePath := filepath.Join(b.TempDir(), "provider.json")
+	history := make(map[string]shippingOutcome, 1_000)
+	for index := 0; index < 1_000; index++ {
+		key := fmt.Sprintf("command-%04d", index)
+		history[key] = shippingOutcome{MessageID: "event-" + key, Subject: "subject", Data: []byte("payload")}
+	}
+	legacy, err := json.Marshal(struct {
+		Outcomes map[string]shippingOutcome `json:"outcomes"`
+	}{Outcomes: history})
+	if err != nil {
+		b.Fatal(err)
+	}
+	if err := os.WriteFile(storePath, legacy, 0o600); err != nil {
+		b.Fatal(err)
+	}
+	store, err := openShippingProviderStore(storePath)
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	b.ResetTimer()
+	for index := 0; index < b.N; index++ {
+		key := fmt.Sprintf("benchmark-%d", index)
+		if err := store.record(key, shippingOutcome{
+			MessageID: "event-" + key, Subject: "subject", Data: []byte("payload"),
+		}); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 

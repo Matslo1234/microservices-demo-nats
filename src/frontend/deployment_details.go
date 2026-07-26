@@ -3,17 +3,19 @@ package main
 import (
 	"net/http"
 	"os"
+	"sync/atomic"
 	"time"
 
 	"cloud.google.com/go/compute/metadata"
 	"github.com/sirupsen/logrus"
 )
 
-var deploymentDetailsMap map[string]string
+var deploymentDetails atomic.Value
 var log *logrus.Logger
 
 func init() {
 	initializeLogger()
+	deploymentDetails.Store(map[string]string{})
 	// Use a goroutine to ensure loadDeploymentDetails()'s GCP API
 	// calls don't block non-GCP deployments. See issue #685.
 	go loadDeploymentDetails()
@@ -34,7 +36,6 @@ func initializeLogger() {
 }
 
 func loadDeploymentDetails() {
-	deploymentDetailsMap = make(map[string]string)
 	var metaServerClient = metadata.NewClient(&http.Client{})
 
 	podHostname, err := os.Hostname()
@@ -52,13 +53,19 @@ func loadDeploymentDetails() {
 		log.Error("Failed to fetch the Zone of the node where the pod is scheduled", err)
 	}
 
-	deploymentDetailsMap["HOSTNAME"] = podHostname
-	deploymentDetailsMap["CLUSTERNAME"] = podCluster
-	deploymentDetailsMap["ZONE"] = podZone
+	deploymentDetails.Store(map[string]string{
+		"HOSTNAME":    podHostname,
+		"CLUSTERNAME": podCluster,
+		"ZONE":        podZone,
+	})
 
 	log.WithFields(logrus.Fields{
 		"cluster":  podCluster,
 		"zone":     podZone,
 		"hostname": podHostname,
 	}).Debug("Loaded deployment details")
+}
+
+func currentDeploymentDetails() map[string]string {
+	return deploymentDetails.Load().(map[string]string)
 }

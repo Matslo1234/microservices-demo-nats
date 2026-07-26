@@ -95,7 +95,7 @@ spec:
           - containerPort: 8080
           readinessProbe:
             initialDelaySeconds: 10
-            timeoutSeconds: 3
+            timeoutSeconds: 5
             httpGet:
               path: "/_readyz"
               port: 8080
@@ -104,6 +104,8 @@ spec:
                 value: "shop_session-id=x-readiness-probe"
           livenessProbe:
             initialDelaySeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
             httpGet:
               path: "/_healthz"
               port: 8080
@@ -119,6 +121,10 @@ spec:
             value: "boutique.qry.storefront.home.v1,boutique.qry.storefront.product.v1,boutique.qry.storefront.cart.v1,boutique.qry.storefront.currencies.v1,boutique.qry.storefront.product-meta.v1,boutique.qry.storefront.operation.v1,boutique.qry.storefront.order.v1,boutique.qry.payment.tokenize.v1"
           - name: CART_OPERATION_WAIT_TIMEOUT
             value: "750ms"
+          - name: GOMEMLIMIT
+            value: "400MiB"
+          - name: NATS_REQUEST_TIMEOUT
+            value: "8s"
           # # ENV_PLATFORM: One of: local, gcp, aws, azure, onprem, alibaba
           # # When not set, defaults to "local" unless running in GKE, otherwies auto-sets to gcp
           # - name: ENV_PLATFORM
@@ -142,11 +148,11 @@ spec:
             readOnly: true
           resources:
             requests:
-              cpu: 100m
-              memory: 64Mi
-            limits:
               cpu: 200m
               memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
       volumes:
       - name: nats-ca
         configMap:

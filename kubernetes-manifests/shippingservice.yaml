@@ -81,6 +81,8 @@ spec:
           value: "8080"
         - name: DISABLE_PROFILER
           value: "1"
+        - name: GOMEMLIMIT
+          value: "400MiB"
         - name: NATS_REQUIRED
           value: "true"
         - name: NATS_REQUIRED_SUBSCRIPTIONS
@@ -100,20 +102,23 @@ spec:
           mountPath: /var/lib/shipping
         readinessProbe:
           periodSeconds: 5
+          timeoutSeconds: 5
           httpGet:
             path: /readyz
             port: health
         livenessProbe:
+          timeoutSeconds: 3
+          failureThreshold: 6
           httpGet:
             path: /healthz
             port: health
         resources:
           requests:
-            cpu: 100m
-            memory: 64Mi
-          limits:
-            cpu: 200m
+            cpu: 500m
             memory: 128Mi
+          limits:
+            cpu: "2"
+            memory: 512Mi
       volumes:
       - name: nats-ca
         configMap:

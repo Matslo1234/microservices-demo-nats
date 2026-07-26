@@ -4,7 +4,6 @@
 package main
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -14,12 +13,18 @@ import (
 	"sync/atomic"
 	"time"
 
+	commandsv1 "github.com/GoogleCloudPlatform/microservices-demo/protos/commands/v1"
 	commonv1 "github.com/GoogleCloudPlatform/microservices-demo/protos/common/v1"
 	eventsv1 "github.com/GoogleCloudPlatform/microservices-demo/protos/events/v1"
 	"github.com/nats-io/nats.go"
 	"github.com/sirupsen/logrus"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
+)
+
+const (
+	checkoutFetchBatchSize = 32
+	outboxPublishBatchSize = 256
 )
 
 type checkoutWorker struct {
@@ -30,6 +35,7 @@ type checkoutWorker struct {
 	publishTimeout time.Duration
 	stepTimeout    time.Duration
 	stop           chan struct{}
+	wg             sync.WaitGroup
 	ready          atomic.Bool
 	closeOnce      sync.Once
 }
@@ -92,23 +98,23 @@ func startCheckoutWorker(store *stateStore) (*checkoutWorker, error) {
 
 	projectionDefinitions := []struct {
 		subject, durable, stream string
-		handler                  func(*nats.Msg) error
+		handler                  func([]*nats.Msg) []error
 	}{
-		{"boutique.evt.catalog.>", "checkout-catalog-v1", "BOUTIQUE_EVENTS", worker.handleProjectionMessage},
-		{"boutique.evt.currency.>", "checkout-currency-v1", "BOUTIQUE_EVENTS", worker.handleProjectionMessage},
-		{"boutique.evt.cart.>", "checkout-cart-v1", "BOUTIQUE_EVENTS", worker.handleProjectionMessage},
+		{"boutique.evt.catalog.>", "checkout-catalog-v1", "BOUTIQUE_EVENTS", worker.handleProjectionMessages},
+		{"boutique.evt.currency.>", "checkout-currency-v1", "BOUTIQUE_EVENTS", worker.handleProjectionMessages},
+		{"boutique.evt.cart.>", "checkout-cart-v1", "BOUTIQUE_EVENTS", worker.handleProjectionMessages},
 	}
 	workflowDefinitions := []struct {
 		subject, durable, stream string
-		handler                  func(*nats.Msg) error
+		handler                  func([]*nats.Msg) []error
 	}{
-		{"boutique.cmd.order.submit.v1", "checkout-order-commands-v1", "BOUTIQUE_COMMANDS", worker.handleCommandMessage},
-		{"boutique.evt.shipping.>", "checkout-saga-shipping-v1", "BOUTIQUE_EVENTS", worker.handleEventMessage},
-		{"boutique.evt.payment.>", "checkout-saga-payment-v1", "BOUTIQUE_EVENTS", worker.handleEventMessage},
+		{"boutique.cmd.order.submit.v1", "checkout-order-commands-v1", "BOUTIQUE_COMMANDS", worker.handleCommandMessages},
+		{"boutique.evt.shipping.>", "checkout-saga-shipping-v1", "BOUTIQUE_EVENTS", worker.handleEventMessages},
+		{"boutique.evt.payment.>", "checkout-saga-payment-v1", "BOUTIQUE_EVENTS", worker.handleEventMessages},
 	}
 	addSubscription := func(definition struct {
 		subject, durable, stream string
-		handler                  func(*nats.Msg) error
+		handler                  func([]*nats.Msg) []error
 	}) error {
 		subscription, subscribeErr := worker.js.PullSubscribe(definition.subject, definition.durable,
 			nats.BindStream(definition.stream), nats.ManualAck(), nats.AckExplicit(), nats.DeliverAll(),
@@ -117,7 +123,11 @@ func startCheckoutWorker(store *stateStore) (*checkoutWorker, error) {
 			return fmt.Errorf("create %s: %w", definition.durable, subscribeErr)
 		}
 		worker.subscriptions = append(worker.subscriptions, subscription)
-		go worker.consume(subscription, definition.handler)
+		worker.wg.Add(1)
+		go func() {
+			defer worker.wg.Done()
+			worker.consume(subscription, definition.handler)
+		}()
 		return nil
 	}
 	for _, definition := range projectionDefinitions {
@@ -151,36 +161,58 @@ func startCheckoutWorker(store *stateStore) (*checkoutWorker, error) {
 		}
 	}
 	worker.ready.Store(true)
-	go worker.relayOutbox()
-	go worker.scanDeadlines()
+	worker.wg.Add(2)
+	go func() {
+		defer worker.wg.Done()
+		worker.relayOutbox()
+	}()
+	go func() {
+		defer worker.wg.Done()
+		worker.scanDeadlines()
+	}()
 	return worker, nil
 }
 
-func (worker *checkoutWorker) consume(subscription *nats.Subscription, handler func(*nats.Msg) error) {
+func (worker *checkoutWorker) consume(subscription *nats.Subscription, handler func([]*nats.Msg) []error) {
 	for {
 		select {
 		case <-worker.stop:
 			return
 		default:
 		}
-		messages, err := subscription.Fetch(32, nats.MaxWait(time.Second))
+		messages, err := subscription.Fetch(checkoutFetchBatchSize, nats.MaxWait(time.Second))
 		if err != nil && !errors.Is(err, nats.ErrTimeout) {
 			log.WithError(err).Error("checkout consumer fetch failed")
 			time.Sleep(time.Second)
 			continue
 		}
-		for _, message := range messages {
+		entries := make([]*logrus.Entry, len(messages))
+		for index, message := range messages {
 			correlationID, messageID := checkoutMessageContext(message.Data)
 			kind := checkoutMessageKind(message.Subject)
-			entry := log.WithFields(logrus.Fields{
+			entries[index] = log.WithFields(logrus.Fields{
 				"topic":          message.Subject,
 				"message_kind":   kind,
 				"message_id":     messageID,
 				"correlation_id": correlationID,
 			})
-			entry.Debug("NATS " + kind + " received")
-			if err := handler(message); err != nil {
-				entry.WithError(err).Error("checkout message processing failed")
+			entries[index].Debug("NATS " + kind + " received")
+		}
+		results := handler(messages)
+		if len(results) != len(messages) {
+			results = make([]error, len(messages))
+			for index := range results {
+				results[index] = errors.New("checkout batch handler returned an invalid result count")
+			}
+		}
+		for index, message := range messages {
+			entry := entries[index]
+			if err := results[index]; err != nil {
+				if errors.Is(err, errCheckoutProjectionLag) {
+					entry.WithError(err).Debug("checkout command is waiting for its projections")
+				} else {
+					entry.WithError(err).Error("checkout message processing failed")
+				}
 				_ = message.NakWithDelay(time.Second)
 				continue
 			}
@@ -220,70 +252,97 @@ func checkoutMessageContext(data []byte) (string, string) {
 }
 
 func (worker *checkoutWorker) handleProjectionMessage(message *nats.Msg) error {
-	envelope, err := decodeEnvelope(message.Data)
-	if err != nil {
-		return err
+	return worker.handleProjectionMessages([]*nats.Msg{message})[0]
+}
+
+func (worker *checkoutWorker) handleProjectionMessages(messages []*nats.Msg) []error {
+	results := make([]error, len(messages))
+	envelopes := make([]*commonv1.MessageEnvelope, len(messages))
+	for index, message := range messages {
+		envelopes[index], results[index] = decodeEnvelope(message.Data)
 	}
-	return worker.store.Update(func(state *persistedState) error {
-		if _, ok := state.Inbox[envelope.MessageId]; ok {
-			return nil
+	commitErr := worker.store.UpdateTracked(func(state *persistedState) error {
+		for index, envelope := range envelopes {
+			if envelope == nil {
+				continue
+			}
+			if err := worker.applyProjectionMessage(state, messages[index].Subject, envelope); err != nil {
+				results[index] = err
+				return err
+			}
 		}
-		switch message.Subject {
-		case "boutique.evt.catalog.product-upserted.v1":
-			payload := &eventsv1.CatalogProductUpsertedEvent{}
-			if err := envelope.Data.UnmarshalTo(payload); err != nil {
-				return err
-			}
-			if payload.Product != nil {
-				current := state.Products[payload.Product.ProductId]
-				if current == nil || current.ProductVersion < payload.Product.ProductVersion {
-					state.Products[payload.Product.ProductId] = payload.Product
-				}
-			}
-			if payload.CatalogRevision > state.CatalogRevision {
-				state.CatalogRevision = payload.CatalogRevision
-			}
-		case "boutique.evt.catalog.product-removed.v1":
-			payload := &eventsv1.CatalogProductRemovedEvent{}
-			if err := envelope.Data.UnmarshalTo(payload); err != nil {
-				return err
-			}
-			delete(state.Products, payload.ProductId)
-			if payload.CatalogRevision > state.CatalogRevision {
-				state.CatalogRevision = payload.CatalogRevision
-			}
-		case "boutique.evt.catalog.snapshot-completed.v1":
-			payload := &eventsv1.CatalogSnapshotCompletedEvent{}
-			if err := envelope.Data.UnmarshalTo(payload); err != nil {
-				return err
-			}
-			if payload.CatalogRevision > state.CatalogRevision {
-				state.CatalogRevision = payload.CatalogRevision
-			}
-		case "boutique.evt.currency.rates-updated.v1":
-			payload := &eventsv1.CurrencyRatesUpdatedEvent{}
-			if err := envelope.Data.UnmarshalTo(payload); err != nil {
-				return err
-			}
-			if state.Rates == nil || state.Rates.RateRevision < payload.RateRevision {
-				state.Rates = payload
-			}
-		case "boutique.evt.cart.item-added.v1":
-			payload := &eventsv1.CartItemAddedEvent{}
-			if err := envelope.Data.UnmarshalTo(payload); err != nil {
-				return err
-			}
-			updateCheckoutCart(state, payload.Cart)
-		case "boutique.evt.cart.cleared.v1":
-			payload := &eventsv1.CartClearedEvent{}
-			if err := envelope.Data.UnmarshalTo(payload); err != nil {
-				return err
-			}
-			updateCheckoutCart(state, payload.Cart)
-		}
-		state.Inbox[envelope.MessageId] = time.Now().UTC()
 		return nil
 	})
+	if commitErr != nil {
+		for index, envelope := range envelopes {
+			if envelope != nil {
+				results[index] = commitErr
+			}
+		}
+	}
+	return results
+}
+
+func (worker *checkoutWorker) applyProjectionMessage(state *persistedState, subject string,
+	envelope *commonv1.MessageEnvelope) error {
+	if _, ok := state.Inbox[envelope.MessageId]; ok {
+		return nil
+	}
+	switch subject {
+	case "boutique.evt.catalog.product-upserted.v1":
+		payload := &eventsv1.CatalogProductUpsertedEvent{}
+		if err := envelope.Data.UnmarshalTo(payload); err != nil {
+			return err
+		}
+		if payload.Product != nil {
+			current := state.Products[payload.Product.ProductId]
+			if current == nil || current.ProductVersion < payload.Product.ProductVersion {
+				state.setProduct(payload.Product.ProductId, payload.Product)
+			}
+		}
+		if payload.CatalogRevision > state.CatalogRevision {
+			state.setCatalogRevision(payload.CatalogRevision)
+		}
+	case "boutique.evt.catalog.product-removed.v1":
+		payload := &eventsv1.CatalogProductRemovedEvent{}
+		if err := envelope.Data.UnmarshalTo(payload); err != nil {
+			return err
+		}
+		state.deleteProduct(payload.ProductId)
+		if payload.CatalogRevision > state.CatalogRevision {
+			state.setCatalogRevision(payload.CatalogRevision)
+		}
+	case "boutique.evt.catalog.snapshot-completed.v1":
+		payload := &eventsv1.CatalogSnapshotCompletedEvent{}
+		if err := envelope.Data.UnmarshalTo(payload); err != nil {
+			return err
+		}
+		if payload.CatalogRevision > state.CatalogRevision {
+			state.setCatalogRevision(payload.CatalogRevision)
+		}
+	case "boutique.evt.currency.rates-updated.v1":
+		payload := &eventsv1.CurrencyRatesUpdatedEvent{}
+		if err := envelope.Data.UnmarshalTo(payload); err != nil {
+			return err
+		}
+		if state.Rates == nil || state.Rates.RateRevision < payload.RateRevision {
+			state.setRates(payload)
+		}
+	case "boutique.evt.cart.item-added.v1":
+		payload := &eventsv1.CartItemAddedEvent{}
+		if err := envelope.Data.UnmarshalTo(payload); err != nil {
+			return err
+		}
+		updateCheckoutCart(state, payload.Cart)
+	case "boutique.evt.cart.cleared.v1":
+		payload := &eventsv1.CartClearedEvent{}
+		if err := envelope.Data.UnmarshalTo(payload); err != nil {
+			return err
+		}
+		updateCheckoutCart(state, payload.Cart)
+	}
+	state.setInbox(envelope.MessageId, time.Now().UTC())
+	return nil
 }
 
 func updateCheckoutCart(state *persistedState, cart *commonv1.CartSnapshot) {
@@ -292,24 +351,114 @@ func updateCheckoutCart(state *persistedState, cart *commonv1.CartSnapshot) {
 	}
 	current := state.Carts[cart.UserId]
 	if current == nil || current.CartVersion < cart.CartVersion {
-		state.Carts[cart.UserId] = cart
+		state.setCart(cart.UserId, cart)
 	}
 }
 
 func (worker *checkoutWorker) handleCommandMessage(message *nats.Msg) error {
-	envelope, err := decodeEnvelope(message.Data)
-	if err != nil {
-		return err
+	return worker.handleCommandMessages([]*nats.Msg{message})[0]
+}
+
+func (worker *checkoutWorker) handleCommandMessages(messages []*nats.Msg) []error {
+	results := make([]error, len(messages))
+	envelopes := make([]*commonv1.MessageEnvelope, len(messages))
+	payloads := make([]*commandsv1.OrderSubmitCommand, len(messages))
+	for index, message := range messages {
+		envelope, err := decodeEnvelope(message.Data)
+		if err != nil {
+			results[index] = err
+			continue
+		}
+		payload, err := decodeOrderCommand(envelope)
+		if err != nil {
+			results[index] = err
+			continue
+		}
+		envelopes[index], payloads[index] = envelope, payload
 	}
-	return worker.handleOrderCommand(envelope)
+	commitErr := worker.store.UpdateTracked(func(state *persistedState) error {
+		for index, envelope := range envelopes {
+			if envelope == nil {
+				continue
+			}
+			if err := validateOrderProjection(state, envelope, payloads[index]); err != nil {
+				results[index] = err
+				continue
+			}
+			if err := worker.applyOrderCommand(state, envelope, payloads[index]); err != nil {
+				results[index] = err
+				return err
+			}
+		}
+		return nil
+	})
+	if commitErr != nil {
+		for index, envelope := range envelopes {
+			if envelope != nil && !errors.Is(results[index], errCheckoutProjectionLag) {
+				results[index] = commitErr
+			}
+		}
+	}
+	return results
 }
 
 func (worker *checkoutWorker) handleEventMessage(message *nats.Msg) error {
-	envelope, err := decodeEnvelope(message.Data)
-	if err != nil {
-		return err
+	return worker.handleEventMessages([]*nats.Msg{message})[0]
+}
+
+func (worker *checkoutWorker) handleEventMessages(messages []*nats.Msg) []error {
+	results := make([]error, len(messages))
+	envelopes := make([]*commonv1.MessageEnvelope, len(messages))
+	for index, message := range messages {
+		envelope, err := decodeEnvelope(message.Data)
+		if err != nil {
+			results[index] = err
+			continue
+		}
+		if isCheckoutSagaEvent(message.Subject) {
+			envelopes[index] = envelope
+		}
 	}
-	return worker.handleSagaEvent(message.Subject, envelope)
+	commitErr := worker.store.UpdateTracked(func(state *persistedState) error {
+		for index, envelope := range envelopes {
+			if envelope == nil {
+				continue
+			}
+			if err := worker.applySagaEvent(state, messages[index].Subject, envelope); err != nil {
+				results[index] = err
+				return err
+			}
+		}
+		return nil
+	})
+	if commitErr != nil {
+		for index, envelope := range envelopes {
+			if envelope != nil {
+				results[index] = commitErr
+			}
+		}
+	}
+	return results
+}
+
+func isCheckoutSagaEvent(subject string) bool {
+	switch subject {
+	case "boutique.evt.shipping.order-quote-calculated.v1",
+		"boutique.evt.shipping.order-quote-failed.v1",
+		"boutique.evt.payment.authorized.v1",
+		"boutique.evt.payment.authorization-declined.v1",
+		"boutique.evt.shipping.shipment-created.v1",
+		"boutique.evt.shipping.shipment-creation-failed.v1",
+		"boutique.evt.payment.captured.v1",
+		"boutique.evt.payment.capture-failed.v1",
+		"boutique.evt.payment.authorization-released.v1",
+		"boutique.evt.shipping.shipment-cancelled.v1",
+		"boutique.evt.payment.authorization-release-failed.v1",
+		"boutique.evt.shipping.shipment-cancellation-failed.v1":
+		return true
+	default:
+		return false
+	}
 }
 
 func decodeEnvelope(data []byte) (*commonv1.MessageEnvelope, error) {
@@ -324,7 +473,7 @@ func decodeEnvelope(data []byte) (*commonv1.MessageEnvelope, error) {
 }
 
 func (worker *checkoutWorker) relayOutbox() {
-	ticker := time.NewTicker(100 * time.Millisecond)
+	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
 	for {
 		select {
@@ -332,7 +481,16 @@ func (worker *checkoutWorker) relayOutbox() {
 			return
 		case <-ticker.C:
 		}
+		type pendingPublish struct {
+			message outboxMessage
+			future  nats.PubAckFuture
+			entry   *logrus.Entry
+		}
+		pending := make([]pendingPublish, 0, outboxPublishBatchSize)
 		for _, message := range worker.store.Outbox() {
+			if len(pending) == outboxPublishBatchSize {
+				break
+			}
 			correlationID, _ := checkoutMessageContext(message.Data)
 			kind := checkoutMessageKind(message.Subject)
 			entry := log.WithFields(logrus.Fields{
@@ -341,21 +499,42 @@ func (worker *checkoutWorker) relayOutbox() {
 				"message_id":     message.MessageID,
 				"correlation_id": correlationID,
 			})
-			ctx, cancel := context.WithTimeout(context.Background(), worker.publishTimeout)
 			out := &nats.Msg{Subject: message.Subject, Data: message.Data, Header: nats.Header{}}
 			out.Header.Set("Nats-Msg-Id", message.MessageID)
 			out.Header.Set("Content-Type", "application/protobuf")
-			_, err := worker.js.PublishMsg(out, nats.Context(ctx), nats.MsgId(message.MessageID))
-			cancel()
+			future, err := worker.js.PublishMsgAsync(out, nats.MsgId(message.MessageID))
 			if err != nil {
 				entry.WithError(err).Warn("checkout outbox publish failed")
 				break
 			}
-			entry.Debug("NATS " + kind + " sent")
-			if err := worker.store.RemoveOutbox(message.MessageID); err != nil {
-				entry.WithError(err).Error("checkout outbox removal failed")
+			pending = append(pending, pendingPublish{message: message, future: future, entry: entry})
+		}
+		published := make([]string, 0, len(pending))
+		deadline := time.NewTimer(worker.publishTimeout)
+		timedOut := false
+		for _, publish := range pending {
+			select {
+			case <-publish.future.Ok():
+				publish.entry.Debug("NATS " + checkoutMessageKind(publish.message.Subject) + " sent")
+				published = append(published, publish.message.MessageID)
+			case err := <-publish.future.Err():
+				publish.entry.WithError(err).Warn("checkout outbox publish failed")
+			case <-deadline.C:
+				publish.entry.Warn("checkout outbox publish acknowledgement timed out")
+				timedOut = true
+			}
+			if timedOut {
 				break
 			}
+		}
+		if !deadline.Stop() && !timedOut {
+			select {
+			case <-deadline.C:
+			default:
+			}
+		}
+		if err := worker.store.RemoveOutboxBatch(published); err != nil {
+			log.WithError(err).Error("checkout outbox batch removal failed")
 		}
 	}
 }
@@ -368,11 +547,12 @@ func (worker *checkoutWorker) scanDeadlines() {
 		case <-worker.stop:
 			return
 		case now := <-ticker.C:
-			_ = worker.store.Update(func(state *persistedState) error {
+			_ = worker.store.UpdateTracked(func(state *persistedState) error {
 				for _, saga := range state.Orders {
 					if saga.Deadline.IsZero() || now.Before(saga.Deadline) {
 						continue
 					}
+					state.markOrder(saga.OrderID)
 					cause := stableID("timeout", saga.OrderID, fmt.Sprint(saga.Version))
 					previousStage, deadline := saga.Stage, saga.Deadline
 					saga.Version++
@@ -397,7 +577,13 @@ func (worker *checkoutWorker) Ready() bool { return worker.ready.Load() && worke
 
 func (worker *checkoutWorker) Close() error {
 	var result error
-	worker.closeOnce.Do(func() { worker.ready.Store(false); close(worker.stop); result = worker.nc.Drain() })
+	worker.closeOnce.Do(func() {
+		worker.ready.Store(false)
+		close(worker.stop)
+		result = worker.nc.Drain()
+		worker.wg.Wait()
+		result = errors.Join(result, worker.store.Close())
+	})
 	return result
 }
 

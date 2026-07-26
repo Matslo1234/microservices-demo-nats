@@ -1,0 +1,125 @@
+# Copyright 2026 Google LLC
+# Licensed under the Apache License, Version 2.0 (the "License");
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: benchmarkservice
+  labels:
+    app: benchmarkservice
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: benchmarkservice
+  template:
+    metadata:
+      labels:
+        app: benchmarkservice
+    spec:
+      serviceAccountName: benchmarkservice
+      terminationGracePeriodSeconds: 75
+      securityContext:
+        fsGroup: 1000
+        runAsGroup: 1000
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: server
+        image: benchmarkservice
+        env:
+        - name: PORT
+          value: "8080"
+        - name: APPLICATION_TYPE
+          value: "NATS"
+        - name: FRONTEND_ADDR
+          value: "frontend:80"
+        - name: RESULTS_DIR
+          value: "/var/lib/benchmarkservice"
+        ports:
+        - name: http
+          containerPort: 8080
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: http
+          initialDelaySeconds: 2
+          periodSeconds: 5
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: http
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        resources:
+          requests:
+            cpu: 500m
+            memory: 256Mi
+          limits:
+            cpu: "2"
+            memory: 1Gi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+          readOnlyRootFilesystem: true
+        volumeMounts:
+        - name: results
+          mountPath: /var/lib/benchmarkservice
+        - name: tmp
+          mountPath: /tmp
+      volumes:
+      - name: results
+        emptyDir:
+          sizeLimit: 5Gi
+      - name: tmp
+        emptyDir:
+          sizeLimit: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: benchmarkservice
+  labels:
+    app: benchmarkservice
+spec:
+  selector:
+    app: benchmarkservice
+  ports:
+  - name: http
+    port: 8080
+    targetPort: http
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: benchmarkservice
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: online-boutique-benchmarkservice
+rules:
+- apiGroups: [""]
+  resources: ["nodes"]
+  verbs: ["get", "list"]
+- apiGroups: [""]
+  resources: ["nodes/proxy"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: online-boutique-benchmarkservice
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: online-boutique-benchmarkservice
+subjects:
+- kind: ServiceAccount
+  name: benchmarkservice
+  namespace: default

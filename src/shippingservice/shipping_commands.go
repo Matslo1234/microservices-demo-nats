@@ -4,11 +4,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -35,6 +37,15 @@ type shippingProviderStore struct {
 	Outcomes map[string]shippingOutcome `json:"outcomes"`
 }
 
+const shippingStoreVersion = 1
+
+type shippingStoreRecord struct {
+	Version   int                        `json:"version"`
+	Snapshot  map[string]shippingOutcome `json:"snapshot,omitempty"`
+	CommandID string                     `json:"command_id,omitempty"`
+	Outcome   *shippingOutcome           `json:"outcome,omitempty"`
+}
+
 func openShippingProviderStore(path string) (*shippingProviderStore, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return nil, err
@@ -42,10 +53,9 @@ func openShippingProviderStore(path string) (*shippingProviderStore, error) {
 	store := &shippingProviderStore{path: path, Outcomes: map[string]shippingOutcome{}}
 	encoded, err := os.ReadFile(path)
 	if err == nil {
-		if err := json.Unmarshal(encoded, store); err != nil {
+		if err := store.load(encoded); err != nil {
 			return nil, err
 		}
-		store.path = path
 	}
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, err
@@ -56,35 +66,65 @@ func openShippingProviderStore(path string) (*shippingProviderStore, error) {
 	return store, nil
 }
 
-func (store *shippingProviderStore) outcome(commandID string) (shippingOutcome, bool) {
-	store.mu.Lock()
-	defer store.mu.Unlock()
-	value, ok := store.Outcomes[commandID]
-	return value, ok
-}
-func (store *shippingProviderStore) record(commandID string, outcome shippingOutcome) error {
-	store.mu.Lock()
-	defer store.mu.Unlock()
-	if _, ok := store.Outcomes[commandID]; ok {
-		return nil
-	}
-	next := make(map[string]shippingOutcome, len(store.Outcomes)+1)
-	for key, value := range store.Outcomes {
-		next[key] = value
-	}
-	next[commandID] = outcome
-	encoded, err := json.Marshal(struct {
+func (store *shippingProviderStore) load(encoded []byte) error {
+	legacy := struct {
+		Version  int                        `json:"version"`
 		Outcomes map[string]shippingOutcome `json:"outcomes"`
-	}{Outcomes: next})
-	if err != nil {
-		return err
+	}{}
+	if err := json.Unmarshal(encoded, &legacy); err == nil && legacy.Version == 0 && legacy.Outcomes != nil {
+		store.Outcomes = legacy.Outcomes
+		return store.writeSnapshot()
 	}
+
+	lines := bytes.SplitAfter(encoded, []byte{'\n'})
+	validBytes := 0
+	for index, line := range lines {
+		trimmed := bytes.TrimSpace(line)
+		if len(trimmed) == 0 {
+			validBytes += len(line)
+			continue
+		}
+		record := shippingStoreRecord{}
+		if err := json.Unmarshal(trimmed, &record); err != nil {
+			hasLaterRecord := false
+			for _, later := range lines[index+1:] {
+				if len(bytes.TrimSpace(later)) != 0 {
+					hasLaterRecord = true
+					break
+				}
+			}
+			if hasLaterRecord {
+				return fmt.Errorf("decode shipping store journal record %d: %w", index+1, err)
+			}
+			if err := os.Truncate(store.path, int64(validBytes)); err != nil {
+				return fmt.Errorf("remove incomplete shipping store journal record: %w", err)
+			}
+			break
+		}
+		if record.Version != shippingStoreVersion {
+			return fmt.Errorf("unsupported shipping store version %d", record.Version)
+		}
+		if record.Snapshot != nil {
+			store.Outcomes = record.Snapshot
+		} else if record.CommandID != "" && record.Outcome != nil {
+			store.Outcomes[record.CommandID] = *record.Outcome
+		} else {
+			return fmt.Errorf("shipping store journal record %d is incomplete", index+1)
+		}
+		validBytes += len(line)
+	}
+	return nil
+}
+
+func (store *shippingProviderStore) writeSnapshot() error {
 	temporary := store.path + ".tmp"
 	file, err := os.OpenFile(temporary, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
 	}
-	if _, err = file.Write(encoded); err == nil {
+	encoder := json.NewEncoder(file)
+	err = encoder.Encode(shippingStoreRecord{Version: shippingStoreVersion, Snapshot: store.Outcomes})
+	if err == nil {
 		err = file.Sync()
 	}
 	closeErr := file.Close()
@@ -94,32 +134,127 @@ func (store *shippingProviderStore) record(commandID string, outcome shippingOut
 	if err != nil {
 		return err
 	}
-	if err := os.Rename(temporary, store.path); err != nil {
+	return os.Rename(temporary, store.path)
+}
+
+func (store *shippingProviderStore) outcome(commandID string) (shippingOutcome, bool) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	value, ok := store.Outcomes[commandID]
+	return value, ok
+}
+func (store *shippingProviderStore) record(commandID string, outcome shippingOutcome) error {
+	return store.recordBatch(map[string]shippingOutcome{commandID: outcome})
+}
+
+func (store *shippingProviderStore) recordBatch(outcomes map[string]shippingOutcome) error {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	pending := make(map[string]shippingOutcome, len(outcomes))
+	for commandID, outcome := range outcomes {
+		if _, ok := store.Outcomes[commandID]; !ok {
+			pending[commandID] = outcome
+		}
+	}
+	if len(pending) == 0 {
+		return nil
+	}
+
+	var encoded bytes.Buffer
+	encoder := json.NewEncoder(&encoded)
+	for commandID, outcome := range pending {
+		if err := encoder.Encode(shippingStoreRecord{
+			Version: shippingStoreVersion, CommandID: commandID, Outcome: &outcome,
+		}); err != nil {
+			return err
+		}
+	}
+	file, err := os.OpenFile(store.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
 		return err
 	}
-	store.Outcomes = next
+	start, seekErr := file.Seek(0, io.SeekEnd)
+	if seekErr != nil {
+		_ = file.Close()
+		return seekErr
+	}
+	if _, err = file.Write(encoded.Bytes()); err == nil {
+		err = file.Sync()
+	}
+	closeErr := file.Close()
+	if err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		_ = os.Truncate(store.path, start)
+		return err
+	}
+	for commandID, outcome := range pending {
+		store.Outcomes[commandID] = outcome
+	}
 	return nil
 }
 
 func (worker *shippingEventWorker) handleCommand(message *nats.Msg) error {
-	envelope := &commonv1.MessageEnvelope{}
-	if err := proto.Unmarshal(message.Data, envelope); err != nil {
-		return err
+	return worker.handleCommandBatch([]*nats.Msg{message})[0]
+}
+
+func (worker *shippingEventWorker) handleCommandBatch(messages []*nats.Msg) []error {
+	outcomes := make([]shippingOutcome, len(messages))
+	needsRecord := make([]bool, len(messages))
+	results := make([]error, len(messages))
+	pending := make(map[string]shippingOutcome, len(messages))
+
+	for index, message := range messages {
+		envelope := &commonv1.MessageEnvelope{}
+		if err := proto.Unmarshal(message.Data, envelope); err != nil {
+			results[index] = err
+			continue
+		}
+		if envelope.MessageId == "" || envelope.Data == nil {
+			results[index] = errors.New("shipping command envelope is incomplete")
+			continue
+		}
+		if outcome, ok := worker.provider.outcome(envelope.MessageId); ok {
+			outcomes[index] = outcome
+			continue
+		}
+		if outcome, ok := pending[envelope.MessageId]; ok {
+			outcomes[index] = outcome
+			needsRecord[index] = true
+			continue
+		}
+		outcome, err := buildShippingOutcome(message.Subject, envelope)
+		if err != nil {
+			results[index] = err
+			continue
+		}
+		outcomes[index] = outcome
+		needsRecord[index] = true
+		pending[envelope.MessageId] = outcome
 	}
-	if envelope.MessageId == "" || envelope.Data == nil {
-		return errors.New("shipping command envelope is incomplete")
+
+	if err := worker.provider.recordBatch(pending); err != nil {
+		for index := range results {
+			if needsRecord[index] {
+				results[index] = err
+			}
+		}
 	}
-	if outcome, ok := worker.provider.outcome(envelope.MessageId); ok {
-		return worker.publishOutcome(outcome)
+
+	var publish sync.WaitGroup
+	for index := range messages {
+		if results[index] != nil {
+			continue
+		}
+		publish.Add(1)
+		go func(index int) {
+			defer publish.Done()
+			results[index] = worker.publishOutcome(outcomes[index])
+		}(index)
 	}
-	outcome, err := buildShippingOutcome(message.Subject, envelope)
-	if err != nil {
-		return err
-	}
-	if err := worker.provider.record(envelope.MessageId, outcome); err != nil {
-		return err
-	}
-	return worker.publishOutcome(outcome)
+	publish.Wait()
+	return results
 }
 
 func buildShippingOutcome(subject string, envelope *commonv1.MessageEnvelope) (shippingOutcome, error) {

@@ -66,7 +66,10 @@ manifest_files = sorted((ROOT / "kubernetes-manifests").glob("*service.yaml"))
 for path in manifest_files:
     text = path.read_text()
     forbid(path, text, *business_service_addresses, "grpc.health.v1.Health/Check")
-    if path.name != "frontend.yaml":
+    # benchmarkservice intentionally has no Prometheus annotation or endpoint:
+    # benchmark runs exclude the observability stack and collect only the
+    # experiment metrics described in benchmark-plan.md.
+    if path.name not in ("frontend.yaml", "benchmarkservice.yaml"):
         require(path, text, "containerPort: 8080", "path: /healthz", "path: /readyz", "prometheus.io/scrape")
 
 release_path, release = read("release", "kubernetes-manifests.yaml")

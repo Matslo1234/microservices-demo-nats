@@ -143,7 +143,17 @@ func (p *projector) orderQuery(request queryRequest) (queryResponse, error) {
 	if request.OrderID == "" || request.UserID == "" {
 		return queryResponse{}, nats.ErrKeyNotFound
 	}
-	order, err := getJSON[storefront.OrderView](p.orders, storefront.OrderKey(request.OrderID))
+	key := storefront.OrderKey(request.OrderID)
+	order, ok := p.cachedOrder(key)
+	var err error
+	if !ok {
+		order, err = getJSON[storefront.OrderView](p.orders, key)
+		if err == nil {
+			cached, _ := p.orderViews.LoadOrStore(key, *order)
+			value := cached.(storefront.OrderView)
+			order = &value
+		}
+	}
 	if err != nil || order.UserID != request.UserID {
 		if err == nil {
 			err = nats.ErrKeyNotFound
@@ -157,7 +167,17 @@ func (p *projector) operationQuery(request queryRequest) (queryResponse, error) 
 	if request.OperationID == "" || request.UserID == "" {
 		return queryResponse{}, nats.ErrKeyNotFound
 	}
-	operation, err := getJSON[storefront.OperationView](p.operations, storefront.OperationKey(request.OperationID))
+	key := storefront.OperationKey(request.OperationID)
+	operation, ok := p.cachedOperation(key)
+	var err error
+	if !ok {
+		operation, err = getJSON[storefront.OperationView](p.operations, key)
+		if err == nil {
+			cached, _ := p.operationViews.LoadOrStore(key, *operation)
+			value := cached.(storefront.OperationView)
+			operation = &value
+		}
+	}
 	if err != nil || operation.UserID != request.UserID {
 		if err == nil {
 			err = nats.ErrKeyNotFound
@@ -328,11 +348,19 @@ func (p *projector) cartView(userID string) (*storefront.CartView, error) {
 	if userID == "" {
 		return &storefront.CartView{Cart: &commonv1.CartSnapshot{}}, nil
 	}
+	if cart, ok := p.cachedCart(userID); ok {
+		return cart, nil
+	}
 	cart, err := getJSON[storefront.CartView](p.carts, userID)
 	if errors.Is(err, nats.ErrKeyNotFound) {
 		return &storefront.CartView{Cart: &commonv1.CartSnapshot{UserId: userID}}, nil
 	}
-	return cart, err
+	if err != nil {
+		return nil, err
+	}
+	p.storeCartView(userID, *cart)
+	cached, _ := p.cachedCart(userID)
+	return cached, nil
 }
 
 func (p *projector) currentRecommendations(sessionID, excludedProductID string, stale *[]string) []*hipstershop.Product {

@@ -14,6 +14,14 @@ const logger = require('./logger');
 const TOKEN_SUBJECT = 'boutique.qry.payment.tokenize.v1';
 const COMMAND_SUBJECT = 'boutique.cmd.payment.>';
 const COMMAND_DURABLE = 'payment-commands-v1';
+const STATE_BUCKETS = ['tokens', 'tokenKeys', 'outcomes', 'authorizations'];
+const PAYMENT_STATE_VERSION = 1;
+const COMMAND_PREFETCH = 256;
+const COMMAND_BATCH_DELAY_MS = 20;
+const COMMAND_PULL_EXPIRES_MS = 1000;
+const COMMAND_PULL_REFRESH_MS = 500;
+const TOKEN_BATCH_SIZE = 256;
+const TOKEN_BATCH_DELAY_MS = 20;
 
 function stableID(...parts) {
   const digest = crypto.createHash('sha256').update(parts.join('\0')).digest();
@@ -28,22 +36,113 @@ class PaymentState {
     this.file = file;
     fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o750 });
     this.value = { tokens: {}, tokenKeys: {}, outcomes: {}, authorizations: {} };
-    if (fs.existsSync(file)) this.value = JSON.parse(fs.readFileSync(file, 'utf8'));
-    for (const key of ['tokens', 'tokenKeys', 'outcomes', 'authorizations']) {
+    this.pending = Object.fromEntries(STATE_BUCKETS.map(bucket => [bucket, new Set()]));
+    if (fs.existsSync(file)) this.load();
+    for (const key of STATE_BUCKETS) {
       if (!this.value[key]) this.value[key] = {};
     }
   }
 
-  persist() {
+  load() {
+    const encoded = fs.readFileSync(this.file, 'utf8');
+    if (!encoded.trim()) return;
+    let legacy;
+    try {
+      legacy = JSON.parse(encoded);
+    } catch (_) {
+      legacy = undefined;
+    }
+    if (legacy && STATE_BUCKETS.some(bucket => Object.hasOwn(legacy, bucket))) {
+      this.value = legacy;
+      for (const key of STATE_BUCKETS) {
+        if (!this.value[key]) this.value[key] = {};
+      }
+      this.writeSnapshot();
+      return;
+    }
+
+    const lines = encoded.split('\n');
+    for (let index = 0; index < lines.length; index++) {
+      const line = lines[index].trim();
+      if (!line) continue;
+      let record;
+      try {
+        record = JSON.parse(line);
+      } catch (error) {
+        const hasLaterRecord = lines.slice(index + 1).some(candidate => candidate.trim());
+        if (!hasLaterRecord) {
+          // A crash may leave only the final append incomplete. Remove it so
+          // the next append starts at a valid journal boundary.
+          const validPrefix = lines.slice(0, index).join('\n');
+          const fd = fs.openSync(this.file, 'w', 0o600);
+          try {
+            fs.writeFileSync(fd, validPrefix ? `${validPrefix}\n` : '');
+            fs.fsyncSync(fd);
+          } finally {
+            fs.closeSync(fd);
+          }
+          break;
+        }
+        throw new Error(`invalid payment state journal record ${index + 1}: ${error.message}`);
+      }
+      this.applyRecord(record);
+    }
+  }
+
+  applyRecord(record) {
+    if (record.version !== PAYMENT_STATE_VERSION) {
+      throw new Error(`unsupported payment state version ${record.version}`);
+    }
+    if (record.snapshot) {
+      this.value = record.snapshot;
+      for (const key of STATE_BUCKETS) {
+        if (!this.value[key]) this.value[key] = {};
+      }
+      return;
+    }
+    for (const bucket of STATE_BUCKETS) {
+      for (const [key, value] of Object.entries(record.sets?.[bucket] || {})) {
+        this.value[bucket][key] = value;
+      }
+      for (const key of record.deletes?.[bucket] || []) delete this.value[bucket][key];
+    }
+  }
+
+  writeSnapshot() {
     const temporary = `${this.file}.tmp`;
     const fd = fs.openSync(temporary, 'w', 0o600);
     try {
-      fs.writeFileSync(fd, JSON.stringify(this.value));
+      fs.writeFileSync(fd, `${JSON.stringify({ version: PAYMENT_STATE_VERSION, snapshot: this.value })}\n`);
       fs.fsyncSync(fd);
     } finally {
       fs.closeSync(fd);
     }
     fs.renameSync(temporary, this.file);
+  }
+
+  set(bucket, key, value) {
+    if (!this.pending[bucket]) throw new Error(`unknown payment state bucket ${bucket}`);
+    this.value[bucket][key] = value;
+    this.pending[bucket].add(key);
+  }
+
+  persist() {
+    const sets = {};
+    for (const bucket of STATE_BUCKETS) {
+      if (this.pending[bucket].size === 0) continue;
+      sets[bucket] = {};
+      for (const key of this.pending[bucket]) sets[bucket][key] = this.value[bucket][key];
+    }
+    if (Object.keys(sets).length === 0) return;
+
+    const fd = fs.openSync(this.file, 'a', 0o600);
+    try {
+      fs.writeFileSync(fd, `${JSON.stringify({ version: PAYMENT_STATE_VERSION, sets })}\n`);
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
+    for (const bucket of STATE_BUCKETS) this.pending[bucket].clear();
   }
 }
 
@@ -91,7 +190,7 @@ function validateCard(request) {
   return { type: details.card_type, last4: number.slice(-4) };
 }
 
-function tokenize(state, request) {
+function prepareTokenization(state, request) {
   if (!request.order_id || !request.idempotency_key) throw new Error('INVALID_TOKEN_REQUEST');
   const card = validateCard(request);
   const identity = `${request.order_id}\0${request.idempotency_key}`;
@@ -101,10 +200,79 @@ function tokenize(state, request) {
   }
   const token = `ptok_${crypto.randomBytes(24).toString('base64url')}`;
   const expiresAt = Date.now() + 15 * 60 * 1000;
-  state.value.tokens[token] = { orderId: request.order_id, cardType: card.type, last4: card.last4, expiresAt, consumed: false };
-  state.value.tokenKeys[identity] = token;
-  state.persist();
+  state.set('tokens', token, { orderId: request.order_id, cardType: card.type, last4: card.last4, expiresAt, consumed: false });
+  state.set('tokenKeys', identity, token);
   return { payment_token: token, expires_at: new Date(expiresAt).toISOString() };
+}
+
+function tokenize(state, request) {
+  const result = prepareTokenization(state, request);
+  state.persist();
+  return result;
+}
+
+function processTokenBatch(entries, state) {
+  logger.debug({
+    topic: TOKEN_SUBJECT,
+    message_kind: 'query',
+    batch_size: entries.length,
+  }, 'NATS query batch received');
+
+  for (const entry of entries) {
+    if (entry.error) continue;
+    try {
+      entry.result = prepareTokenization(state, entry.request);
+    } catch (tokenError) {
+      entry.error = tokenError;
+    }
+  }
+
+  try {
+    if (entries.some(entry => !entry.error)) state.persist();
+  } catch (persistError) {
+    for (const entry of entries) {
+      if (!entry.error) entry.error = persistError;
+    }
+  }
+
+  for (const entry of entries) {
+    if (!entry.error) {
+      entry.message.respond(JSON.stringify(entry.result));
+      continue;
+    }
+    entry.message.respond(JSON.stringify({
+      error: entry.error.message,
+      safe_message: 'Payment details could not be tokenized.',
+    }));
+    logger.error({
+      topic: entry.message.subject || TOKEN_SUBJECT,
+      correlation_id: entry.correlationId,
+      error: entry.error.message,
+    }, 'payment tokenization query processing failed');
+  }
+}
+
+function createTokenBatcher(state) {
+  let buffered = [];
+  let flushTimer;
+  const flush = () => {
+    if (buffered.length === 0) return;
+    if (flushTimer) {
+      clearTimeout(flushTimer);
+      flushTimer = undefined;
+    }
+    const batch = buffered;
+    buffered = [];
+    processTokenBatch(batch, state);
+  };
+  return entry => {
+    buffered.push(entry);
+    if (buffered.length >= TOKEN_BATCH_SIZE) {
+      flush();
+    } else if (!flushTimer) {
+      flushTimer = setTimeout(flush, TOKEN_BATCH_DELAY_MS);
+    }
+  };
 }
 
 function anyPayload(type, payload) {
@@ -137,11 +305,13 @@ function processCommand(state, contracts, subject, envelope) {
       return outcome(contracts, envelope, 'boutique.evt.payment.authorization-declined.v1', 'boutique.payment.AuthorizationDeclined.v1',
         contracts.Declined, { orderId: command.orderId, declineCategory: mode ? 'TEST_DECLINE' : 'INVALID_OR_EXPIRED_TOKEN' });
     }
-    token.consumed = true;
     const authorizationID = stableID('authorization', command.idempotencyKey);
-    state.value.authorizations[authorizationID] = { orderId: command.orderId, amount: command.amount, captured: false, released: false };
-    return outcome(contracts, envelope, 'boutique.evt.payment.authorized.v1', 'boutique.payment.Authorized.v1', contracts.Authorized,
+    const result = outcome(contracts, envelope, 'boutique.evt.payment.authorized.v1', 'boutique.payment.Authorized.v1', contracts.Authorized,
       { orderId: command.orderId, authorizationId: authorizationID, amount: command.amount });
+    state.set('tokens', command.paymentToken, { ...token, consumed: true });
+    state.set('authorizations', authorizationID,
+      { orderId: command.orderId, amount: command.amount, captured: false, released: false });
+    return result;
   }
   if (subject === 'boutique.cmd.payment.capture.v1') {
     const command = contracts.Capture.decode(envelope.data.value);
@@ -150,9 +320,10 @@ function processCommand(state, contracts, subject, envelope) {
       return outcome(contracts, envelope, 'boutique.evt.payment.capture-failed.v1', 'boutique.payment.CaptureFailed.v1', contracts.CaptureFailed,
         { orderId: command.orderId, authorizationId: command.authorizationId, failure: failure('CAPTURE_FAILED', 'Payment capture failed.', true) });
     }
-    authorization.captured = true;
-    return outcome(contracts, envelope, 'boutique.evt.payment.captured.v1', 'boutique.payment.Captured.v1', contracts.Captured,
+    const result = outcome(contracts, envelope, 'boutique.evt.payment.captured.v1', 'boutique.payment.Captured.v1', contracts.Captured,
       { orderId: command.orderId, transactionId: stableID('capture', command.idempotencyKey), amount: command.amount });
+    state.set('authorizations', command.authorizationId, { ...authorization, captured: true });
+    return result;
   }
   if (subject === 'boutique.cmd.payment.release-authorization.v1') {
     const command = contracts.Release.decode(envelope.data.value);
@@ -161,65 +332,146 @@ function processCommand(state, contracts, subject, envelope) {
       return outcome(contracts, envelope, 'boutique.evt.payment.authorization-release-failed.v1', 'boutique.payment.AuthorizationReleaseFailed.v1', contracts.ReleaseFailed,
         { orderId: command.orderId, authorizationId: command.authorizationId, failure: failure('AUTHORIZATION_RELEASE_FAILED', 'Authorization release requires review.') });
     }
-    authorization.released = true;
-    return outcome(contracts, envelope, 'boutique.evt.payment.authorization-released.v1', 'boutique.payment.AuthorizationReleased.v1', contracts.Released,
+    const result = outcome(contracts, envelope, 'boutique.evt.payment.authorization-released.v1', 'boutique.payment.AuthorizationReleased.v1', contracts.Released,
       { orderId: command.orderId, authorizationId: command.authorizationId });
+    state.set('authorizations', command.authorizationId, { ...authorization, released: true });
+    return result;
   }
   throw new Error(`unsupported payment command ${subject}`);
 }
 
-async function runCommandConsumer(commandSubscription, state, contracts, js) {
-  // Legacy pull subscriptions do not request messages merely by being
-  // iterated. Keep exactly one outstanding pull so an idle worker receives the
-  // next command without polling or overlapping pull requests.
-  commandSubscription.pull({ batch: 1 });
-  for await (const message of commandSubscription) {
+async function processCommandBatch(messages, state, contracts, js) {
+  const commands = messages.map(message => {
     let correlationId = 'unknown';
     let messageId = 'unknown';
     let envelope;
-    let decodeError;
+    let error;
     try {
       envelope = contracts.Envelope.decode(message.data);
       correlationId = envelope.correlationId || 'unknown';
       messageId = envelope.messageId || 'unknown';
-    } catch (error) {
-      decodeError = error;
+    } catch (decodeError) {
+      error = decodeError;
     }
-    logger.debug({
-      topic: message.subject,
-      message_kind: 'command',
-      message_id: messageId,
-      correlation_id: correlationId,
-    }, 'NATS command received');
+    return { message, correlationId, messageId, envelope, error };
+  });
+  logger.debug({
+    topic: COMMAND_SUBJECT,
+    message_kind: 'command',
+    batch_size: commands.length,
+  }, 'NATS command batch received');
+
+  for (const command of commands) {
+    if (command.error) continue;
     try {
-      if (decodeError) throw decodeError;
-      let result = state.value.outcomes[envelope.messageId];
+      let result = state.value.outcomes[command.envelope.messageId];
       if (!result) {
-        result = processCommand(state, contracts, message.subject, envelope);
-        state.value.outcomes[envelope.messageId] = result;
-        state.persist();
+        result = processCommand(state, contracts, command.message.subject, command.envelope);
+        state.set('outcomes', command.envelope.messageId, result);
       }
-      const publishHeaders = headers(); publishHeaders.set('Nats-Msg-Id', result.messageID);
-      await js.publish(result.subject, Buffer.from(result.data, 'base64'), { msgID: result.messageID, headers: publishHeaders });
-      logger.debug({
-        topic: result.subject,
-        message_kind: 'event',
-        message_id: result.messageID,
-        correlation_id: correlationId,
-      }, 'NATS event sent');
-      message.ack();
+      command.result = result;
     } catch (commandError) {
-      logger.error({
-        topic: message.subject,
-        message_id: messageId,
-        correlation_id: correlationId,
-        error: commandError.message,
-      }, 'payment command processing failed');
-      message.nak(1000);
-    } finally {
-      if (!commandSubscription.isClosed()) commandSubscription.pull({ batch: 1 });
+      command.error = commandError;
     }
   }
+
+  try {
+    // Persist all provider mutations and idempotent outcomes in one fsync.
+    // Nothing is published or acknowledged until the whole batch is durable.
+    if (commands.some(command => !command.error)) {
+      state.persist();
+    }
+  } catch (persistError) {
+    for (const command of commands) {
+      if (!command.error) command.error = persistError;
+    }
+  }
+
+  await Promise.all(commands.map(async command => {
+    if (!command.error) {
+      try {
+        const publishHeaders = headers();
+        publishHeaders.set('Nats-Msg-Id', command.result.messageID);
+        await js.publish(command.result.subject, Buffer.from(command.result.data, 'base64'),
+          { msgID: command.result.messageID, headers: publishHeaders });
+        logger.debug({
+          topic: command.result.subject,
+          message_kind: 'event',
+          message_id: command.result.messageID,
+          correlation_id: command.correlationId,
+        }, 'NATS event sent');
+        command.message.ack();
+        return;
+      } catch (publishError) {
+        command.error = publishError;
+      }
+    }
+
+    logger.error({
+      topic: command.message.subject,
+      message_id: command.messageId,
+      correlation_id: command.correlationId,
+      error: command.error.message,
+    }, 'payment command processing failed');
+    command.message.nak(1000);
+  }));
+}
+
+async function runCommandConsumer(commandSubscription, state, contracts, js,
+    pullRefreshMs = COMMAND_PULL_REFRESH_MS) {
+  // Legacy pull subscriptions do not request messages merely by being
+  // iterated. Pull requests can also be lost during a reconnect without
+  // closing the subscription, so use expiring credit and refresh it while the
+  // iterator is alive. Server-side expiry bounds duplicate watchdog requests.
+  const requestPull = () => {
+    if (!commandSubscription.isClosed()) {
+      commandSubscription.pull({
+        batch: COMMAND_PREFETCH,
+        expires: COMMAND_PULL_EXPIRES_MS,
+        idle_heartbeat: COMMAND_PULL_EXPIRES_MS / 2,
+      });
+    }
+  };
+  requestPull();
+  const pullWatchdog = setInterval(requestPull, pullRefreshMs);
+  pullWatchdog.unref?.();
+  let buffered = [];
+  let flushTimer;
+  let processing = Promise.resolve();
+
+  const flush = () => {
+    if (buffered.length === 0) return;
+    if (flushTimer) {
+      clearTimeout(flushTimer);
+      flushTimer = undefined;
+    }
+    const batch = buffered;
+    buffered = [];
+    processing = processing
+      .then(() => processCommandBatch(batch, state, contracts, js))
+      .finally(() => {
+        requestPull();
+      });
+  };
+
+  try {
+    for await (const message of commandSubscription) {
+      buffered.push(message);
+      if (buffered.length >= COMMAND_PREFETCH) {
+        flush();
+      } else if (!flushTimer) {
+        flushTimer = setTimeout(flush, COMMAND_BATCH_DELAY_MS);
+      }
+    }
+  } finally {
+    clearInterval(pullWatchdog);
+  }
+  if (flushTimer) {
+    clearTimeout(flushTimer);
+    flushTimer = undefined;
+  }
+  flush();
+  await processing;
 }
 
 async function startPaymentNATS() {
@@ -233,6 +485,7 @@ async function startPaymentNATS() {
     reconnectTimeWait: 2000, maxReconnectAttempts: -1, pingInterval: 20000, maxPingOut: 2 });
   const js = nc.jetstream({ timeout: 5000 });
   const workerStatus = { ready: false };
+  const enqueueTokenization = createTokenBatcher(state);
 
   const tokenSubscription = nc.subscribe(TOKEN_SUBJECT, { queue: 'payment-tokenize-v1', callback: (err, message) => {
     if (err) return;
@@ -245,27 +498,13 @@ async function startPaymentNATS() {
     } catch (error) {
       parseError = error;
     }
-    logger.debug({
-      topic: message.subject || TOKEN_SUBJECT,
-      message_kind: 'query',
-      correlation_id: correlationId,
-    }, 'NATS query received');
-    try {
-      if (parseError) throw parseError;
-      message.respond(JSON.stringify(tokenize(state, request)));
-    } catch (tokenError) {
-      message.respond(JSON.stringify({ error: tokenError.message, safe_message: 'Payment details could not be tokenized.' }));
-      logger.error({
-        topic: message.subject || TOKEN_SUBJECT,
-        correlation_id: correlationId,
-        error: tokenError.message,
-      }, 'payment tokenization query processing failed');
-    }
+    enqueueTokenization({ message, request, correlationId, error: parseError });
   }});
 
   const options = consumerOpts();
   options.durable(COMMAND_DURABLE); options.manualAck(); options.ackExplicit(); options.ackWait(30000);
-  options.maxDeliver(10); options.deliverAll(); options.bindStream('BOUTIQUE_COMMANDS'); options.filterSubject(COMMAND_SUBJECT);
+  options.maxDeliver(10); options.maxAckPending(COMMAND_PREFETCH); options.deliverAll();
+  options.bindStream('BOUTIQUE_COMMANDS'); options.filterSubject(COMMAND_SUBJECT);
   const commandSubscription = await js.pullSubscribe(COMMAND_SUBJECT, options);
   workerStatus.ready = true;
   runCommandConsumer(commandSubscription, state, contracts, js)
@@ -292,4 +531,7 @@ async function startPaymentNATS() {
   };
 }
 
-module.exports = { startPaymentNATS, stableID, validateCard, tokenize, PaymentState, loadContracts, processCommand, runCommandConsumer };
+module.exports = {
+  startPaymentNATS, stableID, validateCard, tokenize, PaymentState, loadContracts,
+  processTokenBatch, processCommand, processCommandBatch, runCommandConsumer,
+};

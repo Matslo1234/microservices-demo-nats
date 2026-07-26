@@ -30,6 +30,8 @@ const (
 	stageManualReview     = "MANUAL_REVIEW"
 )
 
+var errCheckoutProjectionLag = errors.New("checkout projection is behind the submitted order snapshot")
+
 type orderSaga struct {
 	OrderID               string                           `json:"order_id"`
 	OperationID           string                           `json:"operation_id"`
@@ -57,69 +59,290 @@ type orderSaga struct {
 }
 
 func (worker *checkoutWorker) handleOrderCommand(envelope *commonv1.MessageEnvelope) error {
-	payload := &commandsv1.OrderSubmitCommand{}
-	if err := envelope.Data.UnmarshalTo(payload); err != nil {
+	payload, err := decodeOrderCommand(envelope)
+	if err != nil {
 		return err
 	}
-	if payload.OrderId == "" || payload.OperationId == "" || payload.UserId == "" || payload.PaymentToken == "" {
-		return errors.New("order command identity or payment token is missing")
+	if err := worker.store.View(func(state *persistedState) error {
+		return validateOrderProjection(state, envelope, payload)
+	}); err != nil {
+		return err
 	}
-	return worker.store.Update(func(state *persistedState) error {
-		if _, processed := state.Inbox[envelope.MessageId]; processed {
-			return nil
-		}
-		if existing := state.Orders[payload.OrderId]; existing != nil {
-			state.Inbox[envelope.MessageId] = time.Now().UTC()
-			return nil
-		}
-		cart := state.Carts[payload.UserId]
-		failure := validateOrderCommand(state, cart, payload)
-		if failure != nil {
-			saga := &orderSaga{OrderID: payload.OrderId, OperationID: payload.OperationId, CommandID: payload.CommandId,
-				UserID: payload.UserId, Version: 1, Stage: stageRejected}
-			state.Orders[payload.OrderId] = saga
-			if err := queueEnvelope(state, "boutique.evt.order.rejected.v1", "boutique.order.Rejected.v1",
-				"order", payload.OrderId, saga.Version, payload.OrderId, envelope.MessageId,
-				&eventsv1.OrderRejectedEvent{OperationId: payload.OperationId, OrderId: payload.OrderId, Failure: failure}); err != nil {
-				return err
-			}
-			state.Inbox[envelope.MessageId] = time.Now().UTC()
-			return nil
-		}
-		snapshot, err := buildOrderSnapshot(state, cart, payload)
-		if err != nil {
-			return err
-		}
-		saga := &orderSaga{
-			OrderID: payload.OrderId, OperationID: payload.OperationId, CommandID: payload.CommandId,
-			UserID: payload.UserId, Email: payload.Email, Address: payload.ShippingAddress,
-			CurrencyCode: payload.CurrencyCode, PaymentToken: payload.PaymentToken,
-			CartVersion: payload.ExpectedCartVersion, CatalogRevision: payload.ExpectedCatalogRevision,
-			RateRevision: payload.ExpectedRateRevision, Version: 1, Stage: stageWaitingQuote,
-			Deadline: time.Now().UTC().Add(worker.stepTimeout), Snapshot: snapshot,
-		}
-		state.Orders[payload.OrderId] = saga
-		if err := queueEnvelope(state, "boutique.evt.order.submitted.v1", "boutique.order.Submitted.v1", "order",
-			payload.OrderId, saga.Version, payload.OrderId, envelope.MessageId, &eventsv1.OrderSubmittedEvent{
-				OperationId: payload.OperationId, Order: snapshot, AcceptedCartVersion: saga.CartVersion,
-				AcceptedCatalogRevision: saga.CatalogRevision, AcceptedRateRevision: saga.RateRevision,
-			}); err != nil {
-			return err
-		}
-		quoteCommand := &commandsv1.ShippingCalculateOrderQuoteCommand{
-			CommandId: stableID("quote", payload.OrderId), OrderId: payload.OrderId,
-			ShippingAddress: payload.ShippingAddress, Cart: cart,
-		}
-		if err := queueEnvelope(state, "boutique.cmd.shipping.calculate-order-quote.v1", "boutique.shipping.CalculateOrderQuote.v1",
-			"order", payload.OrderId, saga.Version, payload.OrderId, envelope.MessageId, quoteCommand); err != nil {
-			return err
-		}
-		if err := queueStage(state, saga, envelope.MessageId); err != nil {
-			return err
-		}
-		state.Inbox[envelope.MessageId] = time.Now().UTC()
-		return nil
+	return worker.store.UpdateTracked(func(state *persistedState) error {
+		return worker.applyOrderCommand(state, envelope, payload)
 	})
+}
+
+func decodeOrderCommand(envelope *commonv1.MessageEnvelope) (*commandsv1.OrderSubmitCommand, error) {
+	payload := &commandsv1.OrderSubmitCommand{}
+	if err := envelope.Data.UnmarshalTo(payload); err != nil {
+		return nil, err
+	}
+	if payload.OrderId == "" || payload.OperationId == "" || payload.UserId == "" || payload.PaymentToken == "" {
+		return nil, errors.New("order command identity or payment token is missing")
+	}
+	return payload, nil
+}
+
+func validateOrderProjection(state *persistedState, envelope *commonv1.MessageEnvelope, payload *commandsv1.OrderSubmitCommand) error {
+	if _, processed := state.Inbox[envelope.MessageId]; processed {
+		return nil
+	}
+	if state.Orders[payload.OrderId] != nil {
+		return nil
+	}
+	switch {
+	case state.Carts[payload.UserId] == nil:
+		return fmt.Errorf("%w: cart %q is not projected", errCheckoutProjectionLag, payload.UserId)
+	case state.Carts[payload.UserId].CartVersion < payload.ExpectedCartVersion:
+		return fmt.Errorf("%w: cart version %d is below %d", errCheckoutProjectionLag,
+			state.Carts[payload.UserId].CartVersion, payload.ExpectedCartVersion)
+	case state.CatalogRevision < payload.ExpectedCatalogRevision:
+		return fmt.Errorf("%w: catalog revision %d is below %d", errCheckoutProjectionLag,
+			state.CatalogRevision, payload.ExpectedCatalogRevision)
+	case state.Rates == nil:
+		return fmt.Errorf("%w: currency rates are not projected", errCheckoutProjectionLag)
+	case state.Rates.RateRevision < payload.ExpectedRateRevision:
+		return fmt.Errorf("%w: rate revision %d is below %d", errCheckoutProjectionLag,
+			state.Rates.RateRevision, payload.ExpectedRateRevision)
+	default:
+		return nil
+	}
+}
+
+func (worker *checkoutWorker) applyOrderCommand(state *persistedState, envelope *commonv1.MessageEnvelope,
+	payload *commandsv1.OrderSubmitCommand) error {
+	if _, processed := state.Inbox[envelope.MessageId]; processed {
+		return nil
+	}
+	if existing := state.Orders[payload.OrderId]; existing != nil {
+		state.setInbox(envelope.MessageId, time.Now().UTC())
+		return nil
+	}
+	cart := state.Carts[payload.UserId]
+	failure := validateOrderCommand(state, cart, payload)
+	if failure != nil {
+		saga := &orderSaga{OrderID: payload.OrderId, OperationID: payload.OperationId, CommandID: payload.CommandId,
+			UserID: payload.UserId, Version: 1, Stage: stageRejected}
+		state.setOrder(payload.OrderId, saga)
+		if err := queueEnvelope(state, "boutique.evt.order.rejected.v1", "boutique.order.Rejected.v1",
+			"order", payload.OrderId, saga.Version, payload.OrderId, envelope.MessageId,
+			&eventsv1.OrderRejectedEvent{OperationId: payload.OperationId, OrderId: payload.OrderId, Failure: failure}); err != nil {
+			return err
+		}
+		state.setInbox(envelope.MessageId, time.Now().UTC())
+		return nil
+	}
+	snapshot, err := buildOrderSnapshot(state, cart, payload)
+	if err != nil {
+		return err
+	}
+	saga := &orderSaga{
+		OrderID: payload.OrderId, OperationID: payload.OperationId, CommandID: payload.CommandId,
+		UserID: payload.UserId, Email: payload.Email, Address: payload.ShippingAddress,
+		CurrencyCode: payload.CurrencyCode, PaymentToken: payload.PaymentToken,
+		CartVersion: payload.ExpectedCartVersion, CatalogRevision: payload.ExpectedCatalogRevision,
+		RateRevision: payload.ExpectedRateRevision, Version: 1, Stage: stageWaitingQuote,
+		Deadline: time.Now().UTC().Add(worker.stepTimeout), Snapshot: snapshot,
+	}
+	state.setOrder(payload.OrderId, saga)
+	if err := queueEnvelope(state, "boutique.evt.order.submitted.v1", "boutique.order.Submitted.v1", "order",
+		payload.OrderId, saga.Version, payload.OrderId, envelope.MessageId, &eventsv1.OrderSubmittedEvent{
+			OperationId: payload.OperationId, Order: snapshot, AcceptedCartVersion: saga.CartVersion,
+			AcceptedCatalogRevision: saga.CatalogRevision, AcceptedRateRevision: saga.RateRevision,
+		}); err != nil {
+		return err
+	}
+	quoteCommand := &commandsv1.ShippingCalculateOrderQuoteCommand{
+		CommandId: stableID("quote", payload.OrderId), OrderId: payload.OrderId,
+		ShippingAddress: payload.ShippingAddress, Cart: cart,
+	}
+	if err := queueEnvelope(state, "boutique.cmd.shipping.calculate-order-quote.v1", "boutique.shipping.CalculateOrderQuote.v1",
+		"order", payload.OrderId, saga.Version, payload.OrderId, envelope.MessageId, quoteCommand); err != nil {
+		return err
+	}
+	if err := queueStage(state, saga, envelope.MessageId); err != nil {
+		return err
+	}
+	state.setInbox(envelope.MessageId, time.Now().UTC())
+	return nil
+}
+
+func (worker *checkoutWorker) handleSagaEvent(subject string, envelope *commonv1.MessageEnvelope) error {
+	return worker.store.UpdateTracked(func(state *persistedState) error {
+		return worker.applySagaEvent(state, subject, envelope)
+	})
+}
+
+func (worker *checkoutWorker) applySagaEvent(state *persistedState, subject string, envelope *commonv1.MessageEnvelope) error {
+	if _, processed := state.Inbox[envelope.MessageId]; processed {
+		return nil
+	}
+	state.setInbox(envelope.MessageId, time.Now().UTC())
+	saga := state.Orders[envelope.AggregateId]
+	if saga == nil {
+		return nil
+	}
+	if saga.Stage == stageCompleted || saga.Stage == stageCancelled || saga.Stage == stageRejected || saga.Stage == stageManualReview {
+		return nil
+	}
+	state.markOrder(envelope.AggregateId)
+	cause := envelope.MessageId
+	switch subject {
+	case "boutique.evt.shipping.order-quote-calculated.v1":
+		payload := &eventsv1.ShippingOrderQuoteCalculatedEvent{}
+		if err := envelope.Data.UnmarshalTo(payload); err != nil {
+			return err
+		}
+		if saga.Stage != stageWaitingQuote {
+			break
+		}
+		shipping := convertMoney(state.Rates, payload.CostUsd, saga.CurrencyCode)
+		if shipping == nil {
+			return worker.cancel(state, saga, cause, &commonv1.Failure{Code: "INVALID_CURRENCY", SafeMessage: "Shipping could not be converted."})
+		}
+		saga.Snapshot.ShippingCost = shipping
+		saga.Snapshot.Total = addMoney(saga.Snapshot.Total, shipping)
+		saga.Version++
+		saga.Stage = stageWaitingAuthorize
+		saga.Deadline = time.Now().UTC().Add(worker.stepTimeout)
+		command := &commandsv1.PaymentAuthorizeCommand{CommandId: stableID("authorize", saga.OrderID), OrderId: saga.OrderID,
+			Amount: saga.Snapshot.Total, PaymentToken: saga.PaymentToken, IdempotencyKey: saga.OrderID + "/authorize"}
+		if err := queueEnvelope(state, "boutique.cmd.payment.authorize.v1", "boutique.payment.Authorize.v1", "order", saga.OrderID, saga.Version, saga.OrderID, cause, command); err != nil {
+			return err
+		}
+		return queueStage(state, saga, cause)
+	case "boutique.evt.shipping.order-quote-failed.v1":
+		payload := &eventsv1.ShippingOrderQuoteFailedEvent{}
+		if err := envelope.Data.UnmarshalTo(payload); err != nil {
+			return err
+		}
+		if saga.Stage != stageWaitingQuote {
+			break
+		}
+		return worker.cancel(state, saga, cause, safeFailure(payload.Failure, "SHIPPING_QUOTE_FAILED"))
+	case "boutique.evt.payment.authorized.v1":
+		payload := &eventsv1.PaymentAuthorizedEvent{}
+		if err := envelope.Data.UnmarshalTo(payload); err != nil {
+			return err
+		}
+		if saga.Stage != stageWaitingAuthorize {
+			break
+		}
+		saga.AuthorizationID = payload.AuthorizationId
+		saga.PaymentToken = ""
+		saga.Version++
+		saga.Stage = stageWaitingShipment
+		saga.Deadline = time.Now().UTC().Add(worker.stepTimeout)
+		command := &commandsv1.ShippingCreateShipmentCommand{CommandId: stableID("shipment", saga.OrderID), OrderId: saga.OrderID,
+			ShippingAddress: saga.Address, IdempotencyKey: saga.OrderID + "/shipment"}
+		for _, line := range saga.Snapshot.Items {
+			command.Items = append(command.Items, line.Item)
+		}
+		if err := queueEnvelope(state, "boutique.cmd.shipping.create-shipment.v1", "boutique.shipping.CreateShipment.v1", "order", saga.OrderID, saga.Version, saga.OrderID, cause, command); err != nil {
+			return err
+		}
+		return queueStage(state, saga, cause)
+	case "boutique.evt.payment.authorization-declined.v1":
+		payload := &eventsv1.PaymentAuthorizationDeclinedEvent{}
+		if err := envelope.Data.UnmarshalTo(payload); err != nil {
+			return err
+		}
+		if saga.Stage != stageWaitingAuthorize {
+			break
+		}
+		return worker.cancel(state, saga, cause, &commonv1.Failure{Code: "PAYMENT_DECLINED", SafeMessage: "Payment authorization was declined."})
+	case "boutique.evt.shipping.shipment-created.v1":
+		payload := &eventsv1.ShippingShipmentCreatedEvent{}
+		if err := envelope.Data.UnmarshalTo(payload); err != nil {
+			return err
+		}
+		if saga.Stage != stageWaitingShipment {
+			break
+		}
+		saga.ShipmentID = payload.ShipmentId
+		saga.TrackingID = payload.TrackingId
+		saga.Snapshot.TrackingId = payload.TrackingId
+		saga.Version++
+		saga.Stage = stageWaitingCapture
+		saga.Deadline = time.Now().UTC().Add(worker.stepTimeout)
+		command := &commandsv1.PaymentCaptureCommand{CommandId: stableID("capture", saga.OrderID), OrderId: saga.OrderID,
+			AuthorizationId: saga.AuthorizationID, Amount: saga.Snapshot.Total, IdempotencyKey: saga.OrderID + "/capture"}
+		if err := queueEnvelope(state, "boutique.cmd.payment.capture.v1", "boutique.payment.Capture.v1", "order", saga.OrderID, saga.Version, saga.OrderID, cause, command); err != nil {
+			return err
+		}
+		return queueStage(state, saga, cause)
+	case "boutique.evt.shipping.shipment-creation-failed.v1":
+		payload := &eventsv1.ShippingShipmentCreationFailedEvent{}
+		if err := envelope.Data.UnmarshalTo(payload); err != nil {
+			return err
+		}
+		if saga.Stage != stageWaitingShipment {
+			break
+		}
+		return worker.startCompensation(state, saga, cause, safeFailure(payload.Failure, "SHIPMENT_FAILED"), true, false)
+	case "boutique.evt.payment.captured.v1":
+		payload := &eventsv1.PaymentCapturedEvent{}
+		if err := envelope.Data.UnmarshalTo(payload); err != nil {
+			return err
+		}
+		if saga.Stage != stageWaitingCapture {
+			break
+		}
+		saga.Version++
+		saga.Stage = stageCompleted
+		saga.Deadline = time.Time{}
+		if err := queueEnvelope(state, "boutique.evt.order.completed.v1", "boutique.order.Completed.v1", "order", saga.OrderID, saga.Version, saga.OrderID, cause,
+			&eventsv1.OrderCompletedEvent{Order: saga.Snapshot}); err != nil {
+			return err
+		}
+		clear := &commandsv1.CartClearCommand{CommandId: envelopeMessageID("boutique.cmd.cart.clear.v1", cause, saga.CartVersion), UserId: saga.UserID,
+			ExpectedCartVersion: saga.CartVersion, Reason: "order-completed", OrderId: saga.OrderID}
+		if err := queueEnvelope(state, "boutique.cmd.cart.clear.v1", "boutique.cart.Clear.v1", "cart", saga.UserID, saga.CartVersion, saga.OrderID, cause, clear); err != nil {
+			return err
+		}
+		return queueStage(state, saga, cause)
+	case "boutique.evt.payment.capture-failed.v1":
+		payload := &eventsv1.PaymentCaptureFailedEvent{}
+		if err := envelope.Data.UnmarshalTo(payload); err != nil {
+			return err
+		}
+		if saga.Stage != stageWaitingCapture {
+			break
+		}
+		return worker.startCompensation(state, saga, cause, safeFailure(payload.Failure, "CAPTURE_FAILED"), true, true)
+	case "boutique.evt.payment.authorization-released.v1":
+		payload := &eventsv1.PaymentAuthorizationReleasedEvent{}
+		if err := envelope.Data.UnmarshalTo(payload); err != nil {
+			return err
+		}
+		if saga.Stage != stageCompensating {
+			break
+		}
+		saga.AuthorizationReleased = true
+		return worker.finishCompensation(state, saga, cause)
+	case "boutique.evt.shipping.shipment-cancelled.v1":
+		payload := &eventsv1.ShippingShipmentCancelledEvent{}
+		if err := envelope.Data.UnmarshalTo(payload); err != nil {
+			return err
+		}
+		if saga.Stage != stageCompensating {
+			break
+		}
+		saga.ShipmentCancelled = true
+		return worker.finishCompensation(state, saga, cause)
+	case "boutique.evt.payment.authorization-release-failed.v1":
+		if saga.Stage != stageCompensating {
+			break
+		}
+		return worker.manualReview(state, saga, cause, "payment.authorization-release", "PAYMENT_RELEASE_FAILED")
+	case "boutique.evt.shipping.shipment-cancellation-failed.v1":
+		if saga.Stage != stageCompensating {
+			break
+		}
+		return worker.manualReview(state, saga, cause, "shipping.cancel-shipment", "SHIPMENT_CANCELLATION_FAILED")
+	}
+	return nil
 }
 
 func validateOrderCommand(state *persistedState, cart *commonv1.CartSnapshot, command *commandsv1.OrderSubmitCommand) *commonv1.Failure {
@@ -166,178 +389,6 @@ func buildOrderSnapshot(state *persistedState, cart *commonv1.CartSnapshot, comm
 		snapshot.Total = addMoney(snapshot.Total, multiplyMoney(cost, line.Quantity))
 	}
 	return snapshot, nil
-}
-
-func (worker *checkoutWorker) handleSagaEvent(subject string, envelope *commonv1.MessageEnvelope) error {
-	return worker.store.Update(func(state *persistedState) error {
-		if _, processed := state.Inbox[envelope.MessageId]; processed {
-			return nil
-		}
-		state.Inbox[envelope.MessageId] = time.Now().UTC()
-		saga := state.Orders[envelope.AggregateId]
-		if saga == nil {
-			return nil
-		}
-		if saga.Stage == stageCompleted || saga.Stage == stageCancelled || saga.Stage == stageRejected || saga.Stage == stageManualReview {
-			return nil
-		}
-		cause := envelope.MessageId
-		switch subject {
-		case "boutique.evt.shipping.order-quote-calculated.v1":
-			payload := &eventsv1.ShippingOrderQuoteCalculatedEvent{}
-			if err := envelope.Data.UnmarshalTo(payload); err != nil {
-				return err
-			}
-			if saga.Stage != stageWaitingQuote {
-				break
-			}
-			shipping := convertMoney(state.Rates, payload.CostUsd, saga.CurrencyCode)
-			if shipping == nil {
-				return worker.cancel(state, saga, cause, &commonv1.Failure{Code: "INVALID_CURRENCY", SafeMessage: "Shipping could not be converted."})
-			}
-			saga.Snapshot.ShippingCost = shipping
-			saga.Snapshot.Total = addMoney(saga.Snapshot.Total, shipping)
-			saga.Version++
-			saga.Stage = stageWaitingAuthorize
-			saga.Deadline = time.Now().UTC().Add(worker.stepTimeout)
-			command := &commandsv1.PaymentAuthorizeCommand{CommandId: stableID("authorize", saga.OrderID), OrderId: saga.OrderID,
-				Amount: saga.Snapshot.Total, PaymentToken: saga.PaymentToken, IdempotencyKey: saga.OrderID + "/authorize"}
-			if err := queueEnvelope(state, "boutique.cmd.payment.authorize.v1", "boutique.payment.Authorize.v1", "order", saga.OrderID, saga.Version, saga.OrderID, cause, command); err != nil {
-				return err
-			}
-			return queueStage(state, saga, cause)
-		case "boutique.evt.shipping.order-quote-failed.v1":
-			payload := &eventsv1.ShippingOrderQuoteFailedEvent{}
-			if err := envelope.Data.UnmarshalTo(payload); err != nil {
-				return err
-			}
-			if saga.Stage != stageWaitingQuote {
-				break
-			}
-			return worker.cancel(state, saga, cause, safeFailure(payload.Failure, "SHIPPING_QUOTE_FAILED"))
-		case "boutique.evt.payment.authorized.v1":
-			payload := &eventsv1.PaymentAuthorizedEvent{}
-			if err := envelope.Data.UnmarshalTo(payload); err != nil {
-				return err
-			}
-			if saga.Stage != stageWaitingAuthorize {
-				break
-			}
-			saga.AuthorizationID = payload.AuthorizationId
-			saga.PaymentToken = ""
-			saga.Version++
-			saga.Stage = stageWaitingShipment
-			saga.Deadline = time.Now().UTC().Add(worker.stepTimeout)
-			command := &commandsv1.ShippingCreateShipmentCommand{CommandId: stableID("shipment", saga.OrderID), OrderId: saga.OrderID,
-				ShippingAddress: saga.Address, IdempotencyKey: saga.OrderID + "/shipment"}
-			for _, line := range saga.Snapshot.Items {
-				command.Items = append(command.Items, line.Item)
-			}
-			if err := queueEnvelope(state, "boutique.cmd.shipping.create-shipment.v1", "boutique.shipping.CreateShipment.v1", "order", saga.OrderID, saga.Version, saga.OrderID, cause, command); err != nil {
-				return err
-			}
-			return queueStage(state, saga, cause)
-		case "boutique.evt.payment.authorization-declined.v1":
-			payload := &eventsv1.PaymentAuthorizationDeclinedEvent{}
-			if err := envelope.Data.UnmarshalTo(payload); err != nil {
-				return err
-			}
-			if saga.Stage != stageWaitingAuthorize {
-				break
-			}
-			return worker.cancel(state, saga, cause, &commonv1.Failure{Code: "PAYMENT_DECLINED", SafeMessage: "Payment authorization was declined."})
-		case "boutique.evt.shipping.shipment-created.v1":
-			payload := &eventsv1.ShippingShipmentCreatedEvent{}
-			if err := envelope.Data.UnmarshalTo(payload); err != nil {
-				return err
-			}
-			if saga.Stage != stageWaitingShipment {
-				break
-			}
-			saga.ShipmentID = payload.ShipmentId
-			saga.TrackingID = payload.TrackingId
-			saga.Snapshot.TrackingId = payload.TrackingId
-			saga.Version++
-			saga.Stage = stageWaitingCapture
-			saga.Deadline = time.Now().UTC().Add(worker.stepTimeout)
-			command := &commandsv1.PaymentCaptureCommand{CommandId: stableID("capture", saga.OrderID), OrderId: saga.OrderID,
-				AuthorizationId: saga.AuthorizationID, Amount: saga.Snapshot.Total, IdempotencyKey: saga.OrderID + "/capture"}
-			if err := queueEnvelope(state, "boutique.cmd.payment.capture.v1", "boutique.payment.Capture.v1", "order", saga.OrderID, saga.Version, saga.OrderID, cause, command); err != nil {
-				return err
-			}
-			return queueStage(state, saga, cause)
-		case "boutique.evt.shipping.shipment-creation-failed.v1":
-			payload := &eventsv1.ShippingShipmentCreationFailedEvent{}
-			if err := envelope.Data.UnmarshalTo(payload); err != nil {
-				return err
-			}
-			if saga.Stage != stageWaitingShipment {
-				break
-			}
-			return worker.startCompensation(state, saga, cause, safeFailure(payload.Failure, "SHIPMENT_FAILED"), true, false)
-		case "boutique.evt.payment.captured.v1":
-			payload := &eventsv1.PaymentCapturedEvent{}
-			if err := envelope.Data.UnmarshalTo(payload); err != nil {
-				return err
-			}
-			if saga.Stage != stageWaitingCapture {
-				break
-			}
-			saga.Version++
-			saga.Stage = stageCompleted
-			saga.Deadline = time.Time{}
-			if err := queueEnvelope(state, "boutique.evt.order.completed.v1", "boutique.order.Completed.v1", "order", saga.OrderID, saga.Version, saga.OrderID, cause,
-				&eventsv1.OrderCompletedEvent{Order: saga.Snapshot}); err != nil {
-				return err
-			}
-			clear := &commandsv1.CartClearCommand{CommandId: envelopeMessageID("boutique.cmd.cart.clear.v1", cause, saga.CartVersion), UserId: saga.UserID,
-				ExpectedCartVersion: saga.CartVersion, Reason: "order-completed", OrderId: saga.OrderID}
-			if err := queueEnvelope(state, "boutique.cmd.cart.clear.v1", "boutique.cart.Clear.v1", "cart", saga.UserID, saga.CartVersion, saga.OrderID, cause, clear); err != nil {
-				return err
-			}
-			return queueStage(state, saga, cause)
-		case "boutique.evt.payment.capture-failed.v1":
-			payload := &eventsv1.PaymentCaptureFailedEvent{}
-			if err := envelope.Data.UnmarshalTo(payload); err != nil {
-				return err
-			}
-			if saga.Stage != stageWaitingCapture {
-				break
-			}
-			return worker.startCompensation(state, saga, cause, safeFailure(payload.Failure, "CAPTURE_FAILED"), true, true)
-		case "boutique.evt.payment.authorization-released.v1":
-			payload := &eventsv1.PaymentAuthorizationReleasedEvent{}
-			if err := envelope.Data.UnmarshalTo(payload); err != nil {
-				return err
-			}
-			if saga.Stage != stageCompensating {
-				break
-			}
-			saga.AuthorizationReleased = true
-			return worker.finishCompensation(state, saga, cause)
-		case "boutique.evt.shipping.shipment-cancelled.v1":
-			payload := &eventsv1.ShippingShipmentCancelledEvent{}
-			if err := envelope.Data.UnmarshalTo(payload); err != nil {
-				return err
-			}
-			if saga.Stage != stageCompensating {
-				break
-			}
-			saga.ShipmentCancelled = true
-			return worker.finishCompensation(state, saga, cause)
-		case "boutique.evt.payment.authorization-release-failed.v1":
-			if saga.Stage != stageCompensating {
-				break
-			}
-			return worker.manualReview(state, saga, cause, "payment.authorization-release", "PAYMENT_RELEASE_FAILED")
-		case "boutique.evt.shipping.shipment-cancellation-failed.v1":
-			if saga.Stage != stageCompensating {
-				break
-			}
-			return worker.manualReview(state, saga, cause, "shipping.cancel-shipment", "SHIPMENT_CANCELLATION_FAILED")
-		}
-		return nil
-	})
 }
 
 func (worker *checkoutWorker) cancel(state *persistedState, saga *orderSaga, cause string, failure *commonv1.Failure) error {
@@ -426,7 +477,7 @@ func queueEnvelope(state *persistedState, subject, messageType, aggregateType, a
 	if err != nil {
 		return err
 	}
-	state.Outbox[messageID] = outboxMessage{MessageID: messageID, Subject: subject, Data: encoded}
+	state.setOutbox(outboxMessage{MessageID: messageID, Subject: subject, Data: encoded})
 	return nil
 }
 

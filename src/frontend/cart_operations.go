@@ -63,7 +63,7 @@ func (fe *frontendServer) publishCartAdd(ctx context.Context, operationID, userI
 		CommandId: operationID, UserId: userID, ProductId: productID,
 		Quantity: quantity, ExpectedCartVersion: expectedVersion,
 	}
-	return fe.publishCartCommand(ctx, cartAddSubject, "boutique.cart.AddItem.v1", "cart.add-item",
+	return fe.publishCartCommand(ctx, cartAddSubject, "boutique.cart.AddItem.v1",
 		operationID, userID, expectedVersion, payload)
 }
 
@@ -73,11 +73,11 @@ func (fe *frontendServer) publishCartClear(ctx context.Context, operationID, use
 		CommandId: operationID, UserId: userID, ExpectedCartVersion: expectedVersion,
 		Reason: "user-request",
 	}
-	return fe.publishCartCommand(ctx, cartClearSubject, "boutique.cart.Clear.v1", "cart.clear",
+	return fe.publishCartCommand(ctx, cartClearSubject, "boutique.cart.Clear.v1",
 		operationID, userID, expectedVersion, payload)
 }
 
-func (fe *frontendServer) publishCartCommand(ctx context.Context, subject, messageType, kind,
+func (fe *frontendServer) publishCartCommand(ctx context.Context, subject, messageType,
 	operationID, userID string, expectedVersion uint64, payload proto.Message) error {
 	now := time.Now().UTC()
 	wrapped, err := anypb.New(payload)
@@ -94,8 +94,7 @@ func (fe *frontendServer) publishCartCommand(ctx context.Context, subject, messa
 	if err := fe.publishEnvelope(ctx, subject, operationID, envelope); err != nil {
 		return fmt.Errorf("publish cart command: %w", err)
 	}
-
-	return fe.publishOperationAccepted(context.Background(), ctx, operationID, operationID, kind, userID, now)
+	return nil
 }
 
 func (fe *frontendServer) publishOperationAccepted(publishContext, traceContext context.Context, operationID, commandID, kind, userID string, now time.Time) error {

@@ -107,17 +107,19 @@ type OperationView struct {
 }
 
 type OrderView struct {
-	OrderID            string                           `json:"order_id"`
-	UserID             string                           `json:"user_id"`
-	Status             string                           `json:"status"`
-	Stage              string                           `json:"stage,omitempty"`
-	Snapshot           *commonv1.SanitizedOrderSnapshot `json:"snapshot,omitempty"`
-	FailureCode        string                           `json:"failure_code,omitempty"`
-	Retryable          bool                             `json:"retryable,omitempty"`
-	SafeMessage        string                           `json:"safe_message,omitempty"`
-	NotificationStatus string                           `json:"notification_status,omitempty"`
-	AggregateVersion   uint64                           `json:"aggregate_version"`
-	UpdatedAt          time.Time                        `json:"updated_at"`
+	OrderID              string                           `json:"order_id"`
+	UserID               string                           `json:"user_id"`
+	Status               string                           `json:"status"`
+	Stage                string                           `json:"stage,omitempty"`
+	Snapshot             *commonv1.SanitizedOrderSnapshot `json:"snapshot,omitempty"`
+	FailureCode          string                           `json:"failure_code,omitempty"`
+	Retryable            bool                             `json:"retryable,omitempty"`
+	SafeMessage          string                           `json:"safe_message,omitempty"`
+	NotificationStatus   string                           `json:"notification_status,omitempty"`
+	CartClearStatus      string                           `json:"cart_clear_status,omitempty"`
+	CartClearFailureCode string                           `json:"cart_clear_failure_code,omitempty"`
+	AggregateVersion     uint64                           `json:"aggregate_version"`
+	UpdatedAt            time.Time                        `json:"updated_at"`
 }
 
 func ProductKey(productID string) string { return "product." + productID }

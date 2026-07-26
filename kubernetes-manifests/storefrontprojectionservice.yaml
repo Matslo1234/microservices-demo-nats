@@ -9,6 +9,8 @@ metadata:
     app: storefrontprojectionservice
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: storefrontprojectionservice
@@ -44,6 +46,8 @@ spec:
           value: "true"
         - name: NATS_REQUIRED_SUBSCRIPTIONS
           value: "storefront-projection-v1,boutique.qry.storefront.home.v1,boutique.qry.storefront.product.v1,boutique.qry.storefront.cart.v1,boutique.qry.storefront.currencies.v1,boutique.qry.storefront.product-meta.v1,boutique.qry.storefront.operation.v1,boutique.qry.storefront.order.v1"
+        - name: GOMEMLIMIT
+          value: "400MiB"
         envFrom:
         - configMapRef:
             name: nats-client-config
@@ -58,18 +62,21 @@ spec:
             path: /readyz
             port: 8080
           periodSeconds: 5
+          timeoutSeconds: 5
         livenessProbe:
           httpGet:
             path: /healthz
             port: 8080
           periodSeconds: 10
+          timeoutSeconds: 3
+          failureThreshold: 6
         resources:
           requests:
-            cpu: 100m
-            memory: 64Mi
+            cpu: 500m
+            memory: 128Mi
           limits:
-            cpu: 300m
-            memory: 256Mi
+            cpu: "2"
+            memory: 512Mi
       volumes:
       - name: nats-ca
         configMap:

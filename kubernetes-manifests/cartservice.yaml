@@ -69,19 +69,24 @@ spec:
           readOnly: true
         resources:
           requests:
-            cpu: 200m
-            memory: 64Mi
-          limits:
-            cpu: 300m
+            cpu: 500m
             memory: 128Mi
+          limits:
+            cpu: "2"
+            memory: 512Mi
         readinessProbe:
-          initialDelaySeconds: 15
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 2
+          failureThreshold: 6
           httpGet:
             path: /readyz
             port: health
         livenessProbe:
           initialDelaySeconds: 15
           periodSeconds: 10
+          timeoutSeconds: 2
+          failureThreshold: 6
           httpGet:
             path: /healthz
             port: health

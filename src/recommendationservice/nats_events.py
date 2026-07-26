@@ -16,6 +16,7 @@ from google.protobuf.any_pb2 import Any
 from google.protobuf.timestamp_pb2 import Timestamp
 from nats.errors import TimeoutError as NatsTimeoutError
 from nats.js.api import AckPolicy, ConsumerConfig, DeliverPolicy
+from nats.js.errors import ServiceUnavailableError
 
 from logger import getJSONLogger
 from protos.common.v1 import message_pb2
@@ -168,34 +169,44 @@ async def _handle_trigger(js, message):
         await _publish_result(js, envelope, payload.cart.user_id, [])
 
 
+async def _process_message(message, handler):
+    correlation_id, message_id = _message_context(message)
+    try:
+        await handler(message)
+        await message.ack()
+    except Exception:
+        logger.exception(
+            "Event processing failed",
+            extra={
+                "topic": message.subject,
+                "message_id": message_id,
+                "correlation_id": correlation_id,
+            })
+        await message.nak(delay=1)
+
+
 async def _consume(subscription, handler):
     while not _stop.is_set():
         try:
-            messages = await subscription.fetch(batch=32, timeout=1)
+            messages = await subscription.fetch(batch=64, timeout=1)
         except (NatsTimeoutError, asyncio.TimeoutError):
             continue
-        for message in messages:
-            correlation_id, message_id = _message_context(message)
+        except (nats.errors.Error, ServiceUnavailableError):
+            # A JetStream leader transition must not permanently stop the
+            # background worker and leave a healthy-looking process idle.
+            _ready.clear()
+            await asyncio.sleep(0.1)
+            if _connection and _connection.is_connected:
+                _ready.set()
+            continue
+        if messages:
             logger.debug(
-                "NATS event received",
-                extra={
-                    "topic": message.subject,
-                    "message_kind": "event",
-                    "message_id": message_id,
-                    "correlation_id": correlation_id,
-                })
-            try:
-                await handler(message)
-                await message.ack()
-            except Exception:
-                logger.exception(
-                    "Event processing failed",
-                    extra={
-                        "topic": message.subject,
-                        "message_id": message_id,
-                        "correlation_id": correlation_id,
-                    })
-                await message.nak(delay=1)
+                "NATS event batch received",
+                extra={"message_kind": "event", "batch_size": len(messages)},
+            )
+            await asyncio.gather(
+                *(_process_message(message, handler) for message in messages)
+            )
 
 
 async def _bootstrap_catalog(js):
@@ -213,7 +224,7 @@ async def _bootstrap_catalog(js):
             break
         try:
             messages = await subscription.fetch(batch=min(64, info.num_pending), timeout=1)
-        except (NatsTimeoutError, asyncio.TimeoutError):
+        except (NatsTimeoutError, asyncio.TimeoutError, ServiceUnavailableError):
             continue
         for message in messages:
             correlation_id, message_id = _message_context(message)

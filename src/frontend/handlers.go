@@ -15,6 +15,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"html/template"
@@ -203,6 +204,17 @@ func (fe *frontendServer) addToCartHandler(w http.ResponseWriter, r *http.Reques
 		renderHTTPError(log, r, w, errors.Wrap(err, "failed to queue cart update"), http.StatusServiceUnavailable)
 		return
 	}
+	if !acceptsHTML(r) {
+		// API clients already have a durable command and a status resource.
+		// Returning immediately avoids multiplying load with 25ms in-process
+		// polling when the projector is intentionally catching up.
+		writeAcceptedOperation(w, r, operationID, "cart.add-item", baseUrl+"/cart")
+		return
+	}
+	if err := fe.publishOperationAccepted(context.Background(), r.Context(), operationID, operationID,
+		"cart.add-item", sessionID(r), time.Now().UTC()); err != nil {
+		log.WithError(err).Warn("failed to publish optional accepted cart operation")
+	}
 	operation, err := fe.waitForCartOperation(r.Context(), operationID, sessionID(r))
 	if err != nil {
 		writeAcceptedOperation(w, r, operationID, "cart.add-item", baseUrl+"/cart")
@@ -238,6 +250,14 @@ func (fe *frontendServer) emptyCartHandler(w http.ResponseWriter, r *http.Reques
 		w.Header().Set("Retry-After", "1")
 		renderHTTPError(log, r, w, errors.Wrap(err, "failed to queue cart clear"), http.StatusServiceUnavailable)
 		return
+	}
+	if !acceptsHTML(r) {
+		writeAcceptedOperation(w, r, operationID, "cart.clear", baseUrl+"/")
+		return
+	}
+	if err := fe.publishOperationAccepted(context.Background(), r.Context(), operationID, operationID,
+		"cart.clear", sessionID(r), time.Now().UTC()); err != nil {
+		log.WithError(err).Warn("failed to publish optional accepted cart operation")
 	}
 	operation, err := fe.waitForCartOperation(r.Context(), operationID, sessionID(r))
 	if err != nil {
@@ -334,18 +354,6 @@ func (fe *frontendServer) placeOrderHandler(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	log = log.WithField("correlation_id", orderID)
-	existing, existingErr := fe.storefrontQuery(r.Context(), "order", storefrontQueryRequest{
-		OrderID: orderID, UserID: sessionID(r), CorrelationID: orderID,
-	})
-	if existingErr == nil && existing.Order != nil {
-		writeOrderResponse(w, r, http.StatusAccepted, existing.Order)
-		return
-	}
-	if existingErr != nil && !errors.Is(existingErr, errProjectionNotFound) {
-		w.Header().Set("Retry-After", "1")
-		renderStorefrontError(log, r, w, errors.Wrap(existingErr, "could not verify idempotent order status"))
-		return
-	}
 	view, err := fe.storefrontQuery(r.Context(), "cart", storefrontQueryRequest{
 		UserID: sessionID(r), CurrencyCode: currentCurrency(r), CorrelationID: orderID,
 	})
@@ -370,6 +378,12 @@ func (fe *frontendServer) placeOrderHandler(w http.ResponseWriter, r *http.Reque
 		w.Header().Set("Retry-After", "1")
 		renderHTTPError(log, r, w, errors.Wrap(err, "could not queue order"), http.StatusServiceUnavailable)
 		return
+	}
+	if acceptsHTML(r) {
+		if err := fe.publishOperationAccepted(context.Background(), r.Context(), orderID, orderID,
+			"order.submit", sessionID(r), time.Now().UTC()); err != nil {
+			log.WithError(err).Warn("failed to publish optional accepted order operation")
+		}
 	}
 	writeAcceptedOrder(w, r, orderID)
 }
@@ -545,7 +559,7 @@ func injectCommonTemplateData(r *http.Request, payload map[string]interface{}) m
 		"platform_name":     plat.provider,
 		"is_cymbal_brand":   isCymbalBrand,
 		"assistant_enabled": assistantEnabled,
-		"deploymentDetails": deploymentDetailsMap,
+		"deploymentDetails": currentDeploymentDetails(),
 		"frontendMessage":   frontendMessage,
 		"currentYear":       time.Now().Year(),
 		"baseUrl":           baseUrl,

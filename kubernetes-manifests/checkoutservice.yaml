@@ -104,6 +104,8 @@ spec:
             value: 30s
           - name: CHECKOUT_PROJECTION_CATCHUP_TIMEOUT
             value: 10m
+          - name: GOMEMLIMIT
+            value: "400MiB"
           envFrom:
           - configMapRef:
               name: nats-client-config
@@ -117,11 +119,11 @@ spec:
             mountPath: /var/lib/checkout
           resources:
             requests:
-              cpu: 100m
-              memory: 64Mi
-            limits:
-              cpu: 200m
+              cpu: 500m
               memory: 128Mi
+            limits:
+              cpu: "2"
+              memory: 512Mi
       volumes:
       - name: nats-ca
         configMap:

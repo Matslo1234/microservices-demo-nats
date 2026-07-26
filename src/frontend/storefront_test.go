@@ -151,12 +151,39 @@ func TestWriteAcceptedOrderKeepsJSONForAPIClient(t *testing.T) {
 	if contentType := response.Header.Get("Content-Type"); contentType != "application/json" {
 		t.Fatalf("got content type %q, want JSON", contentType)
 	}
+	if retryAfter := response.Header.Get("Retry-After"); retryAfter != orderPollRetryAfter {
+		t.Fatalf("got Retry-After %q, want %q", retryAfter, orderPollRetryAfter)
+	}
 	var order orderStatus
 	if err := json.NewDecoder(response.Body).Decode(&order); err != nil {
 		t.Fatal(err)
 	}
 	if order.OrderID != "order-2" || order.Status != "QUEUED" || order.UpdatedAt.IsZero() {
 		t.Fatalf("unexpected queued order: %+v", order)
+	}
+}
+
+func TestOrderNeedsPollingUntilOutcomeAndSettlementAreTerminal(t *testing.T) {
+	tests := []struct {
+		name  string
+		order *orderStatus
+		want  bool
+	}{
+		{name: "missing", want: true},
+		{name: "queued", order: &orderStatus{Status: "QUEUED"}, want: true},
+		{name: "processing", order: &orderStatus{Status: "PROCESSING"}, want: true},
+		{name: "cancelled", order: &orderStatus{Status: "CANCELLED"}, want: false},
+		{name: "completed but unsettled", order: &orderStatus{Status: "COMPLETED"}, want: true},
+		{name: "completed and settled", order: &orderStatus{
+			Status: "COMPLETED", NotificationStatus: "SENT", CartClearStatus: "SUCCEEDED",
+		}, want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := orderNeedsPolling(test.order); got != test.want {
+				t.Fatalf("orderNeedsPolling() = %t, want %t", got, test.want)
+			}
+		})
 	}
 }
 
