@@ -70,7 +70,7 @@ spec:
             memory: 32Mi
           limits:
             cpu: 100m
-            memory: 128Mi
+            memory: 2Gi
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:
@@ -152,7 +152,7 @@ spec:
               memory: 128Mi
             limits:
               cpu: "1"
-              memory: 512Mi
+              memory: 2Gi
       volumes:
       - name: nats-ca
         configMap:

@@ -62,7 +62,7 @@ spec:
             memory: 8Mi
           limits:
             cpu: 50m
-            memory: 32Mi
+            memory: 2Gi
       # The email worker does not retry its initial durable-consumer creation.
       # Gate it on the stream created by nats-bootstrap so a single-file/fresh
       # cluster deployment cannot strand the health server in NotReady.
@@ -102,7 +102,7 @@ spec:
             memory: 16Mi
           limits:
             cpu: 50m
-            memory: 64Mi
+            memory: 2Gi
       containers:
       - name: server
         securityContext:
@@ -152,7 +152,7 @@ spec:
             memory: 64Mi
           limits:
             cpu: 200m
-            memory: 128Mi
+            memory: 2Gi
       volumes:
       - name: nats-ca
         configMap:

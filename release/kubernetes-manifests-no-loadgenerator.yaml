@@ -79,7 +79,7 @@ spec:
             memory: 180Mi
           limits:
             cpu: 300m
-            memory: 300Mi
+            memory: 2Gi
         readinessProbe:
           initialDelaySeconds: 20
           periodSeconds: 15
@@ -163,7 +163,7 @@ spec:
             memory: 64Mi
           limits:
             cpu: 300m
-            memory: 128Mi
+            memory: 2Gi
         readinessProbe:
           initialDelaySeconds: 15
           httpGet:
@@ -230,7 +230,7 @@ spec:
             memory: 8Mi
           limits:
             cpu: 50m
-            memory: 32Mi
+            memory: 2Gi
       containers:
       - name: redis
         securityContext:
@@ -257,7 +257,7 @@ spec:
           name: redis-data
         resources:
           limits:
-            memory: 256Mi
+            memory: 2Gi
             cpu: 125m
           requests:
             cpu: 70m
@@ -345,7 +345,7 @@ spec:
               memory: 8Mi
             limits:
               cpu: 50m
-              memory: 32Mi
+              memory: 2Gi
       containers:
         - name: server
           securityContext:
@@ -403,7 +403,7 @@ spec:
               memory: 64Mi
             limits:
               cpu: 200m
-              memory: 128Mi
+              memory: 2Gi
       volumes:
       - name: nats-ca
         configMap:
@@ -496,7 +496,7 @@ spec:
             memory: 64Mi
           limits:
             cpu: 200m
-            memory: 128Mi
+            memory: 2Gi
       volumes:
       - name: nats-ca
         configMap:
@@ -557,7 +557,7 @@ spec:
             memory: 8Mi
           limits:
             cpu: 50m
-            memory: 32Mi
+            memory: 2Gi
       containers:
       - name: server
         securityContext:
@@ -607,7 +607,7 @@ spec:
             memory: 64Mi
           limits:
             cpu: 200m
-            memory: 128Mi
+            memory: 2Gi
       volumes:
       - name: nats-ca
         configMap:
@@ -689,7 +689,7 @@ spec:
             memory: 32Mi
           limits:
             cpu: 100m
-            memory: 128Mi
+            memory: 2Gi
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:
@@ -765,7 +765,7 @@ spec:
               memory: 64Mi
             limits:
               cpu: 200m
-              memory: 128Mi
+              memory: 2Gi
       volumes:
       - name: nats-ca
         configMap:
@@ -999,7 +999,7 @@ spec:
             memory: 8Mi
           limits:
             cpu: 50m
-            memory: 32Mi
+            memory: 2Gi
       containers:
       - name: server
         securityContext:
@@ -1049,7 +1049,7 @@ spec:
             memory: 64Mi
           limits:
             cpu: 200m
-            memory: 128Mi
+            memory: 2Gi
       volumes:
       - name: nats-ca
         configMap:
@@ -1142,7 +1142,7 @@ spec:
             memory: 64Mi
           limits:
             cpu: 200m
-            memory: 128Mi
+            memory: 2Gi
       volumes:
       - name: nats-ca
         configMap:
@@ -1226,7 +1226,7 @@ spec:
             memory: 220Mi
           limits:
             cpu: 200m
-            memory: 450Mi
+            memory: 2Gi
       volumes:
       - name: nats-ca
         configMap:
@@ -1287,7 +1287,7 @@ spec:
             memory: 8Mi
           limits:
             cpu: 50m
-            memory: 32Mi
+            memory: 2Gi
       containers:
       - name: server
         securityContext:
@@ -1338,7 +1338,7 @@ spec:
             memory: 64Mi
           limits:
             cpu: 200m
-            memory: 128Mi
+            memory: 2Gi
       volumes:
       - name: nats-ca
         configMap:
@@ -1430,7 +1430,7 @@ spec:
             memory: 64Mi
           limits:
             cpu: 300m
-            memory: 256Mi
+            memory: 2Gi
       volumes:
       - name: nats-ca
         configMap:

@@ -104,7 +104,7 @@ spec:
               memory: 64Mi
             limits:
               cpu: 200m
-              memory: 128Mi
+              memory: 2Gi
 ---
 apiVersion: v1
 kind: Service
@@ -184,7 +184,7 @@ spec:
             memory: 180Mi
           limits:
             cpu: 300m
-            memory: 300Mi
+            memory: 2Gi
         readinessProbe:
           initialDelaySeconds: 20
           periodSeconds: 15
@@ -268,7 +268,7 @@ spec:
             memory: 64Mi
           limits:
             cpu: 200m
-            memory: 128Mi
+            memory: 2Gi
 ---
 apiVersion: v1
 kind: Service
@@ -333,7 +333,7 @@ spec:
             memory: 64Mi
           limits:
             cpu: 300m
-            memory: 128Mi
+            memory: 2Gi
         readinessProbe:
           initialDelaySeconds: 15
           grpc:
@@ -409,7 +409,7 @@ spec:
           name: redis-data
         resources:
           limits:
-            memory: 256Mi
+            memory: 2Gi
             cpu: 125m
           requests:
             cpu: 70m
@@ -488,7 +488,7 @@ spec:
             memory: 220Mi
           limits:
             cpu: 200m
-            memory: 450Mi
+            memory: 2Gi
 ---
 apiVersion: v1
 kind: Service
@@ -570,7 +570,7 @@ spec:
               memory: 64Mi
             limits:
               cpu: 200m
-              memory: 128Mi
+              memory: 2Gi
 ---
 apiVersion: v1
 kind: Service
@@ -645,7 +645,7 @@ spec:
             memory: 64Mi
           limits:
             cpu: 200m
-            memory: 128Mi
+            memory: 2Gi
 ---
 apiVersion: v1
 kind: Service
@@ -718,7 +718,7 @@ spec:
             memory: 64Mi
           limits:
             cpu: 200m
-            memory: 128Mi
+            memory: 2Gi
 ---
 apiVersion: v1
 kind: Service
@@ -791,7 +791,7 @@ spec:
             memory: 64Mi
           limits:
             cpu: 200m
-            memory: 128Mi
+            memory: 2Gi
 ---
 apiVersion: v1
 kind: Service
@@ -864,7 +864,7 @@ spec:
             memory: 64Mi
           limits:
             cpu: 200m
-            memory: 128Mi
+            memory: 2Gi
 ---
 apiVersion: v1
 kind: Service
@@ -946,7 +946,7 @@ spec:
             memory: 256Mi
           limits:
             cpu: "2"
-            memory: 1Gi
+            memory: 2Gi
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:

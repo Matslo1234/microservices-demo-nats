@@ -1107,7 +1107,7 @@ spec:
         resources:
           limits:
             cpu: 100m
-            memory: 128Mi
+            memory: 2Gi
           requests:
             cpu: 20m
             memory: 32Mi
@@ -1191,7 +1191,7 @@ spec:
         resources:
           limits:
             cpu: 300m
-            memory: 300Mi
+            memory: 2Gi
           requests:
             cpu: 200m
             memory: 180Mi
@@ -1266,7 +1266,7 @@ spec:
         resources:
           limits:
             cpu: "2"
-            memory: 1Gi
+            memory: 2Gi
           requests:
             cpu: 500m
             memory: 256Mi
@@ -1354,7 +1354,7 @@ spec:
         resources:
           limits:
             cpu: "2"
-            memory: 512Mi
+            memory: 2Gi
           requests:
             cpu: 500m
             memory: 128Mi
@@ -1439,7 +1439,7 @@ spec:
         resources:
           limits:
             cpu: "2"
-            memory: 512Mi
+            memory: 2Gi
           requests:
             cpu: 500m
             memory: 128Mi
@@ -1472,7 +1472,7 @@ spec:
         resources:
           limits:
             cpu: 50m
-            memory: 32Mi
+            memory: 2Gi
           requests:
             cpu: 5m
             memory: 8Mi
@@ -1552,7 +1552,7 @@ spec:
         resources:
           limits:
             cpu: 200m
-            memory: 128Mi
+            memory: 2Gi
           requests:
             cpu: 100m
             memory: 64Mi
@@ -1633,7 +1633,7 @@ spec:
         resources:
           limits:
             cpu: 200m
-            memory: 128Mi
+            memory: 2Gi
           requests:
             cpu: 100m
             memory: 64Mi
@@ -1660,7 +1660,7 @@ spec:
         resources:
           limits:
             cpu: 50m
-            memory: 32Mi
+            memory: 2Gi
           requests:
             cpu: 5m
             memory: 8Mi
@@ -1701,7 +1701,7 @@ spec:
         resources:
           limits:
             cpu: 50m
-            memory: 64Mi
+            memory: 2Gi
           requests:
             cpu: 5m
             memory: 16Mi
@@ -1797,7 +1797,7 @@ spec:
         resources:
           limits:
             cpu: "1"
-            memory: 512Mi
+            memory: 2Gi
           requests:
             cpu: 200m
             memory: 128Mi
@@ -1840,7 +1840,7 @@ spec:
         resources:
           limits:
             cpu: 100m
-            memory: 128Mi
+            memory: 2Gi
           requests:
             cpu: 20m
             memory: 32Mi
@@ -1925,7 +1925,7 @@ spec:
         resources:
           limits:
             cpu: "2"
-            memory: 512Mi
+            memory: 2Gi
           requests:
             cpu: 500m
             memory: 128Mi
@@ -1952,7 +1952,7 @@ spec:
         resources:
           limits:
             cpu: 50m
-            memory: 32Mi
+            memory: 2Gi
           requests:
             cpu: 5m
             memory: 8Mi
@@ -2032,7 +2032,7 @@ spec:
         resources:
           limits:
             cpu: 200m
-            memory: 128Mi
+            memory: 2Gi
           requests:
             cpu: 100m
             memory: 64Mi
@@ -2114,7 +2114,7 @@ spec:
         resources:
           limits:
             cpu: "2"
-            memory: 1Gi
+            memory: 2Gi
           requests:
             cpu: 500m
             memory: 256Mi
@@ -2184,7 +2184,7 @@ spec:
         resources:
           limits:
             cpu: 125m
-            memory: 256Mi
+            memory: 2Gi
           requests:
             cpu: 70m
             memory: 200Mi
@@ -2208,7 +2208,7 @@ spec:
         resources:
           limits:
             cpu: 50m
-            memory: 32Mi
+            memory: 2Gi
           requests:
             cpu: 5m
             memory: 8Mi
@@ -2295,7 +2295,7 @@ spec:
         resources:
           limits:
             cpu: "2"
-            memory: 512Mi
+            memory: 2Gi
           requests:
             cpu: 500m
             memory: 128Mi
@@ -2322,7 +2322,7 @@ spec:
         resources:
           limits:
             cpu: 50m
-            memory: 32Mi
+            memory: 2Gi
           requests:
             cpu: 5m
             memory: 8Mi
@@ -2410,7 +2410,7 @@ spec:
         resources:
           limits:
             cpu: "2"
-            memory: 512Mi
+            memory: 2Gi
           requests:
             cpu: 500m
             memory: 128Mi

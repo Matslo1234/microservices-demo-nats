@@ -62,7 +62,7 @@ spec:
             memory: 8Mi
           limits:
             cpu: 50m
-            memory: 32Mi
+            memory: 2Gi
       containers:
       - name: server
         securityContext:
@@ -118,7 +118,7 @@ spec:
             memory: 128Mi
           limits:
             cpu: "2"
-            memory: 512Mi
+            memory: 2Gi
       volumes:
       - name: nats-ca
         configMap:

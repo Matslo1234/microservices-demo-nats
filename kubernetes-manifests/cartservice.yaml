@@ -73,7 +73,7 @@ spec:
             memory: 128Mi
           limits:
             cpu: "2"
-            memory: 512Mi
+            memory: 2Gi
         readinessProbe:
           initialDelaySeconds: 5
           periodSeconds: 5
@@ -145,7 +145,7 @@ spec:
             memory: 8Mi
           limits:
             cpu: 50m
-            memory: 32Mi
+            memory: 2Gi
       containers:
       - name: redis
         securityContext:
@@ -172,7 +172,7 @@ spec:
           name: redis-data
         resources:
           limits:
-            memory: 256Mi
+            memory: 2Gi
             cpu: 125m
           requests:
             cpu: 70m
