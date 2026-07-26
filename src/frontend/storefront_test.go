@@ -61,6 +61,22 @@ func TestCartOperationIDUsesRequestIDWithoutKey(t *testing.T) {
 	}
 }
 
+func TestSessionCookieIsPortableAcrossReplicasAndRejectsTampering(t *testing.T) {
+	t.Setenv("NATS_PASSWORD", "replica-shared-secret")
+	sessionID := "12345678-1234-1234-1234-123456789123"
+	signedByReplicaA := signSessionCookie(sessionID)
+
+	verifiedByReplicaB, err := verifySessionCookie(signedByReplicaA)
+	if err != nil || verifiedByReplicaB != sessionID {
+		t.Fatalf("replica B could not verify replica A cookie: session=%q error=%v",
+			verifiedByReplicaB, err)
+	}
+	tampered := strings.Replace(signedByReplicaA, "12345678", "87654321", 1)
+	if _, err := verifySessionCookie(tampered); err == nil {
+		t.Fatal("tampered session identity was accepted")
+	}
+}
+
 func TestWriteAcceptedOperationRendersHTMLForBrowser(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, "/cart", nil)
 	request.Header.Set("Accept", "text/html,application/xhtml+xml")

@@ -27,7 +27,17 @@ const (
 	CurrencyKey = "currency"
 )
 
+// ProjectionMetadata identifies the event which most recently changed a
+// materialized record. SourceVersion is the aggregate-local ordering value,
+// while the JetStream KV revision is returned separately by query handlers.
+type ProjectionMetadata struct {
+	SourceEventID   string   `json:"source_event_id"`
+	SourceVersion   uint64   `json:"source_version"`
+	AppliedEventIDs []string `json:"applied_event_ids,omitempty"`
+}
+
 type ProductView struct {
+	ProjectionMetadata
 	Product         *commonv1.ProductSnapshot `json:"product"`
 	CatalogRevision uint64                    `json:"catalog_revision"`
 	Removed         bool                      `json:"removed,omitempty"`
@@ -35,6 +45,7 @@ type ProductView struct {
 }
 
 type CatalogView struct {
+	ProjectionMetadata
 	CatalogRevision uint64    `json:"catalog_revision"`
 	ProductCount    uint32    `json:"product_count"`
 	Checksum        string    `json:"checksum"`
@@ -47,6 +58,7 @@ type Rate struct {
 }
 
 type CurrencyView struct {
+	ProjectionMetadata
 	BaseCurrencyCode string    `json:"base_currency_code"`
 	Rates            []Rate    `json:"rates"`
 	EffectiveSeconds int64     `json:"effective_seconds"`
@@ -56,11 +68,13 @@ type CurrencyView struct {
 }
 
 type CartView struct {
+	ProjectionMetadata
 	Cart      *commonv1.CartSnapshot `json:"cart"`
 	UpdatedAt time.Time              `json:"updated_at"`
 }
 
 type RecommendationView struct {
+	ProjectionMetadata
 	SessionID      string    `json:"session_id"`
 	ContextVersion uint64    `json:"context_version"`
 	ProductIDs     []string  `json:"product_ids,omitempty"`
@@ -75,6 +89,7 @@ type Ad struct {
 }
 
 type AdView struct {
+	ProjectionMetadata
 	SessionID      string    `json:"session_id"`
 	PageType       string    `json:"page_type"`
 	ContextVersion uint64    `json:"context_version"`
@@ -85,6 +100,7 @@ type AdView struct {
 }
 
 type CartQuoteView struct {
+	ProjectionMetadata
 	UserID      string          `json:"user_id"`
 	CartVersion uint64          `json:"cart_version"`
 	CostUSD     *commonv1.Money `json:"cost_usd,omitempty"`
@@ -94,6 +110,7 @@ type CartQuoteView struct {
 }
 
 type OperationView struct {
+	ProjectionMetadata
 	OperationID string    `json:"operation_id"`
 	CommandID   string    `json:"command_id"`
 	Kind        string    `json:"kind"`
@@ -107,6 +124,7 @@ type OperationView struct {
 }
 
 type OrderView struct {
+	ProjectionMetadata
 	OrderID              string                           `json:"order_id"`
 	UserID               string                           `json:"user_id"`
 	Status               string                           `json:"status"`

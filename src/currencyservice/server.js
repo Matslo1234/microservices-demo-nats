@@ -65,27 +65,39 @@ function healthHandler (request, response) {
 
 async function main () {
   const currencyData = require('./data/currency_conversion.json');
-  natsConnection = await connectAndPublish(currencyData, logger);
-  if (natsConnection) {
-    natsReady = true;
-    (async () => {
-      for await (const status of natsConnection.status()) {
-        if (status.type === 'disconnect' || status.type === 'error') {
-          natsReady = false;
-          logger.warn({ type: status.type, data: status.data }, 'NATS connection is not ready');
-        } else if (status.type === 'reconnect') {
-          natsReady = true;
-          logger.info('NATS connection restored');
-        }
-      }
-    })().catch(err => {
-      natsReady = false;
-      logger.error({ err }, 'NATS status monitor failed');
-    });
-  }
   const port = Number(process.env.PORT || 8080);
   healthServer = http.createServer(healthHandler);
   healthServer.listen(port, '0.0.0.0', () => logger.info({ port }, 'currency health server started'));
+
+  // Keep liveness available while the initial broker, stream, or claim bucket
+  // is unavailable. waitOnFirstConnect and this retry loop make startup a
+  // readiness condition instead of a process-crash loop.
+  const natsRequired = process.env.NATS_REQUIRED === 'true';
+  while (natsRequired && !natsConnection) {
+    try {
+      natsConnection = await connectAndPublish(currencyData, logger);
+    } catch (err) {
+      natsReady = false;
+      logger.warn({ err }, 'currency NATS bootstrap is unavailable; retrying');
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+  }
+  if (!natsRequired) return;
+  natsReady = true;
+  (async () => {
+    for await (const status of natsConnection.status()) {
+      if (status.type === 'disconnect' || status.type === 'error') {
+        natsReady = false;
+        logger.warn({ type: status.type, data: status.data }, 'NATS connection is not ready');
+      } else if (status.type === 'reconnect') {
+        natsReady = true;
+        logger.info('NATS connection restored');
+      }
+    }
+  })().catch(err => {
+    natsReady = false;
+    logger.error({ err }, 'NATS status monitor failed');
+  });
 }
 
 async function shutdown () {

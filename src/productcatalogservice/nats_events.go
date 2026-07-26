@@ -19,6 +19,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -28,6 +29,7 @@ import (
 	commonv1 "github.com/GoogleCloudPlatform/microservices-demo/protos/common/v1"
 	eventsv1 "github.com/GoogleCloudPlatform/microservices-demo/protos/events/v1"
 	pb "github.com/GoogleCloudPlatform/microservices-demo/src/productcatalogservice/genproto"
+	stateless "github.com/GoogleCloudPlatform/microservices-demo/src/shared/stateless/go"
 	"github.com/nats-io/nats.go"
 	"github.com/sirupsen/logrus"
 	"google.golang.org/protobuf/proto"
@@ -46,6 +48,9 @@ type catalogEventPublisher struct {
 	nc             *nats.Conn
 	js             nats.JetStreamContext
 	publishTimeout time.Duration
+	claims         *stateless.KVLeaseStore
+	workerID       string
+	claimDuration  time.Duration
 }
 
 type catalogIdentity struct {
@@ -96,6 +101,10 @@ func connectCatalogPublisher() (*catalogEventPublisher, error) {
 	if err != nil {
 		return nil, err
 	}
+	claimDuration, err := durationFromEnv("BOOTSTRAP_CLAIM_TTL", 30*time.Second)
+	if err != nil {
+		return nil, err
+	}
 	maxReconnects := -1
 	if value := os.Getenv("NATS_MAX_RECONNECTS"); value != "" {
 		maxReconnects, err = strconv.Atoi(value)
@@ -139,7 +148,30 @@ func connectCatalogPublisher() (*catalogEventPublisher, error) {
 		nc.Close()
 		return nil, fmt.Errorf("create JetStream context: %w", err)
 	}
-	return &catalogEventPublisher{nc: nc, js: js, publishTimeout: publishTimeout}, nil
+	claimBucket, err := js.KeyValue("BOOTSTRAP_CLAIMS")
+	if err != nil {
+		nc.Close()
+		return nil, fmt.Errorf("open bootstrap claim KV: %w", err)
+	}
+	revisionBucket, err := stateless.NewNATSRevisionBucket(claimBucket)
+	if err != nil {
+		nc.Close()
+		return nil, err
+	}
+	claims, err := stateless.NewKVLeaseStore(revisionBucket, "bootstrap.catalog")
+	if err != nil {
+		nc.Close()
+		return nil, err
+	}
+	workerID := os.Getenv("HOSTNAME")
+	if workerID == "" {
+		workerID = "productcatalogservice"
+	}
+	workerID += ":" + nats.NewInbox()
+	return &catalogEventPublisher{
+		nc: nc, js: js, publishTimeout: publishTimeout, claims: claims,
+		workerID: workerID, claimDuration: claimDuration,
+	}, nil
 }
 
 func identifyCatalog(products []*pb.Product) (*catalogIdentity, error) {
@@ -248,6 +280,26 @@ func (p *catalogEventPublisher) publishBootstrap(products []*pb.Product) error {
 	if err != nil {
 		return err
 	}
+	workID := "catalog:" + strconv.FormatUint(identity.revision, 10)
+	var lease stateless.Lease
+	for {
+		lease, err = p.claims.Acquire(workID, p.workerID, time.Now().UTC(), p.claimDuration)
+		switch {
+		case err == nil:
+			log.WithFields(logrus.Fields{
+				"claim": workID, "claim_attempt": lease.Attempts,
+			}).Info("catalog bootstrap claim acquired")
+		case errors.Is(err, stateless.ErrLeaseComplete):
+			log.WithField("claim", workID).Info("catalog bootstrap already complete")
+			return nil
+		case errors.Is(err, stateless.ErrLeaseHeld):
+			time.Sleep(250 * time.Millisecond)
+			continue
+		default:
+			return fmt.Errorf("acquire catalog bootstrap claim: %w", err)
+		}
+		break
+	}
 	occurredAt := timestamppb.Now()
 	revisionText := strconv.FormatUint(identity.revision, 10)
 	correlationID := deterministicMessageID("catalog-bootstrap", revisionText)
@@ -273,6 +325,10 @@ func (p *catalogEventPublisher) publishBootstrap(products []*pb.Product) error {
 			Data:             packed,
 		}
 		if err := p.publish(catalogProductSubject, envelope); err != nil {
+			return err
+		}
+		lease, err = p.renewBootstrapClaim(lease)
+		if err != nil {
 			return err
 		}
 	}
@@ -301,7 +357,23 @@ func (p *catalogEventPublisher) publishBootstrap(products []*pb.Product) error {
 	if err := p.publish(catalogSnapshotSubject, envelope); err != nil {
 		return err
 	}
+	if err := p.claims.Complete(lease, time.Now().UTC()); err != nil {
+		return fmt.Errorf("complete catalog bootstrap claim: %w", err)
+	}
+	log.WithField("claim", workID).Info("catalog bootstrap completed")
 	return nil
+}
+
+func (p *catalogEventPublisher) renewBootstrapClaim(lease stateless.Lease) (stateless.Lease, error) {
+	now := time.Now().UTC()
+	if lease.LeaseUntil.Sub(now) > p.claimDuration/2 {
+		return lease, nil
+	}
+	renewed, err := p.claims.Renew(lease, now, p.claimDuration)
+	if err != nil {
+		return stateless.Lease{}, fmt.Errorf("renew catalog bootstrap claim: %w", err)
+	}
+	return renewed, nil
 }
 
 func correlationID(value string) string {

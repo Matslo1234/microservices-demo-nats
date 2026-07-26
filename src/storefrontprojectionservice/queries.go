@@ -57,6 +57,7 @@ type queryResponse struct {
 	CartVersion     uint64                    `json:"cart_version"`
 	CatalogRevision uint64                    `json:"catalog_revision"`
 	RateRevision    uint64                    `json:"rate_revision"`
+	QueryRevision   uint64                    `json:"query_revision"`
 	UpdatedAt       time.Time                 `json:"updated_at"`
 	Stale           []string                  `json:"stale,omitempty"`
 	Operation       *storefront.OperationView `json:"operation,omitempty"`
@@ -144,23 +145,15 @@ func (p *projector) orderQuery(request queryRequest) (queryResponse, error) {
 		return queryResponse{}, nats.ErrKeyNotFound
 	}
 	key := storefront.OrderKey(request.OrderID)
-	order, ok := p.cachedOrder(key)
-	var err error
-	if !ok {
-		order, err = getJSON[storefront.OrderView](p.orders, key)
-		if err == nil {
-			cached, _ := p.orderViews.LoadOrStore(key, *order)
-			value := cached.(storefront.OrderView)
-			order = &value
-		}
-	}
+	order, revision, err := getJSONWithRevision[storefront.OrderView](p.orders, key)
 	if err != nil || order.UserID != request.UserID {
 		if err == nil {
 			err = nats.ErrKeyNotFound
 		}
 		return queryResponse{}, err
 	}
-	return queryResponse{Order: order, UpdatedAt: order.UpdatedAt}, nil
+	p.observeQueryRevision(revision)
+	return queryResponse{Order: order, UpdatedAt: order.UpdatedAt, QueryRevision: revision}, nil
 }
 
 func (p *projector) operationQuery(request queryRequest) (queryResponse, error) {
@@ -168,23 +161,15 @@ func (p *projector) operationQuery(request queryRequest) (queryResponse, error) 
 		return queryResponse{}, nats.ErrKeyNotFound
 	}
 	key := storefront.OperationKey(request.OperationID)
-	operation, ok := p.cachedOperation(key)
-	var err error
-	if !ok {
-		operation, err = getJSON[storefront.OperationView](p.operations, key)
-		if err == nil {
-			cached, _ := p.operationViews.LoadOrStore(key, *operation)
-			value := cached.(storefront.OperationView)
-			operation = &value
-		}
-	}
+	operation, revision, err := getJSONWithRevision[storefront.OperationView](p.operations, key)
 	if err != nil || operation.UserID != request.UserID {
 		if err == nil {
 			err = nats.ErrKeyNotFound
 		}
 		return queryResponse{}, err
 	}
-	return queryResponse{Operation: operation, UpdatedAt: operation.UpdatedAt}, nil
+	p.observeQueryRevision(revision)
+	return queryResponse{Operation: operation, UpdatedAt: operation.UpdatedAt, QueryRevision: revision}, nil
 }
 
 func (p *projector) homeQuery(request queryRequest) (queryResponse, error) {
@@ -220,13 +205,14 @@ func (p *projector) homeQuery(request queryRequest) (queryResponse, error) {
 }
 
 func (p *projector) productQuery(request queryRequest) (queryResponse, error) {
-	product, err := getJSON[storefront.ProductView](p.products, storefront.ProductKey(request.ProductID))
+	product, productRevision, err := getJSONWithRevision[storefront.ProductView](p.products, storefront.ProductKey(request.ProductID))
 	if err != nil || product.Removed {
 		if err == nil {
 			err = nats.ErrKeyNotFound
 		}
 		return queryResponse{}, err
 	}
+	p.observeQueryRevision(productRevision)
 	rates, err := p.currencyView(request.CurrencyCode)
 	if err != nil {
 		return queryResponse{}, err
@@ -264,13 +250,14 @@ func (p *projector) cartQuery(request queryRequest) (queryResponse, error) {
 		RateRevision: rates.RateRevision, UpdatedAt: latest(rates.UpdatedAt, cart.UpdatedAt),
 	}
 	for _, line := range cart.Cart.GetItems() {
-		product, err := getJSON[storefront.ProductView](p.products, storefront.ProductKey(line.ProductId))
+		product, productRevision, err := getJSONWithRevision[storefront.ProductView](p.products, storefront.ProductKey(line.ProductId))
 		if err != nil {
 			return queryResponse{}, fmt.Errorf("cart product %s is unavailable: %w", line.ProductId, err)
 		}
 		if product.Removed {
 			return queryResponse{}, fmt.Errorf("cart product %s is unavailable", line.ProductId)
 		}
+		p.observeQueryRevision(productRevision)
 		localized, err := localizeProduct(product.Product, rates, request.CurrencyCode)
 		if err != nil {
 			return queryResponse{}, err
@@ -286,12 +273,13 @@ func (p *projector) cartQuery(request queryRequest) (queryResponse, error) {
 		response.ShippingCost = &hipstershop.Money{CurrencyCode: request.CurrencyCode}
 		return response, nil
 	}
-	quote, err := getJSON[storefront.CartQuoteView](p.context, storefront.CartQuoteKey(request.UserID))
+	quote, quoteRevision, err := getJSONWithRevision[storefront.CartQuoteView](p.context, storefront.CartQuoteKey(request.UserID))
 	if err != nil || quote.CartVersion != response.CartVersion || quote.CostUSD == nil || quote.FailureCode != "" || expired(quote.ExpiresAt) {
 		response.ShippingPending = true
 		response.Stale = append(response.Stale, "shipping_quote")
 		return response, nil
 	}
+	p.observeQueryRevision(quoteRevision)
 	converted := rates.Convert(quote.CostUSD, request.CurrencyCode)
 	if converted == nil {
 		return queryResponse{}, errInvalidCurrency
@@ -329,10 +317,11 @@ func (p *projector) productMetaQuery(request queryRequest) (queryResponse, error
 }
 
 func (p *projector) currencyView(currencyCode string) (*storefront.CurrencyView, error) {
-	rates, err := getJSON[storefront.CurrencyView](p.products, storefront.CurrencyKey)
+	rates, revision, err := getJSONWithRevision[storefront.CurrencyView](p.products, storefront.CurrencyKey)
 	if err != nil {
 		return nil, err
 	}
+	p.observeQueryRevision(revision)
 	if currencyCode == "" {
 		currencyCode = "USD"
 	}
@@ -348,34 +337,32 @@ func (p *projector) cartView(userID string) (*storefront.CartView, error) {
 	if userID == "" {
 		return &storefront.CartView{Cart: &commonv1.CartSnapshot{}}, nil
 	}
-	if cart, ok := p.cachedCart(userID); ok {
-		return cart, nil
-	}
-	cart, err := getJSON[storefront.CartView](p.carts, userID)
+	cart, revision, err := getJSONWithRevision[storefront.CartView](p.carts, userID)
 	if errors.Is(err, nats.ErrKeyNotFound) {
 		return &storefront.CartView{Cart: &commonv1.CartSnapshot{UserId: userID}}, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	p.storeCartView(userID, *cart)
-	cached, _ := p.cachedCart(userID)
-	return cached, nil
+	p.observeQueryRevision(revision)
+	return cart, nil
 }
 
 func (p *projector) currentRecommendations(sessionID, excludedProductID string, stale *[]string) []*hipstershop.Product {
-	view, err := getJSON[storefront.RecommendationView](p.context, storefront.RecommendationKey(sessionID))
+	view, revision, err := getJSONWithRevision[storefront.RecommendationView](p.context, storefront.RecommendationKey(sessionID))
 	if err != nil || view.FailureCode != "" || expired(view.ExpiresAt) {
 		*stale = append(*stale, "recommendations")
 		return nil
 	}
+	p.observeQueryRevision(revision)
 	var products []*hipstershop.Product
 	for _, id := range view.ProductIDs {
 		if id == excludedProductID {
 			continue
 		}
-		product, err := getJSON[storefront.ProductView](p.products, storefront.ProductKey(id))
+		product, revision, err := getJSONWithRevision[storefront.ProductView](p.products, storefront.ProductKey(id))
 		if err == nil && !product.Removed {
+			p.observeQueryRevision(revision)
 			products = append(products, legacyProduct(product.Product))
 		}
 		if len(products) == 4 {
@@ -386,11 +373,12 @@ func (p *projector) currentRecommendations(sessionID, excludedProductID string, 
 }
 
 func (p *projector) currentAd(sessionID string, stale *[]string) *hipstershop.Ad {
-	view, err := getJSON[storefront.AdView](p.context, storefront.AdKey(sessionID))
+	view, revision, err := getJSONWithRevision[storefront.AdView](p.context, storefront.AdKey(sessionID))
 	if err != nil || view.FailureCode != "" || expired(view.ExpiresAt) || len(view.Ads) == 0 {
 		*stale = append(*stale, "ad")
 		return nil
 	}
+	p.observeQueryRevision(revision)
 	return &hipstershop.Ad{RedirectUrl: view.Ads[0].RedirectURL, Text: view.Ads[0].Text}
 }
 
@@ -479,13 +467,14 @@ func (p *projector) allProducts(only []string) ([]storefront.ProductView, error)
 		if len(wanted) > 0 && !wanted[id] {
 			continue
 		}
-		product, err := getJSON[storefront.ProductView](p.products, key)
+		product, revision, err := getJSONWithRevision[storefront.ProductView](p.products, key)
 		if errors.Is(err, nats.ErrKeyNotFound) {
 			continue
 		}
 		if err != nil {
 			return nil, err
 		}
+		p.observeQueryRevision(revision)
 		if !product.Removed {
 			products = append(products, *product)
 		}
@@ -494,14 +483,19 @@ func (p *projector) allProducts(only []string) ([]storefront.ProductView, error)
 	return products, nil
 }
 
-func getJSON[T any](bucket nats.KeyValue, key string) (*T, error) {
+func getJSON[T any](bucket projectionKV, key string) (*T, error) {
+	value, _, err := getJSONWithRevision[T](bucket, key)
+	return value, err
+}
+
+func getJSONWithRevision[T any](bucket projectionKV, key string) (*T, uint64, error) {
 	entry, err := bucket.Get(key)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	var value T
 	if err := json.Unmarshal(entry.Value(), &value); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	return &value, nil
+	return &value, entry.Revision(), nil
 }

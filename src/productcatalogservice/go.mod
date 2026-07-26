@@ -9,6 +9,7 @@ require (
 	cloud.google.com/go/profiler v0.6.0
 	cloud.google.com/go/secretmanager v1.20.0
 	github.com/GoogleCloudPlatform/microservices-demo/protos v0.0.0
+	github.com/GoogleCloudPlatform/microservices-demo/src/shared/stateless/go v0.0.0
 	github.com/golang/protobuf v1.5.4
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/nats-io/nats.go v1.52.0
@@ -20,6 +21,8 @@ require (
 )
 
 replace github.com/GoogleCloudPlatform/microservices-demo/protos => ../../protos
+
+replace github.com/GoogleCloudPlatform/microservices-demo/src/shared/stateless/go => ../shared/stateless/go
 
 require (
 	cloud.google.com/go v0.123.0 // indirect
@@ -50,6 +53,7 @@ require (
 	github.com/klauspost/compress v1.18.5 // indirect
 	github.com/nats-io/nkeys v0.4.15 // indirect
 	github.com/nats-io/nuid v1.0.1 // indirect
+	github.com/redis/go-redis/v9 v9.21.0 // indirect
 	go.opencensus.io v0.24.0 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.69.0 // indirect
@@ -59,6 +63,7 @@ require (
 	go.opentelemetry.io/otel/sdk/metric v1.44.0 // indirect
 	go.opentelemetry.io/otel/trace v1.44.0 // indirect
 	go.opentelemetry.io/proto/otlp v1.10.0 // indirect
+	go.uber.org/atomic v1.11.0 // indirect
 	golang.org/x/crypto v0.52.0 // indirect
 	golang.org/x/net v0.55.0 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect

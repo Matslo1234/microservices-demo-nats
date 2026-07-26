@@ -108,38 +108,49 @@ func TestTerminalOrderOutcomeAtOnlyTimestampsTerminalStates(t *testing.T) {
 	}
 }
 
-func TestStatusQueriesUseLatestLocalDurableView(t *testing.T) {
-	projector := &projector{}
+func TestStatusQueriesReadLatestAuthoritativeKVView(t *testing.T) {
+	orders := newMemoryKV()
+	operations := newMemoryKV()
+	projector := &projector{orders: orders, operations: operations}
 	orderKey := storefront.OrderKey("order-1")
-	projector.orderViews.Store(orderKey, storefront.OrderView{
+	storeJSON(t, orders, orderKey, storefront.OrderView{
+		OrderID: "order-1", UserID: "user-1", Status: "PROCESSING",
+	})
+	orderRevision := storeJSON(t, orders, orderKey, storefront.OrderView{
 		OrderID: "order-1", UserID: "user-1", Status: "COMPLETED",
 	})
 	order, err := projector.orderQuery(queryRequest{OrderID: "order-1", UserID: "user-1"})
-	if err != nil || order.Order == nil || order.Order.Status != "COMPLETED" {
-		t.Fatalf("order query did not use the local durable view: response=%#v error=%v", order, err)
+	if err != nil || order.Order == nil || order.Order.Status != "COMPLETED" ||
+		order.QueryRevision != orderRevision {
+		t.Fatalf("order query did not use authoritative KV: response=%#v error=%v", order, err)
 	}
 
 	operationKey := storefront.OperationKey("operation-1")
-	projector.operationViews.Store(operationKey, storefront.OperationView{
+	storeJSON(t, operations, operationKey, storefront.OperationView{
+		OperationID: "operation-1", CommandID: "operation-1", UserID: "user-1", Status: "QUEUED",
+	})
+	operationRevision := storeJSON(t, operations, operationKey, storefront.OperationView{
 		OperationID: "operation-1", CommandID: "operation-1", UserID: "user-1", Status: "SUCCEEDED",
 	})
 	operation, err := projector.operationQuery(queryRequest{OperationID: "operation-1", UserID: "user-1"})
-	if err != nil || operation.Operation == nil || operation.Operation.Status != "SUCCEEDED" {
-		t.Fatalf("operation query did not use the local durable view: response=%#v error=%v", operation, err)
+	if err != nil || operation.Operation == nil || operation.Operation.Status != "SUCCEEDED" ||
+		operation.QueryRevision != operationRevision {
+		t.Fatalf("operation query did not use authoritative KV: response=%#v error=%v", operation, err)
 	}
 }
 
-func TestCartQueryUsesNewestLocalDurableView(t *testing.T) {
-	projector := &projector{}
-	projector.storeCartView("user-1", storefront.CartView{
-		Cart: &commonv1.CartSnapshot{UserId: "user-1", CartVersion: 3},
-	})
-	projector.storeCartView("user-1", storefront.CartView{
+func TestCartQueryReadsLatestAuthoritativeKVView(t *testing.T) {
+	carts := newMemoryKV()
+	projector := &projector{carts: carts}
+	storeJSON(t, carts, "user-1", storefront.CartView{
 		Cart: &commonv1.CartSnapshot{UserId: "user-1", CartVersion: 2},
+	})
+	storeJSON(t, carts, "user-1", storefront.CartView{
+		Cart: &commonv1.CartSnapshot{UserId: "user-1", CartVersion: 3},
 	})
 
 	cart, err := projector.cartView("user-1")
 	if err != nil || cart.Cart.GetCartVersion() != 3 {
-		t.Fatalf("cart query returned a stale view: cart=%#v error=%v", cart, err)
+		t.Fatalf("cart query did not read latest authoritative KV: cart=%#v error=%v", cart, err)
 	}
 }

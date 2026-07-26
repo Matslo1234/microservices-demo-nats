@@ -16,8 +16,12 @@ package main
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -87,7 +91,10 @@ func ensureSessionID(next http.Handler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var sessionID string
 		c, err := r.Cookie(cookieSessionID)
-		if err == http.ErrNoCookie {
+		if err == nil {
+			sessionID, err = verifySessionCookie(c.Value)
+		}
+		if err != nil {
 			if os.Getenv("ENABLE_SINGLE_SHARED_SESSION") == "true" {
 				// Hard coded user id, shared across sessions
 				sessionID = "12345678-1234-1234-1234-123456789123"
@@ -96,17 +103,56 @@ func ensureSessionID(next http.Handler) http.HandlerFunc {
 				sessionID = u.String()
 			}
 			http.SetCookie(w, &http.Cookie{
-				Name:   cookieSessionID,
-				Value:  sessionID,
-				MaxAge: cookieMaxAge,
+				Name:     cookieSessionID,
+				Value:    signSessionCookie(sessionID),
+				Path:     "/",
+				MaxAge:   cookieMaxAge,
+				HttpOnly: true,
+				SameSite: http.SameSiteLaxMode,
+				Secure:   r.TLS != nil,
 			})
-		} else if err != nil {
-			return
-		} else {
-			sessionID = c.Value
 		}
 		ctx := context.WithValue(r.Context(), ctxKeySessionID{}, sessionID)
 		r = r.WithContext(ctx)
 		next.ServeHTTP(w, r)
 	}
+}
+
+func sessionCookieKey() []byte {
+	secret := os.Getenv("FRONTEND_COOKIE_KEY")
+	if secret == "" {
+		// The frontend NATS credential is already a replica-shared Kubernetes
+		// Secret. Domain separation prevents using its raw value as a cookie key.
+		secret = os.Getenv("NATS_PASSWORD")
+	}
+	digest := sha256.Sum256([]byte("online-boutique.frontend-cookie.v1\x00" + secret))
+	return digest[:]
+}
+
+func signSessionCookie(sessionID string) string {
+	mac := hmac.New(sha256.New, sessionCookieKey())
+	_, _ = mac.Write([]byte(sessionID))
+	return sessionID + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+}
+
+func verifySessionCookie(value string) (string, error) {
+	index := strings.LastIndexByte(value, '.')
+	if index <= 0 || index == len(value)-1 {
+		return "", http.ErrNoCookie
+	}
+	sessionID, encodedMAC := value[:index], value[index+1:]
+	if _, err := uuid.Parse(sessionID); err != nil {
+		return "", http.ErrNoCookie
+	}
+	actual, err := base64.RawURLEncoding.DecodeString(encodedMAC)
+	if err != nil {
+		return "", http.ErrNoCookie
+	}
+	expectedValue := signSessionCookie(sessionID)
+	expectedEncoded := expectedValue[strings.LastIndexByte(expectedValue, '.')+1:]
+	expected, _ := base64.RawURLEncoding.DecodeString(expectedEncoded)
+	if !hmac.Equal(actual, expected) {
+		return "", http.ErrNoCookie
+	}
+	return sessionID, nil
 }

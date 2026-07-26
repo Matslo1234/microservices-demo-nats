@@ -19,8 +19,10 @@
 const crypto = require('crypto');
 const path = require('path');
 const protobuf = require('protobufjs');
+const { Kvm } = require('@nats-io/kv');
 const { connect } = require('@nats-io/transport-node');
 const { jetstream } = require('@nats-io/jetstream');
+const { ensureBootstrap } = require('./bootstrap_claim');
 
 const SUBJECT = 'boutique.evt.currency.rates-updated.v1';
 const MESSAGE_TYPE = 'boutique.currency.RatesUpdated.v1';
@@ -158,36 +160,48 @@ async function connectAndPublish(currencyData, logger) {
     maxPingOut: parseInteger(process.env.NATS_MAX_PINGS_OUT, 2),
     waitOnFirstConnect: true
   });
-  const js = jetstream(nc, { timeout: parseDurationMs(process.env.NATS_PUBLISH_TIMEOUT, 5000) });
-  const snapshot = encodeSnapshot(currencyData);
-  let lastError;
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    try {
-      await js.publish(SUBJECT, snapshot.data, { msgID: snapshot.messageId });
-      logger.debug({
-        topic: SUBJECT,
-        message_kind: 'event',
-        message_id: snapshot.messageId,
-        correlation_id: snapshot.correlationId,
-      }, 'NATS event sent');
-      lastError = null;
-      break;
-    } catch (err) {
-      lastError = err;
-      logger.warn({
-        err,
-        attempt,
-        topic: SUBJECT,
-        message_id: snapshot.messageId,
-        correlation_id: snapshot.correlationId,
-      }, 'JetStream rate snapshot publish failed; retrying with the same message ID');
-    }
-  }
-  if (lastError) {
+  try {
+    const js = jetstream(nc, { timeout: parseDurationMs(process.env.NATS_PUBLISH_TIMEOUT, 5000) });
+    const claims = await new Kvm(nc).open('BOOTSTRAP_CLAIMS');
+    const snapshot = encodeSnapshot(currencyData);
+    const workerId = `${process.env.HOSTNAME || 'currencyservice'}:${crypto.randomUUID()}`;
+    await ensureBootstrap(claims, {
+      prefix: 'bootstrap.currency',
+      workId: `currency:${snapshot.revision}`,
+      workerId,
+      durationMs: parseDurationMs(process.env.BOOTSTRAP_CLAIM_TTL, 30000),
+      now: () => Date.now(),
+      wait: milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds)),
+    }, async () => {
+      let lastError;
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          await js.publish(SUBJECT, snapshot.data, { msgID: snapshot.messageId });
+          logger.debug({
+            topic: SUBJECT,
+            message_kind: 'event',
+            message_id: snapshot.messageId,
+            correlation_id: snapshot.correlationId,
+          }, 'NATS event sent');
+          return;
+        } catch (err) {
+          lastError = err;
+          logger.warn({
+            err,
+            attempt,
+            topic: SUBJECT,
+            message_id: snapshot.messageId,
+            correlation_id: snapshot.correlationId,
+          }, 'JetStream rate snapshot publish failed; retrying with the same message ID');
+        }
+      }
+      throw lastError;
+    });
+    return nc;
+  } catch (error) {
     await nc.close();
-    throw lastError;
+    throw error;
   }
-  return nc;
 }
 
 module.exports = { connectAndPublish, contractsRoot, encodeSnapshot, stableRevision };

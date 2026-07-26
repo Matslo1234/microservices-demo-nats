@@ -29,9 +29,12 @@ spec:
           args="--server=${NATS_URL} --user=${NATS_USER} --password=${NATS_PASSWORD} --tlsca=/etc/nats-ca/ca.crt"
           nats ${args} kv del STOREFRONT_PRODUCTS --force
           nats ${args} kv del STOREFRONT_CARTS --force
+          nats ${args} kv del RECOMMENDATION_CATALOG --force
           nats ${args} kv add STOREFRONT_PRODUCTS --history=5 --replicas=3 --storage=file --ttl=0s --max-bucket-size=536870912
           nats ${args} kv add STOREFRONT_CARTS --history=2 --replicas=3 --storage=file --ttl=0s --max-bucket-size=536870912
+          nats ${args} kv add RECOMMENDATION_CATALOG --history=5 --replicas=3 --storage=file --ttl=0s --max-bucket-size=268435456
           nats ${args} consumer rm BOUTIQUE_EVENTS storefront-projection-v1 --force || true
+          nats ${args} consumer rm BOUTIQUE_EVENTS recommendation-catalog-v1 --force || true
         envFrom:
         - secretRef:
             name: nats-admin-credentials

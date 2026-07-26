@@ -21,6 +21,7 @@ import (
 	"os"
 	"os/signal"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -35,7 +36,6 @@ import (
 
 var (
 	log          *logrus.Logger
-	catalogNATS  *catalogEventPublisher
 	catalogMutex = &sync.Mutex{}
 )
 
@@ -75,20 +75,12 @@ func main() {
 	if err := loadCatalog(catalog); err != nil {
 		log.Fatalf("could not parse product catalog: %v", err)
 	}
-	if natsIsRequired() {
-		var err error
-		catalogNATS, err = connectCatalogPublisher()
-		if err != nil {
-			log.Fatalf("could not initialize required NATS publisher: %v", err)
-		}
-		if err := catalogNATS.publishBootstrap(catalog.Products); err != nil {
-			log.WithField("correlation_id", "unknown").Fatalf("could not publish catalog bootstrap events: %v", err)
-		}
-	}
 
+	var catalogNATS atomic.Pointer[catalogEventPublisher]
 	ready := func() bool {
+		publisher := catalogNATS.Load()
 		return len(catalog.Products) > 0 &&
-			(!natsIsRequired() || (catalogNATS != nil && catalogNATS.nc.IsConnected()))
+			(!natsIsRequired() || (publisher != nil && publisher.nc.IsConnected()))
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(response http.ResponseWriter, _ *http.Request) {
@@ -104,7 +96,8 @@ func main() {
 	mux.HandleFunc("/metrics", func(response http.ResponseWriter, _ *http.Request) {
 		response.Header().Set("Content-Type", "text/plain; version=0.0.4")
 		natsReady := 0
-		if !natsIsRequired() || (catalogNATS != nil && catalogNATS.nc.IsConnected()) {
+		publisher := catalogNATS.Load()
+		if !natsIsRequired() || (publisher != nil && publisher.nc.IsConnected()) {
 			natsReady = 1
 		}
 		_, _ = fmt.Fprintln(response, "boutique_dependency_ready{service=\"productcatalogservice\",dependency=\"catalog\"} 1")
@@ -122,6 +115,10 @@ func main() {
 		log.Infof("product catalog health server listening on :%s", port)
 		serveErrors <- server.ListenAndServe()
 	}()
+	bootstrapStop := make(chan struct{})
+	if natsIsRequired() {
+		go initializeCatalogPublisher(catalog.Products, &catalogNATS, bootstrapStop)
+	}
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, syscall.SIGTERM, syscall.SIGINT)
 	select {
@@ -134,9 +131,45 @@ func main() {
 	}
 	shutdownContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	close(bootstrapStop)
 	_ = server.Shutdown(shutdownContext)
-	if catalogNATS != nil {
-		catalogNATS.drain()
+	if publisher := catalogNATS.Swap(nil); publisher != nil {
+		publisher.drain()
+	}
+}
+
+func initializeCatalogPublisher(
+	products []*pb.Product,
+	target *atomic.Pointer[catalogEventPublisher],
+	stop <-chan struct{},
+) {
+	for {
+		select {
+		case <-stop:
+			return
+		default:
+		}
+		publisher, err := connectCatalogPublisher()
+		if err == nil {
+			err = publisher.publishBootstrap(products)
+		}
+		if err == nil {
+			target.Store(publisher)
+			return
+		}
+		if publisher != nil {
+			publisher.drain()
+		}
+		log.WithField("correlation_id", "unknown").
+			WithError(err).
+			Warn("catalog NATS bootstrap is unavailable; retrying")
+		timer := time.NewTimer(time.Second)
+		select {
+		case <-stop:
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
 	}
 }
 

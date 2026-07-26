@@ -48,6 +48,7 @@ final class NatsEventWorker implements AutoCloseable {
   private static final String PAGE_SUBJECT = "boutique.evt.storefront.page-viewed.v1";
   private static final String RESULT_SUBJECT = "boutique.evt.ad.selection-generated.v1";
   private static final String DURABLE = "ad-page-views-v1";
+  private static final String CONFIG_REVISION = "static-ads-v1";
 
   private final AdService service;
   private final boolean required;
@@ -69,49 +70,76 @@ final class NatsEventWorker implements AutoCloseable {
         throw new IOException(name + " is required when NATS_REQUIRED=true");
       }
     }
-    try {
-      Options options =
-          new Options.Builder()
-              .server(System.getenv("NATS_URL"))
-              .userInfo(System.getenv("NATS_USER"), System.getenv("NATS_PASSWORD"))
-              .connectionName("adservice/phase3")
-              .sslContext(trustContext(System.getenv("NATS_CA_FILE")))
-              .connectionTimeout(duration("NATS_CONNECT_TIMEOUT", Duration.ofSeconds(2)))
-              .reconnectWait(duration("NATS_RECONNECT_WAIT", Duration.ofSeconds(2)))
-              .maxReconnects(integer("NATS_MAX_RECONNECTS", -1))
-              .pingInterval(duration("NATS_PING_INTERVAL", Duration.ofSeconds(20)))
-              .maxPingsOut(integer("NATS_MAX_PINGS_OUT", 2))
-              .build();
-      connection = Nats.connect(options);
-      JetStream jetStream = connection.jetStream();
-      ConsumerConfiguration consumer =
-          ConsumerConfiguration.builder()
-              .durable(DURABLE)
-              .filterSubject(PAGE_SUBJECT)
-              .deliverPolicy(DeliverPolicy.All)
-              .ackPolicy(AckPolicy.Explicit)
-              .ackWait(Duration.ofSeconds(30))
-              .maxDeliver(10)
-              .build();
-      PullSubscribeOptions subscribeOptions =
-          PullSubscribeOptions.builder()
-              .stream("BOUTIQUE_EVENTS")
-              .durable(DURABLE)
-              .configuration(consumer)
-              .build();
-      JetStreamSubscription subscription = jetStream.subscribe(PAGE_SUBJECT, subscribeOptions);
-      running.set(true);
-      thread =
-          new Thread(
-              () -> consume(jetStream, subscription), "adservice-nats-page-views");
-      thread.setDaemon(true);
-      thread.start();
-      logger.info("NATS page-view consumer is ready");
-    } catch (InterruptedException exception) {
-      Thread.currentThread().interrupt();
-      throw new IOException("interrupted while connecting to NATS", exception);
-    } catch (Exception exception) {
-      throw new IOException("could not establish NATS page-view consumer", exception);
+    running.set(true);
+    thread = new Thread(this::connectAndConsume, "adservice-nats-page-views");
+    thread.setDaemon(true);
+    thread.start();
+  }
+
+  private void connectAndConsume() {
+    while (running.get()) {
+      try {
+        Options options =
+            new Options.Builder()
+                .server(System.getenv("NATS_URL"))
+                .userInfo(System.getenv("NATS_USER"), System.getenv("NATS_PASSWORD"))
+                .connectionName("adservice/phase2")
+                .sslContext(trustContext(System.getenv("NATS_CA_FILE")))
+                .connectionTimeout(duration("NATS_CONNECT_TIMEOUT", Duration.ofSeconds(2)))
+                .reconnectWait(duration("NATS_RECONNECT_WAIT", Duration.ofSeconds(2)))
+                .maxReconnects(integer("NATS_MAX_RECONNECTS", -1))
+                .pingInterval(duration("NATS_PING_INTERVAL", Duration.ofSeconds(20)))
+                .maxPingsOut(integer("NATS_MAX_PINGS_OUT", 2))
+                .build();
+        connection = Nats.connect(options);
+        JetStream jetStream = connection.jetStream();
+        ConsumerConfiguration consumer =
+            ConsumerConfiguration.builder()
+                .durable(DURABLE)
+                .filterSubject(PAGE_SUBJECT)
+                .deliverPolicy(DeliverPolicy.All)
+                .ackPolicy(AckPolicy.Explicit)
+                .ackWait(Duration.ofSeconds(30))
+                .maxDeliver(10)
+                .build();
+        PullSubscribeOptions subscribeOptions =
+            PullSubscribeOptions.builder()
+                .stream("BOUTIQUE_EVENTS")
+                .durable(DURABLE)
+                .configuration(consumer)
+                .build();
+        JetStreamSubscription subscription =
+            jetStream.subscribe(PAGE_SUBJECT, subscribeOptions);
+        logger.info("NATS page-view consumer is ready");
+        consume(jetStream, subscription);
+      } catch (InterruptedException exception) {
+        if (!running.get()) {
+          Thread.currentThread().interrupt();
+          return;
+        }
+        logger.warn("interrupted while establishing NATS page-view consumer", exception);
+      } catch (Exception exception) {
+        if (running.get()) {
+          logger.warn("NATS page-view consumer is unavailable; retrying", exception);
+        }
+      }
+      if (connection != null) {
+        try {
+          connection.close();
+        } catch (InterruptedException exception) {
+          Thread.currentThread().interrupt();
+          return;
+        }
+        connection = null;
+      }
+      if (running.get()) {
+        try {
+          Thread.sleep(1000);
+        } catch (InterruptedException exception) {
+          Thread.currentThread().interrupt();
+          return;
+        }
+      }
     }
   }
 
@@ -177,14 +205,25 @@ final class NatsEventWorker implements AutoCloseable {
     StorefrontPageViewedEvent pageView = source.getData().unpack(StorefrontPageViewedEvent.class);
     long version = source.getAggregateVersion();
     if (version == 0) {
-      version = Instant.now().toEpochMilli() * 1_000_000L;
+      version = seed(source.getMessageId()) & Long.MAX_VALUE;
+      if (version == 0) {
+        version = 1;
+      }
     }
-    List<Ad> selected = service.selectAds(pageView.getCategoryIdsList(), seed(source.getMessageId()));
+    Instant eventTime =
+        source.hasOccurredAt()
+            ? Instant.ofEpochSecond(
+                source.getOccurredAt().getSeconds(), source.getOccurredAt().getNanos())
+            : Instant.EPOCH;
+    List<Ad> selected =
+        service.selectAds(
+            pageView.getCategoryIdsList(),
+            seed(source.getMessageId() + "\0" + CONFIG_REVISION));
     AdSelectionGeneratedEvent.Builder payload =
         AdSelectionGeneratedEvent.newBuilder()
             .setSessionId(pageView.getSessionId())
             .setTriggeringPageType(pageView.getPageType())
-            .setExpiresAt(timestamp(Instant.now().plus(Duration.ofMinutes(10))));
+            .setExpiresAt(timestamp(eventTime.plus(Duration.ofMinutes(10))));
     for (Ad ad : selected) {
       payload.addAds(
           AdSelection.newBuilder()
@@ -194,15 +233,20 @@ final class NatsEventWorker implements AutoCloseable {
     }
     String messageId =
         UUID.nameUUIDFromBytes(
-                (RESULT_SUBJECT + "\0" + source.getMessageId()).getBytes(StandardCharsets.UTF_8))
+                (RESULT_SUBJECT
+                        + "\0"
+                        + source.getMessageId()
+                        + "\0"
+                        + CONFIG_REVISION)
+                    .getBytes(StandardCharsets.UTF_8))
             .toString();
     MessageEnvelope result =
         MessageEnvelope.newBuilder()
             .setMessageId(messageId)
             .setMessageType("boutique.ad.SelectionGenerated.v1")
             .setSchemaVersion(1)
-            .setOccurredAt(timestamp(Instant.now()))
-            .setProducer("adservice/phase3")
+            .setOccurredAt(timestamp(eventTime))
+            .setProducer("adservice/phase2")
             .setAggregateType("ad-context")
             .setAggregateId(pageView.getSessionId())
             .setAggregateVersion(version)

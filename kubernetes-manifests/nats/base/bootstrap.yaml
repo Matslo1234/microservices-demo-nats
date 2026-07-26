@@ -53,6 +53,8 @@ data:
     ensure_kv STOREFRONT_CONTEXT 2 1h 268435456
     ensure_kv STOREFRONT_ORDERS 10 0s 1610612736
     ensure_kv STOREFRONT_OPERATIONS 10 24h 805306368
+    ensure_kv RECOMMENDATION_CATALOG 5 0s 268435456
+    ensure_kv BOOTSTRAP_CLAIMS 5 0s 67108864
 
     ensure_object() {
       bucket="$1"

@@ -109,7 +109,7 @@ data:
                 "boutique.evt.catalog.product-upserted.v1",
                 "boutique.evt.catalog.product-removed.v1",
                 "boutique.evt.catalog.snapshot-completed.v1",
-                "$JS.API.INFO", "$JS.API.STREAM.INFO.*"
+                "$JS.API.>", "$KV.BOOTSTRAP_CLAIMS.>"
               ],
               subscribe: ["_INBOX.>"]
             }
@@ -117,7 +117,10 @@ data:
           {
             user: "currencyservice", password: $CURRENCYSERVICE_PASSWORD,
             permissions: {
-              publish: ["boutique.evt.currency.rates-updated.v1", "$JS.API.INFO", "$JS.API.STREAM.INFO.*"],
+              publish: [
+                "boutique.evt.currency.rates-updated.v1",
+                "$JS.API.>", "$KV.BOOTSTRAP_CLAIMS.>"
+              ],
               subscribe: ["_INBOX.>"]
             }
           },
@@ -136,7 +139,10 @@ data:
           {
             user: "recommendationservice", password: $RECOMMENDATIONSERVICE_PASSWORD,
             permissions: {
-              publish: ["boutique.evt.recommendation.generated.v1", "$JS.API.>", "$JS.ACK.>"],
+              publish: [
+                "boutique.evt.recommendation.generated.v1", "$JS.API.>",
+                "$JS.ACK.>", "$KV.RECOMMENDATION_CATALOG.>"
+              ],
               subscribe: ["_INBOX.>", "boutique.evt.catalog.>", "boutique.evt.cart.>", "boutique.evt.storefront.page-viewed.v1"]
             }
           },
