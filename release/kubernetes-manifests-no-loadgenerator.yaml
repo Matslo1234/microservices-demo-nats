@@ -709,7 +709,7 @@ spec:
                 - ALL
             privileged: false
             readOnlyRootFilesystem: true
-          image: matslo123/frontend:v0.2.0@sha256:743977754f40aea7bcc5a5352feba39d9d5badf526533f3c32d681f6fc7523ed
+          image: matslo123/frontend:v0.2.0@sha256:3cb4ba73f00c3d3cebceccee8f0e6cc273349d5dd8f5d14344a3849535db7cb2
           ports:
           - containerPort: 8080
           readinessProbe:
@@ -1391,7 +1391,7 @@ spec:
         runAsUser: 1000
       containers:
       - name: server
-        image: matslo123/storefrontprojectionservice:v0.2.0@sha256:ce7adb0824edc145f00be3a820414e98292552c02539a9b35f4a2c14e12782a7
+        image: matslo123/storefrontprojectionservice:v0.2.0@sha256:5a293d5bc825fc37c5429c3362175bf594de905d11de9aa4b28156ace9ae87b9
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:

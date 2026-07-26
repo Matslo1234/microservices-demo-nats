@@ -22,7 +22,10 @@ controller is effectively idle during a run.
 The GRPC adapter records a successful synchronous checkout response as the
 business outcome. The NATS adapter records `202` acceptance separately, honors
 `Retry-After` while polling, and records one `BUSINESS/checkout_to_outcome`
-sample when the order becomes terminal. It also records
+sample when the order becomes terminal. The NATS sample is the difference
+between the checkout request start and the order projection's immutable
+`outcome_at`; the polling interval therefore does not inflate the reported
+latency. It also records
 `BUSINESS/checkout_to_settled` when notification and the correlated cart-clear
 operation have both terminated.
 

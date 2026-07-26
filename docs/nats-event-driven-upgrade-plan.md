@@ -293,6 +293,8 @@ Implement responders with the NATS service framework so endpoint discovery,
 request counts, errors, and latency are available through service `PING`,
 `INFO`, and `STATS`. Query responses should include projection revision and
 `updated_at`, allowing the frontend to distinguish not-found from stale data.
+Terminal order responses also include an immutable `outcome_at` taken from the
+first terminal event rather than later notification or cart-clear updates.
 Core NATS does not persist a request: callers must use bounded timeouts, map
 `no responders` to HTTP `503`, and only retry idempotent queries. Payment
 tokenization retries require their own idempotency key.

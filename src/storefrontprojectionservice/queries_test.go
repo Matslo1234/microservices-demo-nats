@@ -5,6 +5,7 @@ package main
 
 import (
 	"testing"
+	"time"
 
 	commonv1 "github.com/GoogleCloudPlatform/microservices-demo/protos/common/v1"
 	"github.com/GoogleCloudPlatform/microservices-demo/src/storefrontprojectionservice/internal/storefront"
@@ -76,6 +77,34 @@ func TestMergeOrderPreservesIndependentSettlementFacts(t *testing.T) {
 	merged := mergeOrder(current, completed)
 	if merged.CartClearStatus != "REJECTED" || merged.CartClearFailureCode != "VERSION_CONFLICT" || merged.NotificationStatus != "SENT" {
 		t.Fatalf("order update discarded settlement facts: %#v", merged)
+	}
+}
+
+func TestMergeOrderPreservesFirstTerminalOutcomeTime(t *testing.T) {
+	first := time.Date(2026, time.July, 26, 10, 11, 12, 123, time.UTC)
+	later := first.Add(time.Second)
+	current := storefront.OrderView{
+		OrderID: "order-1", Status: "COMPLETED", Stage: "COMPLETED", OutcomeAt: &first,
+	}
+	settlement := storefront.OrderView{
+		OrderID: "order-1", Status: "COMPLETED", NotificationStatus: "SENT", OutcomeAt: &later, UpdatedAt: later,
+	}
+
+	merged := mergeOrder(current, settlement)
+
+	if merged.OutcomeAt == nil || !merged.OutcomeAt.Equal(first) {
+		t.Fatalf("terminal outcome time was not preserved: %#v", merged.OutcomeAt)
+	}
+}
+
+func TestTerminalOrderOutcomeAtOnlyTimestampsTerminalStates(t *testing.T) {
+	value := time.Date(2026, time.July, 26, 10, 11, 12, 123, time.FixedZone("CEST", 2*60*60))
+	if outcomeAt := terminalOrderOutcomeAt("PROCESSING", value); outcomeAt != nil {
+		t.Fatalf("processing order unexpectedly has outcome time %v", outcomeAt)
+	}
+	outcomeAt := terminalOrderOutcomeAt("COMPLETED", value)
+	if outcomeAt == nil || !outcomeAt.Equal(value) || outcomeAt.Location() != time.UTC {
+		t.Fatalf("unexpected terminal outcome time: %v", outcomeAt)
 	}
 }
 

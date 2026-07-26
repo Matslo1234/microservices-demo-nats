@@ -119,6 +119,7 @@ type OrderView struct {
 	CartClearStatus      string                           `json:"cart_clear_status,omitempty"`
 	CartClearFailureCode string                           `json:"cart_clear_failure_code,omitempty"`
 	AggregateVersion     uint64                           `json:"aggregate_version"`
+	OutcomeAt            *time.Time                       `json:"outcome_at,omitempty"`
 	UpdatedAt            time.Time                        `json:"updated_at"`
 }
 

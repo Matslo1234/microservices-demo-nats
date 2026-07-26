@@ -34,8 +34,10 @@ implemented and validated without deploying it or starting a benchmark.
   `Location` resource, honors `Retry-After` (defaulting to one second), and
   stops only at a terminal order state or a configured deadline.
 - Individual HTTP requests remain in Locust diagnostics. The additional
-  comparable measurement is `BUSINESS/checkout_to_outcome`; status polls do
-  not count as completed business operations.
+  comparable measurement is `BUSINESS/checkout_to_outcome`, calculated from
+  the checkout request start and the terminal order projection's immutable
+  `outcome_at`. Status polls detect completion but neither determine this
+  latency nor count as completed business operations.
 - `BUSINESS/checkout_to_settled` starts at checkout submission and finishes
   when notification and the checkout-correlated cart-clear operation have
   both terminated. Settlement tracking continues independently after the

@@ -51,6 +51,7 @@ type orderStatus struct {
 	NotificationStatus   string                           `json:"notification_status,omitempty"`
 	CartClearStatus      string                           `json:"cart_clear_status,omitempty"`
 	CartClearFailureCode string                           `json:"cart_clear_failure_code,omitempty"`
+	OutcomeAt            *time.Time                       `json:"outcome_at,omitempty"`
 	UpdatedAt            time.Time                        `json:"updated_at"`
 }
 

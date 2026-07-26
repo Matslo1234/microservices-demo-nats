@@ -454,6 +454,10 @@ func (p *projector) apply(subject string, data []byte) error {
 		if err := envelope.Data.UnmarshalTo(payload); err != nil {
 			return err
 		}
+		changedAt := updatedAt
+		if payload.ChangedAt != nil && payload.ChangedAt.IsValid() {
+			changedAt = payload.ChangedAt.AsTime()
+		}
 		status := "PROCESSING"
 		if payload.Stage == "COMPLETED" {
 			status = "COMPLETED"
@@ -463,14 +467,14 @@ func (p *projector) apply(subject string, data []byte) error {
 			status = "MANUAL_REVIEW"
 		}
 		return p.updateOrder(storefront.OrderView{OrderID: payload.OrderId, Status: status, Stage: payload.Stage,
-			AggregateVersion: envelope.AggregateVersion, UpdatedAt: updatedAt})
+			AggregateVersion: envelope.AggregateVersion, OutcomeAt: terminalOrderOutcomeAt(status, changedAt), UpdatedAt: updatedAt})
 	case "boutique.evt.order.rejected.v1":
 		payload := &eventsv1.OrderRejectedEvent{}
 		if err := envelope.Data.UnmarshalTo(payload); err != nil {
 			return err
 		}
 		view := storefront.OrderView{OrderID: payload.OrderId, UserID: p.operationUser(payload.OperationId), Status: "REJECTED", Stage: "REJECTED",
-			AggregateVersion: envelope.AggregateVersion, UpdatedAt: updatedAt}
+			AggregateVersion: envelope.AggregateVersion, OutcomeAt: terminalOrderOutcomeAt("REJECTED", updatedAt), UpdatedAt: updatedAt}
 		applyOrderFailure(&view, payload.Failure)
 		return p.updateOrder(view)
 	case "boutique.evt.order.completed.v1":
@@ -482,13 +486,14 @@ func (p *projector) apply(subject string, data []byte) error {
 			return fmt.Errorf("completed order snapshot is missing")
 		}
 		return p.updateOrder(storefront.OrderView{OrderID: payload.Order.OrderId, UserID: payload.Order.UserId, Status: "COMPLETED", Stage: "COMPLETED",
-			Snapshot: payload.Order, AggregateVersion: envelope.AggregateVersion, UpdatedAt: updatedAt})
+			Snapshot: payload.Order, AggregateVersion: envelope.AggregateVersion, OutcomeAt: terminalOrderOutcomeAt("COMPLETED", updatedAt), UpdatedAt: updatedAt})
 	case "boutique.evt.order.cancelled.v1":
 		payload := &eventsv1.OrderCancelledEvent{}
 		if err := envelope.Data.UnmarshalTo(payload); err != nil {
 			return err
 		}
-		view := storefront.OrderView{OrderID: payload.OrderId, Status: "CANCELLED", Stage: "CANCELLED", AggregateVersion: envelope.AggregateVersion, UpdatedAt: updatedAt}
+		view := storefront.OrderView{OrderID: payload.OrderId, Status: "CANCELLED", Stage: "CANCELLED", AggregateVersion: envelope.AggregateVersion,
+			OutcomeAt: terminalOrderOutcomeAt("CANCELLED", updatedAt), UpdatedAt: updatedAt}
 		applyOrderFailure(&view, payload.Failure)
 		return p.updateOrder(view)
 	case "boutique.evt.order.manual-review-required.v1":
@@ -497,7 +502,8 @@ func (p *projector) apply(subject string, data []byte) error {
 			return err
 		}
 		return p.updateOrder(storefront.OrderView{OrderID: payload.OrderId, Status: "MANUAL_REVIEW", Stage: "MANUAL_REVIEW", FailureCode: payload.FailedCompensation,
-			SafeMessage: "The order requires manual review.", AggregateVersion: envelope.AggregateVersion, UpdatedAt: updatedAt})
+			SafeMessage: "The order requires manual review.", AggregateVersion: envelope.AggregateVersion,
+			OutcomeAt: terminalOrderOutcomeAt("MANUAL_REVIEW", updatedAt), UpdatedAt: updatedAt})
 	case "boutique.evt.order.step-timed-out.v1":
 		payload := &eventsv1.OrderStepTimedOutEvent{}
 		if err := envelope.Data.UnmarshalTo(payload); err != nil {
@@ -624,14 +630,26 @@ func mergeOrder(current, incoming storefront.OrderView) storefront.OrderView {
 	if incoming.AggregateVersion < current.AggregateVersion {
 		incoming.AggregateVersion = current.AggregateVersion
 	}
-	terminal := func(status string) bool {
-		return status == "COMPLETED" || status == "CANCELLED" || status == "REJECTED" || status == "MANUAL_REVIEW"
+	if current.OutcomeAt != nil {
+		incoming.OutcomeAt = current.OutcomeAt
 	}
-	if terminal(current.Status) && !terminal(incoming.Status) {
+	if terminalOrderStatus(current.Status) && !terminalOrderStatus(incoming.Status) {
 		incoming.Status = current.Status
 		incoming.Stage = current.Stage
 	}
 	return incoming
+}
+
+func terminalOrderStatus(status string) bool {
+	return status == "COMPLETED" || status == "CANCELLED" || status == "REJECTED" || status == "MANUAL_REVIEW"
+}
+
+func terminalOrderOutcomeAt(status string, value time.Time) *time.Time {
+	if !terminalOrderStatus(status) {
+		return nil
+	}
+	outcomeAt := value.UTC()
+	return &outcomeAt
 }
 
 func (p *projector) updateOrderSettlement(orderID, status, failureCode string, updatedAt time.Time) error {

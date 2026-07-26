@@ -8,6 +8,7 @@ import math
 import random
 import time
 import uuid
+from contextlib import contextmanager
 from typing import Any
 
 import gevent
@@ -25,6 +26,7 @@ from runtime import (
     start_clock,
     submission_deadline,
 )
+from timing import outcome_latency_ms
 
 
 PRODUCTS = (
@@ -65,6 +67,39 @@ def retry_after_seconds(response: Any, default: float = 1.0) -> float:
 def failure_message(outcome: str, detail: str = "") -> BusinessFailure:
     suffix = f": {detail}" if detail else ""
     return BusinessFailure(outcome + suffix)
+
+
+@contextmanager
+def measure_business(
+    user: FastHttpUser,
+    name: str,
+    context: dict[str, Any],
+    started_monotonic: float,
+    started_epoch: float,
+) -> Any:
+    measurement: dict[str, Any] = {
+        "exception": None,
+        "response_time": None,
+    }
+    try:
+        yield measurement
+    except Exception as error:
+        measurement["exception"] = error
+    finally:
+        response_time = measurement["response_time"]
+        if response_time is None:
+            response_time = (time.monotonic() - started_monotonic) * 1000
+        user.environment.events.request.fire(
+            request_type="BUSINESS",
+            name=name,
+            response_time=response_time,
+            response_length=0,
+            response=None,
+            context=context,
+            exception=measurement["exception"],
+            start_time=started_epoch,
+            url=None,
+        )
 
 
 @events.test_start.add_listener
@@ -355,6 +390,7 @@ class NatsAdapter(StorefrontAdapter):
                 data,
                 dict(base_context),
                 checkout_started,
+                checkout_started_epoch,
             )
         )
         settled_context.update(
@@ -432,6 +468,7 @@ class NatsAdapter(StorefrontAdapter):
         data: dict[str, Any],
         context: dict[str, Any],
         checkout_started: float,
+        checkout_started_epoch: float,
     ) -> tuple[
         dict[str, Any],
         dict[str, Any] | None,
@@ -444,8 +481,12 @@ class NatsAdapter(StorefrontAdapter):
         transaction_id = str(uuid.uuid4())
         context["transaction_id"] = transaction_id
 
-        with self.user.environment.events.request.measure(
-            "BUSINESS", "checkout_to_outcome", context=context
+        with measure_business(
+            self.user,
+            "checkout_to_outcome",
+            context,
+            checkout_started,
+            checkout_started_epoch,
         ) as outcome_measurement:
             acceptance_context = {
                 **context,
@@ -561,12 +602,28 @@ class NatsAdapter(StorefrontAdapter):
                     status = str(order.get("status", "UNKNOWN"))
                     if status not in TERMINAL_ORDER_STATUSES:
                         continue
+                    try:
+                        response_time = outcome_latency_ms(
+                            checkout_started_epoch, order.get("outcome_at")
+                        )
+                    except ValueError as timestamp_error:
+                        context["outcome"] = "INVALID_RESPONSE"
+                        error = failure_message(
+                            "INVALID_RESPONSE", str(timestamp_error)
+                        )
+                        outcome_measurement["exception"] = error
+                        RECORDER.terminal(
+                            transaction_id, "INVALID_RESPONSE", phase_now()
+                        )
+                        return context, None, location, error
+                    outcome_measurement["response_time"] = response_time
                     context.update(
                         {
                             "outcome": status,
                             "order_id": order.get("order_id")
                             or context.get("order_id"),
                             "failure_code": order.get("failure_code"),
+                            "outcome_at": order.get("outcome_at"),
                         }
                     )
                     RECORDER.terminal(transaction_id, status, phase_now())
