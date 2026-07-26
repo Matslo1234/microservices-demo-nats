@@ -26,6 +26,7 @@ resources:
  - paymentservice.yaml
  - productcatalogservice.yaml
  - recommendationservice.yaml
+ - redis-clusters.yaml
  - shippingservice.yaml
  - storefrontprojectionservice.yaml
  - network-policies.yaml

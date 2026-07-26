@@ -40,6 +40,11 @@ spec:
           value: "frontend:80"
         - name: RESULTS_DIR
           value: "/var/lib/benchmarkservice"
+        envFrom:
+        - configMapRef:
+            name: nats-client-config
+        - secretRef:
+            name: nats-credentials-benchmarkservice
         ports:
         - name: http
           containerPort: 8080
@@ -68,11 +73,17 @@ spec:
             drop: ["ALL"]
           readOnlyRootFilesystem: true
         volumeMounts:
+        - name: nats-ca
+          mountPath: /etc/nats-ca
+          readOnly: true
         - name: results
           mountPath: /var/lib/benchmarkservice
         - name: tmp
           mountPath: /tmp
       volumes:
+      - name: nats-ca
+        configMap:
+          name: nats-ca
       - name: results
         emptyDir:
           sizeLimit: 5Gi

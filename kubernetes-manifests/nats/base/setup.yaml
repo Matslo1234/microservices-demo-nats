@@ -103,7 +103,7 @@ data:
     api_host=${KUBERNETES_SERVICE_HOST:-kubernetes.default.svc}
     api_port=${KUBERNETES_SERVICE_PORT_HTTPS:-${KUBERNETES_SERVICE_PORT:-443}}
     token=$(tr -d '\n' < "${token_file}")
-    services='frontend storefrontprojectionservice productcatalogservice currencyservice cartservice recommendationservice adservice checkoutservice shippingservice paymentservice emailservice messageoperationsservice'
+    services='frontend storefrontprojectionservice productcatalogservice currencyservice cartservice recommendationservice adservice checkoutservice shippingservice paymentservice emailservice benchmarkservice messageoperationsservice'
 
     log() {
       printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"

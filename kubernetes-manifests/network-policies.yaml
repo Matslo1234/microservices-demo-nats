@@ -124,6 +124,10 @@ spec:
     - podSelector:
         matchLabels:
           app: redis-cart
+    - podSelector:
+        matchLabels:
+          app: redis-cart-cluster
+          app.kubernetes.io/component: server
     ports:
     - protocol: TCP
       port: 6379
@@ -150,6 +154,88 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
+  name: redis-cart-cluster
+spec:
+  podSelector:
+    matchLabels:
+      app: redis-cart-cluster
+      app.kubernetes.io/component: server
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app: cartservice
+    - podSelector:
+        matchLabels:
+          app: redis-cart-cluster
+          app.kubernetes.io/component: server
+    - podSelector:
+        matchLabels:
+          app: redis-cart-cluster-bootstrap
+    ports:
+    - protocol: TCP
+      port: 6379
+    - protocol: TCP
+      port: 16379
+  egress:
+  - to:
+    - podSelector:
+        matchLabels:
+          app: redis-cart-cluster
+          app.kubernetes.io/component: server
+    ports:
+    - protocol: TCP
+      port: 6379
+    - protocol: TCP
+      port: 16379
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: redis-cart-cluster-bootstrap
+spec:
+  podSelector:
+    matchLabels:
+      app: redis-cart-cluster-bootstrap
+  policyTypes: ["Egress"]
+  egress:
+  - to:
+    - podSelector:
+        matchLabels:
+          app: redis-cart-cluster
+          app.kubernetes.io/component: server
+    ports:
+    - protocol: TCP
+      port: 6379
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
   name: checkout-to-redis
 spec:
   podSelector:
@@ -161,6 +247,10 @@ spec:
     - podSelector:
         matchLabels:
           app: redis-checkout
+    - podSelector:
+        matchLabels:
+          app: redis-checkout-cluster
+          app.kubernetes.io/component: server
     ports:
     - protocol: TCP
       port: 6379
@@ -183,6 +273,88 @@ spec:
     - protocol: TCP
       port: 6379
   egress: []
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: redis-checkout-cluster
+spec:
+  podSelector:
+    matchLabels:
+      app: redis-checkout-cluster
+      app.kubernetes.io/component: server
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app: checkoutservice
+    - podSelector:
+        matchLabels:
+          app: redis-checkout-cluster
+          app.kubernetes.io/component: server
+    - podSelector:
+        matchLabels:
+          app: redis-checkout-cluster-bootstrap
+    ports:
+    - protocol: TCP
+      port: 6379
+    - protocol: TCP
+      port: 16379
+  egress:
+  - to:
+    - podSelector:
+        matchLabels:
+          app: redis-checkout-cluster
+          app.kubernetes.io/component: server
+    ports:
+    - protocol: TCP
+      port: 6379
+    - protocol: TCP
+      port: 16379
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: redis-checkout-cluster-bootstrap
+spec:
+  podSelector:
+    matchLabels:
+      app: redis-checkout-cluster-bootstrap
+  policyTypes: ["Egress"]
+  egress:
+  - to:
+    - podSelector:
+        matchLabels:
+          app: redis-checkout-cluster
+          app.kubernetes.io/component: server
+    ports:
+    - protocol: TCP
+      port: 6379
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -257,6 +429,8 @@ spec:
     ports:
     - protocol: TCP
       port: 7777
+    - protocol: TCP
+      port: 4222
   # Kubernetes API endpoints are not consistently selectable with namespace
   # and pod labels across CNI implementations.
   - to:

@@ -28,6 +28,7 @@ spec:
           operator: In
           values:
           - adservice
+          - benchmarkservice
           - cartservice
           - checkoutservice
           - currencyservice

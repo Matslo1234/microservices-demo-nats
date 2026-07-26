@@ -53,8 +53,26 @@ data:
     ensure_kv STOREFRONT_CONTEXT 2 1h 268435456
     ensure_kv STOREFRONT_ORDERS 10 0s 1610612736
     ensure_kv STOREFRONT_OPERATIONS 10 24h 805306368
+
+    ensure_object() {
+      bucket="$1"
+      if nats ${nats_args} object info "${bucket}" >/dev/null 2>&1; then
+        echo "object store ${bucket} already exists"
+      else
+        nats ${nats_args} object add "${bucket}" \
+          --replicas=3 \
+          --storage=file \
+          --max-bucket-size=4294967296
+      fi
+    }
+
+    # Benchmark APIs move to these shared stores in Phase 6. Provisioning them
+    # now makes their durability and credentials independently verifiable.
+    ensure_kv BENCHMARK_RUNS 10 0s 536870912
+    ensure_object BENCHMARK_ARTIFACTS
     nats ${nats_args} stream list
     nats ${nats_args} kv list
+    nats ${nats_args} object list
   BOUTIQUE_COMMANDS.json: |
     {
       "name": "BOUTIQUE_COMMANDS",

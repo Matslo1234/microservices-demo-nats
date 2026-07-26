@@ -8,4 +8,5 @@ resources:
 - alloy.yaml
 - grafana.yaml
 - grafana-dashboard.yaml
+- stateless-dashboard.yaml
 - network-policies.yaml

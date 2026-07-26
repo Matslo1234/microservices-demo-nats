@@ -212,6 +212,19 @@ data:
             }
           },
           {
+            user: "benchmarkservice", password: $BENCHMARKSERVICE_PASSWORD,
+            permissions: {
+              publish: [
+                "$JS.API.>", "$KV.BENCHMARK_RUNS.>",
+                "$O.BENCHMARK_ARTIFACTS.>"
+              ],
+              subscribe: [
+                "_INBOX.>", "$KV.BENCHMARK_RUNS.>",
+                "$O.BENCHMARK_ARTIFACTS.>"
+              ]
+            }
+          },
+          {
             user: "messageoperationsservice", password: $MESSAGEOPERATIONSSERVICE_PASSWORD,
             permissions: {
               publish: ["boutique.dlq.>", "boutique.evt.ops.>", "$JS.API.>", "$JS.ACK.>"],

@@ -258,7 +258,7 @@ def validate_stateless_contract() -> None:
     source_services = {
         path.name
         for path in (ROOT / "src").iterdir()
-        if path.is_dir() and not path.name.startswith(".")
+        if path.is_dir() and not path.name.startswith(".") and path.name != "shared"
     }
     if inventory_names != source_services:
         raise VerificationError(
@@ -329,7 +329,7 @@ def collect_guardrail_findings() -> dict[str, list[str]]:
     application_services = {
         path.name
         for path in (ROOT / "src").iterdir()
-        if path.is_dir() and not path.name.startswith(".")
+        if path.is_dir() and not path.name.startswith(".") and path.name != "shared"
     }
     pvc_findings: list[str] = []
     for path in manifests:

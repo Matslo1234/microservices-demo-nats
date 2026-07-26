@@ -168,8 +168,12 @@ spec:
         configMap:
           name: grafana-dashboard-provider
       - name: dashboard
-        configMap:
-          name: grafana-dashboard
+        projected:
+          sources:
+          - configMap:
+              name: grafana-dashboard
+          - configMap:
+              name: grafana-stateless-dashboard
       - name: data
         emptyDir: {}
       - name: tmp
