@@ -26,14 +26,16 @@ flowchart LR
     NATS --> Payment
     NATS --> Email[email]
     NATS --> Projection
-    Cart -->|Redis protocol| Redis[(redis-cart)]
+    Cart -->|Redis protocol| CartRedis[(redis-cart)]
+    Checkout -->|Redis protocol| CheckoutRedis[(redis-checkout)]
 
     Apps[All domain workloads] -.->|HTTP health and metrics :8080| Monitor[probes / Prometheus]
 ```
 
 The frontend is the only application business endpoint exposed through a
 Kubernetes Service. `frontend:80` and `frontend-external:80` target its HTTP
-port `8080`. Redis remains private to cartservice on `6379`. Backend workloads
+port `8080`. The cart and checkout Redis services remain private to their
+respective owners on `6379`. Backend workloads
 do not have Kubernetes Services or business-listening ports; port `8080` on
 those pods exposes only `/healthz`, `/readyz`, and `/metrics`.
 
@@ -90,9 +92,9 @@ Accepted`; clients poll `/operations/{id}` or `/orders/{id}`.
 | `cartservice` | `boutique.cmd.cart.>` and catalog facts | Redis-authoritative carts; cart success/rejection facts |
 | `recommendationservice` | Catalog, cart and page-view facts | Recommendation selection facts |
 | `adservice` | Page-view facts | Ad selection facts |
-| `checkoutservice` | Order command plus catalog/currency/cart/payment/shipping facts | Persisted saga, inbox/outbox, order lifecycle and downstream commands |
+| `checkoutservice` | Order command plus catalog/currency/cart/payment/shipping facts | Stateless workers over shared Redis saga/projection/inbox/outbox state; order lifecycle and downstream commands |
 | `shippingservice` | Shipping commands and cart facts | Persisted fake-provider outcomes and shipping facts |
-| `paymentservice` | Tokenization query and payment commands | Short-lived token vault, persisted provider outcomes and payment facts |
+| `paymentservice` | Tokenization query and payment commands | Short-lived signed tokens, deterministic signed provider references, and payment facts |
 | `emailservice` | Completed-order facts | Persisted notification outcome and notification facts |
 | `storefrontprojectionservice` | `boutique.evt.>` | Query endpoints and five JetStream KV materialized views |
 
@@ -102,6 +104,14 @@ and operation status in `STOREFRONT_PRODUCTS`, `STOREFRONT_CARTS`,
 These buckets are derived state and can be deleted and rebuilt by replaying
 `BOUTIQUE_EVENTS`. Domain owner snapshots provide the current catalog and
 currency baselines before consumers become ready.
+
+Checkout workers attach to the same durable consumers and use optimistic Redis
+transactions. Every transition reloads committed shared state and atomically
+commits the input inbox record, saga/projection changes, and outbox entries.
+Consequently, the pod that processes a shipping result does not need to be the
+pod that processed the preceding payment or order event. Transaction conflicts
+are retried, and duplicate deliveries observe the shared inbox before applying
+another transition.
 
 ## Checkout workflow
 
@@ -138,7 +148,11 @@ completion cancel or reject the order. Failures after authorization trigger
 release/cancel compensations; a failed compensation reaches `MANUAL_REVIEW`.
 Email and cart clearing remain independent from the completed-order decision.
 Card PAN and CVV exist only in the frontend-to-payment tokenization request and
-are not stored or published to JetStream.
+are not stored or published to JetStream. Payment tokens contain only an order
+binding, expiry, nonce, and HMAC; every replica derives the same verifier from
+its dedicated payment signing key. Authorization references are signed and
+deterministic, so any replica can authorize, capture, release, or safely
+recompute the same outcome without a local provider store.
 
 ## Health, observability, and isolation
 

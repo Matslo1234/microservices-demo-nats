@@ -294,6 +294,20 @@ spec:
     requests:
       storage: 5Gi
 ---
+# Copyright 2018 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -301,10 +315,12 @@ metadata:
   labels:
     app: checkoutservice
 spec:
-  # The local state/outbox store has one writer. Never overlap replicas during
-  # an update, even though a same-node RWO volume can be mounted by both pods.
+  replicas: 2
   strategy:
-    type: Recreate
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
   selector:
     matchLabels:
       app: checkoutservice
@@ -324,28 +340,6 @@ spec:
         runAsGroup: 1000
         runAsNonRoot: true
         runAsUser: 1000
-      initContainers:
-        - name: volume-permissions
-          image: busybox:1.37.0
-          command: ["sh", "-ec", "chown 1000:1000 /data"]
-          securityContext:
-            allowPrivilegeEscalation: false
-            capabilities:
-              drop: ["ALL"]
-              add: ["CHOWN"]
-            readOnlyRootFilesystem: true
-            runAsNonRoot: false
-            runAsUser: 0
-          volumeMounts:
-            - name: checkout-data
-              mountPath: /data
-          resources:
-            requests:
-              cpu: 5m
-              memory: 8Mi
-            limits:
-              cpu: 50m
-              memory: 2Gi
       containers:
         - name: server
           securityContext:
@@ -355,7 +349,7 @@ spec:
                 - ALL
             privileged: false
             readOnlyRootFilesystem: true
-          image: matslo123/checkoutservice:v0.2.0@sha256:dd1e2cd16e5d3ec0c1237921d0fd0a1297b75a8e47798f12e6d23b9be3155f0f
+          image: matslo123/checkoutservice:v0.2.0@sha256:547be8fe50ff17c4729e4e3db9312b63efe581d7d514f2416354395ca951f63c
           ports:
           - name: health
             containerPort: 8080
@@ -380,12 +374,16 @@ spec:
             value: "true"
           - name: NATS_REQUIRED_SUBSCRIPTIONS
             value: "checkout-catalog-v1,checkout-currency-v1,checkout-cart-v1,checkout-order-commands-v1,checkout-saga-shipping-v1,checkout-saga-payment-v1"
-          - name: CHECKOUT_STORE_PATH
-            value: /var/lib/checkout/sagas.json
+          - name: CHECKOUT_REDIS_ADDR
+            value: redis-checkout:6379
+          - name: CHECKOUT_REDIS_PREFIX
+            value: checkout:v1
           - name: CHECKOUT_SAGA_STEP_TIMEOUT
             value: 30s
           - name: CHECKOUT_PROJECTION_CATCHUP_TIMEOUT
             value: 10m
+          - name: GOMEMLIMIT
+            value: "400MiB"
           envFrom:
           - configMapRef:
               name: nats-client-config
@@ -395,8 +393,6 @@ spec:
           - name: nats-ca
             mountPath: /etc/nats-ca
             readOnly: true
-          - name: checkout-data
-            mountPath: /var/lib/checkout
           resources:
             requests:
               cpu: 100m
@@ -408,9 +404,102 @@ spec:
       - name: nats-ca
         configMap:
           name: nats-ca
-      - name: checkout-data
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis-checkout
+  labels:
+    app: redis-checkout
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: redis-checkout
+  template:
+    metadata:
+      labels:
+        app: redis-checkout
+    spec:
+      securityContext:
+        fsGroup: 1000
+        runAsGroup: 1000
+        runAsNonRoot: true
+        runAsUser: 1000
+      initContainers:
+      - name: volume-permissions
+        image: redis:8.2-alpine
+        command: ["sh", "-ec", "chown 1000:1000 /data"]
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+            add: ["CHOWN"]
+          readOnlyRootFilesystem: true
+          runAsNonRoot: false
+          runAsUser: 0
+        volumeMounts:
+        - name: redis-data
+          mountPath: /data
+        resources:
+          requests:
+            cpu: 5m
+            memory: 8Mi
+          limits:
+            cpu: 50m
+            memory: 64Mi
+      containers:
+      - name: redis
+        image: redis:8.2-alpine
+        # Checkout acknowledges JetStream input only after this store commits.
+        # Fsync every write keeps that acknowledgement boundary crash-durable.
+        args: ["redis-server", "--appendonly", "yes", "--appendfsync", "always"]
+        ports:
+        - name: redis
+          containerPort: 6379
+        readinessProbe:
+          exec:
+            command: ["redis-cli", "ping"]
+          periodSeconds: 5
+        livenessProbe:
+          exec:
+            command: ["redis-cli", "ping"]
+          periodSeconds: 5
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+          readOnlyRootFilesystem: true
+        volumeMounts:
+        - name: redis-data
+          mountPath: /data
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 1Gi
+      volumes:
+      - name: redis-data
         persistentVolumeClaim:
-          claimName: checkout-data
+          claimName: redis-checkout-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-checkout
+  labels:
+    app: redis-checkout
+spec:
+  selector:
+    app: redis-checkout
+  ports:
+  - name: redis
+    port: 6379
+    targetPort: redis
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -420,12 +509,14 @@ metadata:
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: checkout-data
+  name: redis-checkout-data
+  labels:
+    app: redis-checkout
 spec:
   accessModes: ["ReadWriteOnce"]
   resources:
     requests:
-      storage: 1Gi
+      storage: 5Gi
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -1073,9 +1164,11 @@ metadata:
   labels:
     app: paymentservice
 spec:
-  # Provider outcomes are persisted by a single writer.
   strategy:
-    type: Recreate
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
   selector:
     matchLabels:
       app: paymentservice
@@ -1091,32 +1184,9 @@ spec:
       serviceAccountName: paymentservice
       terminationGracePeriodSeconds: 35
       securityContext:
-        fsGroup: 1000
         runAsGroup: 1000
         runAsNonRoot: true
         runAsUser: 1000
-      initContainers:
-      - name: volume-permissions
-        image: busybox:1.37.0
-        command: ["sh", "-ec", "chown 1000:1000 /data"]
-        securityContext:
-          allowPrivilegeEscalation: false
-          capabilities:
-            drop: ["ALL"]
-            add: ["CHOWN"]
-          readOnlyRootFilesystem: true
-          runAsNonRoot: false
-          runAsUser: 0
-        volumeMounts:
-        - name: payment-data
-          mountPath: /data
-        resources:
-          requests:
-            cpu: 5m
-            memory: 8Mi
-          limits:
-            cpu: 50m
-            memory: 2Gi
       containers:
       - name: server
         securityContext:
@@ -1126,7 +1196,7 @@ spec:
               - ALL
           privileged: false
           readOnlyRootFilesystem: true
-        image: matslo123/paymentservice:v0.2.0@sha256:156c4747e072ced9249f93ec9850d1e486bf88efba98110f0a5cabac89d3b79f
+        image: matslo123/paymentservice:v0.2.0@sha256:80acca8f5e510bee061aecdf263465a984a031b3a15c1a31ab97537cc3498da7
         ports:
         - name: health
           containerPort: 8080
@@ -1139,8 +1209,6 @@ spec:
           value: "true"
         - name: NATS_REQUIRED_SUBSCRIPTIONS
           value: "boutique.qry.payment.tokenize.v1,payment-commands-v1"
-        - name: PAYMENT_STORE_PATH
-          value: /var/lib/payment/provider-state.json
         envFrom:
         - configMapRef:
             name: nats-client-config
@@ -1150,8 +1218,6 @@ spec:
         - name: nats-ca
           mountPath: /etc/nats-ca
           readOnly: true
-        - name: payment-data
-          mountPath: /var/lib/payment
         readinessProbe:
           httpGet:
             path: /readyz
@@ -1171,24 +1237,11 @@ spec:
       - name: nats-ca
         configMap:
           name: nats-ca
-      - name: payment-data
-        persistentVolumeClaim:
-          claimName: payment-data
 ---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: paymentservice
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: payment-data
-spec:
-  accessModes: ["ReadWriteOnce"]
-  resources:
-    requests:
-      storage: 1Gi
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -1558,3 +1611,40 @@ kind: ServiceAccount
 metadata:
   name: storefrontprojectionservice
 # [END gke_release_kubernetes_manifests_microservices_demo]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: checkout-to-redis
+spec:
+  podSelector:
+    matchLabels:
+      app: checkoutservice
+  policyTypes: ["Egress"]
+  egress:
+  - to:
+    - podSelector:
+        matchLabels:
+          app: redis-checkout
+    ports:
+    - protocol: TCP
+      port: 6379
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: redis-from-checkout
+spec:
+  podSelector:
+    matchLabels:
+      app: redis-checkout
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app: checkoutservice
+    ports:
+    - protocol: TCP
+      port: 6379
+  egress: []

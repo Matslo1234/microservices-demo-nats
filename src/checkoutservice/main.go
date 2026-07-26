@@ -27,16 +27,18 @@ func newLogger() *logrus.Logger {
 }
 
 func main() {
-	storePath := os.Getenv("CHECKOUT_STORE_PATH")
-	if storePath == "" {
-		storePath = "/tmp/checkout/sagas.json"
+	redisAddress := os.Getenv("CHECKOUT_REDIS_ADDR")
+	redisPrefix := os.Getenv("CHECKOUT_REDIS_PREFIX")
+	if redisPrefix == "" {
+		redisPrefix = defaultRedisStatePrefix
 	}
-	store, err := openStateStore(storePath)
+	store, err := openStateStoreWithPrefix(redisAddress, redisPrefix)
 	if err != nil {
 		log.Fatal(err)
 	}
 	worker, err := startCheckoutWorker(store)
 	if err != nil {
+		_ = store.Close()
 		log.Fatal(err)
 	}
 
@@ -63,12 +65,16 @@ func main() {
 			ready = 1
 		}
 		_, _ = fmt.Fprintf(response, "boutique_dependency_ready{service=\"checkoutservice\",dependency=\"nats\"} %d\n", ready)
-		_, _ = fmt.Fprintln(response, "boutique_dependency_ready{service=\"checkoutservice\",dependency=\"saga_store\"} 1")
+		storeReady := 0
+		if store.Ready() {
+			storeReady = 1
+		}
+		_, _ = fmt.Fprintf(response, "boutique_dependency_ready{service=\"checkoutservice\",dependency=\"saga_store\"} %d\n", storeReady)
 	})
 	server := &http.Server{Addr: ":" + port, Handler: mux, ReadHeaderTimeout: 2 * time.Second}
 	serveErrors := make(chan error, 1)
 	go func() { serveErrors <- server.ListenAndServe() }()
-	log.WithFields(logrus.Fields{"port": port, "store": storePath}).Info("checkout saga service started")
+	log.WithFields(logrus.Fields{"port": port, "store": "redis", "store_prefix": redisPrefix}).Info("checkout saga service started")
 
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)

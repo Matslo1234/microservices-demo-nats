@@ -14,8 +14,10 @@ const logger = require('./logger');
 const TOKEN_SUBJECT = 'boutique.qry.payment.tokenize.v1';
 const COMMAND_SUBJECT = 'boutique.cmd.payment.>';
 const COMMAND_DURABLE = 'payment-commands-v1';
-const STATE_BUCKETS = ['tokens', 'tokenKeys', 'outcomes', 'authorizations'];
-const PAYMENT_STATE_VERSION = 1;
+const PAYMENT_TOKEN_PREFIX = 'ptok_v1';
+const AUTHORIZATION_PREFIX = 'pauth_v1';
+const PAYMENT_TOKEN_TTL_MS = 15 * 60 * 1000;
+const SIGNING_KEY_CONTEXT = 'boutique/payment-provider/v1';
 const COMMAND_PREFETCH = 256;
 const COMMAND_BATCH_DELAY_MS = 20;
 const COMMAND_PULL_EXPIRES_MS = 1000;
@@ -32,119 +34,86 @@ function stableID(...parts) {
   return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20,32)}`;
 }
 
-class PaymentState {
-  constructor(file) {
-    this.file = file;
-    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o750 });
-    this.value = { tokens: {}, tokenKeys: {}, outcomes: {}, authorizations: {} };
-    this.pending = Object.fromEntries(STATE_BUCKETS.map(bucket => [bucket, new Set()]));
-    if (fs.existsSync(file)) this.load();
-    for (const key of STATE_BUCKETS) {
-      if (!this.value[key]) this.value[key] = {};
-    }
+// Every payment replica receives the same dedicated signing secret. HKDF
+// domain-separates the artifact key from the provisioned root key.
+function deriveSigningKey(sharedSecret) {
+  if (typeof sharedSecret !== 'string' || sharedSecret.length < 32) {
+    throw new Error('payment signing secret must contain at least 32 characters');
   }
+  return Buffer.from(crypto.hkdfSync(
+    'sha256',
+    Buffer.from(sharedSecret, 'utf8'),
+    Buffer.alloc(0),
+    Buffer.from(SIGNING_KEY_CONTEXT, 'utf8'),
+    32,
+  ));
+}
 
-  load() {
-    const encoded = fs.readFileSync(this.file, 'utf8');
-    if (!encoded.trim()) return;
-    let legacy;
-    try {
-      legacy = JSON.parse(encoded);
-    } catch (_) {
-      legacy = undefined;
-    }
-    if (legacy && STATE_BUCKETS.some(bucket => Object.hasOwn(legacy, bucket))) {
-      this.value = legacy;
-      for (const key of STATE_BUCKETS) {
-        if (!this.value[key]) this.value[key] = {};
-      }
-      this.writeSnapshot();
-      return;
-    }
+function signReference(prefix, payload, signingKey) {
+  const encodedPayload = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
+  const unsigned = `${prefix}.${encodedPayload}`;
+  const signature = crypto.createHmac('sha256', signingKey).update(unsigned).digest('base64url');
+  return `${unsigned}.${signature}`;
+}
 
-    const lines = encoded.split('\n');
-    for (let index = 0; index < lines.length; index++) {
-      const line = lines[index].trim();
-      if (!line) continue;
-      let record;
-      try {
-        record = JSON.parse(line);
-      } catch (error) {
-        const hasLaterRecord = lines.slice(index + 1).some(candidate => candidate.trim());
-        if (!hasLaterRecord) {
-          // A crash may leave only the final append incomplete. Remove it so
-          // the next append starts at a valid journal boundary.
-          const validPrefix = lines.slice(0, index).join('\n');
-          const fd = fs.openSync(this.file, 'w', 0o600);
-          try {
-            fs.writeFileSync(fd, validPrefix ? `${validPrefix}\n` : '');
-            fs.fsyncSync(fd);
-          } finally {
-            fs.closeSync(fd);
-          }
-          break;
-        }
-        throw new Error(`invalid payment state journal record ${index + 1}: ${error.message}`);
-      }
-      this.applyRecord(record);
-    }
+function verifyReference(reference, expectedPrefix, signingKey) {
+  if (typeof reference !== 'string' || reference.length > 2048) {
+    throw new Error('INVALID_PAYMENT_REFERENCE');
   }
-
-  applyRecord(record) {
-    if (record.version !== PAYMENT_STATE_VERSION) {
-      throw new Error(`unsupported payment state version ${record.version}`);
-    }
-    if (record.snapshot) {
-      this.value = record.snapshot;
-      for (const key of STATE_BUCKETS) {
-        if (!this.value[key]) this.value[key] = {};
-      }
-      return;
-    }
-    for (const bucket of STATE_BUCKETS) {
-      for (const [key, value] of Object.entries(record.sets?.[bucket] || {})) {
-        this.value[bucket][key] = value;
-      }
-      for (const key of record.deletes?.[bucket] || []) delete this.value[bucket][key];
-    }
+  const parts = reference.split('.');
+  if (parts.length !== 3 || parts[0] !== expectedPrefix || !parts[1] || !parts[2]) {
+    throw new Error('INVALID_PAYMENT_REFERENCE');
   }
-
-  writeSnapshot() {
-    const temporary = `${this.file}.tmp`;
-    const fd = fs.openSync(temporary, 'w', 0o600);
-    try {
-      fs.writeFileSync(fd, `${JSON.stringify({ version: PAYMENT_STATE_VERSION, snapshot: this.value })}\n`);
-      fs.fsyncSync(fd);
-    } finally {
-      fs.closeSync(fd);
-    }
-    fs.renameSync(temporary, this.file);
+  const unsigned = `${parts[0]}.${parts[1]}`;
+  const actual = Buffer.from(parts[2], 'base64url');
+  const expected = crypto.createHmac('sha256', signingKey).update(unsigned).digest();
+  if (actual.length !== expected.length || !crypto.timingSafeEqual(actual, expected)) {
+    throw new Error('INVALID_PAYMENT_REFERENCE');
   }
-
-  set(bucket, key, value) {
-    if (!this.pending[bucket]) throw new Error(`unknown payment state bucket ${bucket}`);
-    this.value[bucket][key] = value;
-    this.pending[bucket].add(key);
+  try {
+    return JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
+  } catch (_) {
+    throw new Error('INVALID_PAYMENT_REFERENCE');
   }
+}
 
-  persist() {
-    const sets = {};
-    for (const bucket of STATE_BUCKETS) {
-      if (this.pending[bucket].size === 0) continue;
-      sets[bucket] = {};
-      for (const key of this.pending[bucket]) sets[bucket][key] = this.value[bucket][key];
-    }
-    if (Object.keys(sets).length === 0) return;
-
-    const fd = fs.openSync(this.file, 'a', 0o600);
-    try {
-      fs.writeFileSync(fd, `${JSON.stringify({ version: PAYMENT_STATE_VERSION, sets })}\n`);
-      fs.fsyncSync(fd);
-    } finally {
-      fs.closeSync(fd);
-    }
-    for (const bucket of STATE_BUCKETS) this.pending[bucket].clear();
+function verifyPaymentToken(paymentToken, orderID, signingKey, now = Date.now()) {
+  const payload = verifyReference(paymentToken, PAYMENT_TOKEN_PREFIX, signingKey);
+  if (payload.version !== 1 || payload.orderId !== orderID ||
+      !Number.isSafeInteger(payload.expiresAt) || payload.expiresAt <= now ||
+      typeof payload.nonce !== 'string' || !payload.nonce) {
+    throw new Error('INVALID_OR_EXPIRED_TOKEN');
   }
+  return payload;
+}
+
+function authorizationReference(command, signingKey) {
+  return signReference(AUTHORIZATION_PREFIX, {
+    version: 1,
+    orderId: command.orderId,
+    idempotencyKey: command.idempotencyKey,
+  }, signingKey);
+}
+
+function verifyAuthorization(authorizationID, orderID, signingKey) {
+  const payload = verifyReference(authorizationID, AUTHORIZATION_PREFIX, signingKey);
+  if (payload.version !== 1 || payload.orderId !== orderID ||
+      typeof payload.idempotencyKey !== 'string' || !payload.idempotencyKey) {
+    throw new Error('INVALID_AUTHORIZATION');
+  }
+  return payload;
+}
+
+function occurredAtMilliseconds(envelope) {
+  if (!envelope.occurredAt) throw new Error('INVALID_COMMAND_TIMESTAMP');
+  const seconds = Number(envelope.occurredAt.seconds);
+  const nanos = Number(envelope.occurredAt.nanos);
+  const milliseconds = seconds * 1000 + Math.floor(nanos / 1000000);
+  if (!Number.isSafeInteger(milliseconds) || !Number.isInteger(nanos) ||
+      nanos < 0 || nanos >= 1000000000) {
+    throw new Error('INVALID_COMMAND_TIMESTAMP');
+  }
+  return milliseconds;
 }
 
 async function loadContracts() {
@@ -174,11 +143,6 @@ async function loadContracts() {
   };
 }
 
-function timestampNow() {
-  const milliseconds = Date.now();
-  return { seconds: Math.floor(milliseconds / 1000), nanos: (milliseconds % 1000) * 1000000 };
-}
-
 function validateCard(request) {
   const number = String(request.credit_card_number || '').replaceAll('-', '').replaceAll(' ', '');
   const details = cardValidator(number).getCardDetails();
@@ -191,28 +155,20 @@ function validateCard(request) {
   return { type: details.card_type, last4: number.slice(-4) };
 }
 
-function prepareTokenization(state, request) {
+function tokenize(signingKey, request, now = Date.now()) {
   if (!request.order_id || !request.idempotency_key) throw new Error('INVALID_TOKEN_REQUEST');
-  const card = validateCard(request);
-  const identity = `${request.order_id}\0${request.idempotency_key}`;
-  const existing = state.value.tokenKeys[identity];
-  if (existing && state.value.tokens[existing] && state.value.tokens[existing].expiresAt > Date.now()) {
-    return { payment_token: existing, expires_at: new Date(state.value.tokens[existing].expiresAt).toISOString() };
-  }
-  const token = `ptok_${crypto.randomBytes(24).toString('base64url')}`;
-  const expiresAt = Date.now() + 15 * 60 * 1000;
-  state.set('tokens', token, { orderId: request.order_id, cardType: card.type, last4: card.last4, expiresAt, consumed: false });
-  state.set('tokenKeys', identity, token);
-  return { payment_token: token, expires_at: new Date(expiresAt).toISOString() };
+  validateCard(request);
+  const expiresAt = now + PAYMENT_TOKEN_TTL_MS;
+  const paymentToken = signReference(PAYMENT_TOKEN_PREFIX, {
+    version: 1,
+    orderId: request.order_id,
+    expiresAt,
+    nonce: crypto.randomBytes(16).toString('base64url'),
+  }, signingKey);
+  return { payment_token: paymentToken, expires_at: new Date(expiresAt).toISOString() };
 }
 
-function tokenize(state, request) {
-  const result = prepareTokenization(state, request);
-  state.persist();
-  return result;
-}
-
-function processTokenBatch(entries, state) {
+function processTokenBatch(entries, signingKey) {
   logger.debug({
     topic: TOKEN_SUBJECT,
     message_kind: 'query',
@@ -222,17 +178,9 @@ function processTokenBatch(entries, state) {
   for (const entry of entries) {
     if (entry.error) continue;
     try {
-      entry.result = prepareTokenization(state, entry.request);
+      entry.result = tokenize(signingKey, entry.request);
     } catch (tokenError) {
       entry.error = tokenError;
-    }
-  }
-
-  try {
-    if (entries.some(entry => !entry.error)) state.persist();
-  } catch (persistError) {
-    for (const entry of entries) {
-      if (!entry.error) entry.error = persistError;
     }
   }
 
@@ -253,7 +201,7 @@ function processTokenBatch(entries, state) {
   }
 }
 
-function createTokenBatcher(state) {
+function createTokenBatcher(signingKey) {
   let buffered = [];
   let flushTimer;
   const flush = () => {
@@ -264,7 +212,7 @@ function createTokenBatcher(state) {
     }
     const batch = buffered;
     buffered = [];
-    processTokenBatch(batch, state);
+    processTokenBatch(batch, signingKey);
   };
   return entry => {
     buffered.push(entry);
@@ -289,7 +237,8 @@ function failure(code, message, retryable = false) {
 function outcome(contracts, cause, subject, messageType, PayloadType, payload) {
   const messageID = stableID(subject, cause.messageId);
   const envelope = {
-    messageId: messageID, messageType, schemaVersion: 1, occurredAt: timestampNow(), producer: 'paymentservice/phase5',
+    messageId: messageID, messageType, schemaVersion: 1,
+    occurredAt: cause.occurredAt || { seconds: 0, nanos: 0 }, producer: 'paymentservice/phase5',
     aggregateType: 'order', aggregateId: cause.aggregateId, aggregateVersion: cause.aggregateVersion,
     correlationId: cause.correlationId, causationId: cause.messageId, traceparent: cause.traceparent,
     tracestate: cause.tracestate, data: anyPayload(PayloadType, payload),
@@ -297,51 +246,66 @@ function outcome(contracts, cause, subject, messageType, PayloadType, payload) {
   return { messageID, subject, data: Buffer.from(contracts.Envelope.encode(envelope).finish()).toString('base64') };
 }
 
-function processCommand(state, contracts, subject, envelope) {
+function processCommand(signingKey, contracts, subject, envelope) {
   const mode = process.env.PAYMENT_FAILURE_MODE || '';
   if (subject === 'boutique.cmd.payment.authorize.v1') {
     const command = contracts.Authorize.decode(envelope.data.value);
-    const token = state.value.tokens[command.paymentToken];
-    if (mode === 'authorization_declined' || !token || token.orderId !== command.orderId || token.expiresAt <= Date.now() || token.consumed) {
+    let validToken = false;
+    try {
+      verifyPaymentToken(
+        command.paymentToken,
+        command.orderId,
+        signingKey,
+        occurredAtMilliseconds(envelope),
+      );
+      validToken = true;
+    } catch (_) {
+      validToken = false;
+    }
+    if (mode === 'authorization_declined' || !validToken) {
       return outcome(contracts, envelope, 'boutique.evt.payment.authorization-declined.v1', 'boutique.payment.AuthorizationDeclined.v1',
         contracts.Declined, { orderId: command.orderId, declineCategory: mode ? 'TEST_DECLINE' : 'INVALID_OR_EXPIRED_TOKEN' });
     }
-    const authorizationID = stableID('authorization', command.idempotencyKey);
-    const result = outcome(contracts, envelope, 'boutique.evt.payment.authorized.v1', 'boutique.payment.Authorized.v1', contracts.Authorized,
+    const authorizationID = authorizationReference(command, signingKey);
+    return outcome(contracts, envelope, 'boutique.evt.payment.authorized.v1', 'boutique.payment.Authorized.v1', contracts.Authorized,
       { orderId: command.orderId, authorizationId: authorizationID, amount: command.amount });
-    state.set('tokens', command.paymentToken, { ...token, consumed: true });
-    state.set('authorizations', authorizationID,
-      { orderId: command.orderId, amount: command.amount, captured: false, released: false });
-    return result;
   }
   if (subject === 'boutique.cmd.payment.capture.v1') {
     const command = contracts.Capture.decode(envelope.data.value);
-    const authorization = state.value.authorizations[command.authorizationId];
-    if (mode === 'capture_failed' || !authorization || authorization.orderId !== command.orderId || authorization.released) {
+    let validAuthorization = false;
+    try {
+      verifyAuthorization(command.authorizationId, command.orderId, signingKey);
+      validAuthorization = true;
+    } catch (_) {
+      validAuthorization = false;
+    }
+    if (mode === 'capture_failed' || !validAuthorization) {
       return outcome(contracts, envelope, 'boutique.evt.payment.capture-failed.v1', 'boutique.payment.CaptureFailed.v1', contracts.CaptureFailed,
         { orderId: command.orderId, authorizationId: command.authorizationId, failure: failure('CAPTURE_FAILED', 'Payment capture failed.', true) });
     }
-    const result = outcome(contracts, envelope, 'boutique.evt.payment.captured.v1', 'boutique.payment.Captured.v1', contracts.Captured,
+    return outcome(contracts, envelope, 'boutique.evt.payment.captured.v1', 'boutique.payment.Captured.v1', contracts.Captured,
       { orderId: command.orderId, transactionId: stableID('capture', command.idempotencyKey), amount: command.amount });
-    state.set('authorizations', command.authorizationId, { ...authorization, captured: true });
-    return result;
   }
   if (subject === 'boutique.cmd.payment.release-authorization.v1') {
     const command = contracts.Release.decode(envelope.data.value);
-    const authorization = state.value.authorizations[command.authorizationId];
-    if (mode === 'release_failed' || !authorization || authorization.orderId !== command.orderId) {
-      return outcome(contracts, envelope, 'boutique.evt.payment.authorization-release-failed.v1', 'boutique.payment.AuthorizationReleaseFailed.v1', contracts.ReleaseFailed,
-        { orderId: command.orderId, authorizationId: command.authorizationId, failure: failure('AUTHORIZATION_RELEASE_FAILED', 'Authorization release requires review.') });
+    let validAuthorization = false;
+    try {
+      verifyAuthorization(command.authorizationId, command.orderId, signingKey);
+      validAuthorization = true;
+    } catch (_) {
+      validAuthorization = false;
     }
-    const result = outcome(contracts, envelope, 'boutique.evt.payment.authorization-released.v1', 'boutique.payment.AuthorizationReleased.v1', contracts.Released,
+    if (mode === 'release_failed' || !validAuthorization) {
+      return outcome(contracts, envelope, 'boutique.evt.payment.authorization-release-failed.v1', 'boutique.payment.AuthorizationReleaseFailed.v1',
+        contracts.ReleaseFailed, { orderId: command.orderId, authorizationId: command.authorizationId, failure: failure('AUTHORIZATION_RELEASE_FAILED', 'Authorization release requires review.') });
+    }
+    return outcome(contracts, envelope, 'boutique.evt.payment.authorization-released.v1', 'boutique.payment.AuthorizationReleased.v1', contracts.Released,
       { orderId: command.orderId, authorizationId: command.authorizationId });
-    state.set('authorizations', command.authorizationId, { ...authorization, released: true });
-    return result;
   }
   throw new Error(`unsupported payment command ${subject}`);
 }
 
-async function processCommandBatch(messages, state, contracts, js) {
+async function processCommandBatch(messages, signingKey, contracts, js) {
   const commands = messages.map(message => {
     let correlationId = 'unknown';
     let messageId = 'unknown';
@@ -365,26 +329,9 @@ async function processCommandBatch(messages, state, contracts, js) {
   for (const command of commands) {
     if (command.error) continue;
     try {
-      let result = state.value.outcomes[command.envelope.messageId];
-      if (!result) {
-        result = processCommand(state, contracts, command.message.subject, command.envelope);
-        state.set('outcomes', command.envelope.messageId, result);
-      }
-      command.result = result;
+      command.result = processCommand(signingKey, contracts, command.message.subject, command.envelope);
     } catch (commandError) {
       command.error = commandError;
-    }
-  }
-
-  try {
-    // Persist all provider mutations and idempotent outcomes in one fsync.
-    // Nothing is published or acknowledged until the whole batch is durable.
-    if (commands.some(command => !command.error)) {
-      state.persist();
-    }
-  } catch (persistError) {
-    for (const command of commands) {
-      if (!command.error) command.error = persistError;
     }
   }
 
@@ -418,7 +365,7 @@ async function processCommandBatch(messages, state, contracts, js) {
   }));
 }
 
-async function runCommandConsumer(commandSubscription, state, contracts, js,
+async function runCommandConsumer(commandSubscription, signingKey, contracts, js,
     pullRefreshMs = COMMAND_PULL_REFRESH_MS) {
   // Legacy pull subscriptions do not request messages merely by being
   // iterated. Pull requests can also be lost during a reconnect without
@@ -449,7 +396,7 @@ async function runCommandConsumer(commandSubscription, state, contracts, js,
     const batch = buffered;
     buffered = [];
     processing = processing
-      .then(() => processCommandBatch(batch, state, contracts, js))
+      .then(() => processCommandBatch(batch, signingKey, contracts, js))
       .finally(() => {
         requestPull();
       });
@@ -483,7 +430,7 @@ function commandConsumerOptions() {
   return options;
 }
 
-async function superviseCommandConsumer(nc, js, state, contracts, workerStatus, initialSubscription,
+async function superviseCommandConsumer(nc, js, signingKey, contracts, workerStatus, initialSubscription,
     restartDelayMs = COMMAND_RESTART_DELAY_MS) {
   let commandSubscription = initialSubscription;
   while (!workerStatus.stopping && !nc.isClosed()) {
@@ -493,7 +440,7 @@ async function superviseCommandConsumer(nc, js, state, contracts, workerStatus, 
       }
       workerStatus.commandSubscription = commandSubscription;
       workerStatus.consumerReady = true;
-      await runCommandConsumer(commandSubscription, state, contracts, js);
+      await runCommandConsumer(commandSubscription, signingKey, contracts, js);
       if (workerStatus.stopping || nc.isClosed()) return;
       throw new Error('payment command consumer closed unexpectedly');
     } catch (workerError) {
@@ -514,11 +461,11 @@ async function superviseCommandConsumer(nc, js, state, contracts, workerStatus, 
 }
 
 async function startPaymentNATS() {
-  for (const key of ['NATS_URL', 'NATS_USER', 'NATS_PASSWORD', 'NATS_CA_FILE']) {
+  for (const key of ['NATS_URL', 'NATS_USER', 'NATS_PASSWORD', 'NATS_CA_FILE', 'PAYMENT_SIGNING_KEY']) {
     if (!process.env[key]) throw new Error(`${key} is required`);
   }
   const contracts = await loadContracts();
-  const state = new PaymentState(process.env.PAYMENT_STORE_PATH || '/tmp/payment/provider-state.json');
+  const signingKey = deriveSigningKey(process.env.PAYMENT_SIGNING_KEY);
   const nc = await connect({ servers: process.env.NATS_URL, user: process.env.NATS_USER, pass: process.env.NATS_PASSWORD,
     name: 'paymentservice/phase5', tls: { caFile: process.env.NATS_CA_FILE },
     reconnectTimeWait: 2000, maxReconnectAttempts: -1, pingInterval: 20000, maxPingOut: 2 });
@@ -526,7 +473,7 @@ async function startPaymentNATS() {
   const workerStatus = {
     connectionReady: !nc.isClosed(), consumerReady: false, stopping: false, commandSubscription: undefined,
   };
-  const enqueueTokenization = createTokenBatcher(state);
+  const enqueueTokenization = createTokenBatcher(signingKey);
 
   const tokenSubscription = nc.subscribe(TOKEN_SUBJECT, { queue: 'payment-tokenize-v1', callback: (err, message) => {
     if (err) return;
@@ -543,7 +490,7 @@ async function startPaymentNATS() {
   }});
 
   const commandSubscription = await js.pullSubscribe(COMMAND_SUBJECT, commandConsumerOptions());
-  superviseCommandConsumer(nc, js, state, contracts, workerStatus, commandSubscription)
+  superviseCommandConsumer(nc, js, signingKey, contracts, workerStatus, commandSubscription)
     .catch(workerError => {
       workerStatus.consumerReady = false;
       logger.error({ error: workerError.message }, 'payment consumer stopped');
@@ -557,7 +504,7 @@ async function startPaymentNATS() {
     workerStatus.connectionReady = false;
     logger.error({ error: statusError.message }, 'payment NATS status monitor stopped');
   });
-  logger.info('Payment tokenization and durable command handlers are ready');
+  logger.info('Stateless payment tokenization and durable command handlers are ready');
   return {
     nc,
     tokenSubscription,
@@ -572,6 +519,7 @@ async function startPaymentNATS() {
 }
 
 module.exports = {
-  startPaymentNATS, stableID, validateCard, tokenize, PaymentState, loadContracts,
+  startPaymentNATS, stableID, deriveSigningKey, validateCard, tokenize, verifyPaymentToken,
+  authorizationReference, verifyAuthorization, occurredAtMilliseconds, loadContracts,
   processTokenBatch, processCommand, processCommandBatch, runCommandConsumer, superviseCommandConsumer,
 };

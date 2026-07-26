@@ -5,7 +5,6 @@ package main
 
 import (
 	"errors"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -20,15 +19,13 @@ import (
 
 func testWorker(t *testing.T) *checkoutWorker {
 	t.Helper()
-	store, err := openStateStore(filepath.Join(t.TempDir(), "sagas.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if err := store.Close(); err != nil {
-			t.Error(err)
-		}
-	})
+	store, _ := newTestStateStore(t)
+	seedTestCheckoutState(t, store)
+	return &checkoutWorker{store: store, stepTimeout: time.Minute}
+}
+
+func seedTestCheckoutState(t *testing.T, store *stateStore) {
+	t.Helper()
 	if err := store.Update(func(state *persistedState) error {
 		state.CatalogRevision = 7
 		state.Rates = &eventsv1.CurrencyRatesUpdatedEvent{BaseCurrencyCode: "USD", RateRevision: 9,
@@ -41,7 +38,6 @@ func testWorker(t *testing.T) *checkoutWorker {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	return &checkoutWorker{store: store, stepTimeout: time.Minute}
 }
 
 func testEnvelope(t *testing.T, messageID, orderID string, version uint64, payload proto.Message) *commonv1.MessageEnvelope {
@@ -116,6 +112,85 @@ func TestOrderTotalDoesNotOverflowFractionalNanos(t *testing.T) {
 	want := &commonv1.Money{CurrencyCode: "EUR", Units: 314, Nanos: 400_707_653}
 	if !proto.Equal(snapshot.Total, want) {
 		t.Fatalf("order total = %v, want %v", snapshot.Total, want)
+	}
+}
+
+func TestSagaTransitionsAcrossStatelessPods(t *testing.T) {
+	firstStore, server := newTestStateStore(t)
+	secondStore := openSharedTestStateStore(t, server)
+	seedTestCheckoutState(t, firstStore)
+	first := &checkoutWorker{store: firstStore, stepTimeout: time.Minute}
+	second := &checkoutWorker{store: secondStore, stepTimeout: time.Minute}
+	orderID := "order-cross-pod"
+
+	submitTestOrder(t, first, orderID)
+	applyQuote(t, second, orderID)
+	applyAuthorization(t, first, orderID)
+
+	state, err := second.store.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	saga := state.Orders[orderID]
+	if saga == nil || saga.Stage != stageWaitingShipment || saga.AuthorizationID != "auth-1" {
+		t.Fatalf("cross-pod saga state = %#v, want waiting for shipment", saga)
+	}
+	version := saga.Version
+	applyQuote(t, second, orderID)
+	state, err = first.store.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Orders[orderID].Version != version {
+		t.Fatalf("duplicate event advanced cross-pod saga from version %d to %d", version, state.Orders[orderID].Version)
+	}
+}
+
+func TestConcurrentDuplicateSagaEventAcrossStatelessPods(t *testing.T) {
+	firstStore, server := newTestStateStore(t)
+	secondStore := openSharedTestStateStore(t, server)
+	seedTestCheckoutState(t, firstStore)
+	first := &checkoutWorker{store: firstStore, stepTimeout: time.Minute}
+	second := &checkoutWorker{store: secondStore, stepTimeout: time.Minute}
+	orderID := "order-duplicate-cross-pod"
+	submitTestOrder(t, first, orderID)
+	quote := testEnvelope(t, "quote-"+orderID, orderID, 1,
+		&eventsv1.ShippingOrderQuoteCalculatedEvent{
+			OrderId: orderID,
+			CostUsd: &commonv1.Money{CurrencyCode: "USD", Units: 5},
+		})
+
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	for _, worker := range []*checkoutWorker{first, second} {
+		go func(worker *checkoutWorker) {
+			<-start
+			results <- worker.handleSagaEvent("boutique.evt.shipping.order-quote-calculated.v1", quote)
+		}(worker)
+	}
+	close(start)
+	for range 2 {
+		if err := <-results; err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	state, err := first.store.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	saga := state.Orders[orderID]
+	if saga == nil || saga.Version != 2 || saga.Stage != stageWaitingAuthorize {
+		t.Fatalf("duplicate cross-pod transition produced saga %#v", saga)
+	}
+	authorizeCommands := 0
+	for _, message := range state.Outbox {
+		if message.Subject == "boutique.cmd.payment.authorize.v1" {
+			authorizeCommands++
+		}
+	}
+	if authorizeCommands != 1 {
+		t.Fatalf("authorization commands = %d, want 1", authorizeCommands)
 	}
 }
 

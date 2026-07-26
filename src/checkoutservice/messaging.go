@@ -263,6 +263,11 @@ func (worker *checkoutWorker) handleProjectionMessages(messages []*nats.Msg) []e
 	}
 	commitErr := worker.store.UpdateTracked(func(state *persistedState) error {
 		for index, envelope := range envelopes {
+			if envelope != nil {
+				results[index] = nil
+			}
+		}
+		for index, envelope := range envelopes {
 			if envelope == nil {
 				continue
 			}
@@ -378,6 +383,11 @@ func (worker *checkoutWorker) handleCommandMessages(messages []*nats.Msg) []erro
 	}
 	commitErr := worker.store.UpdateTracked(func(state *persistedState) error {
 		for index, envelope := range envelopes {
+			if envelope != nil {
+				results[index] = nil
+			}
+		}
+		for index, envelope := range envelopes {
 			if envelope == nil {
 				continue
 			}
@@ -420,6 +430,11 @@ func (worker *checkoutWorker) handleEventMessages(messages []*nats.Msg) []error 
 		}
 	}
 	commitErr := worker.store.UpdateTracked(func(state *persistedState) error {
+		for index, envelope := range envelopes {
+			if envelope != nil {
+				results[index] = nil
+			}
+		}
 		for index, envelope := range envelopes {
 			if envelope == nil {
 				continue
@@ -573,7 +588,9 @@ func (worker *checkoutWorker) scanDeadlines() {
 
 func googleTimestamp(value time.Time) *timestamppb.Timestamp { return timestamppb.New(value) }
 
-func (worker *checkoutWorker) Ready() bool { return worker.ready.Load() && worker.nc.IsConnected() }
+func (worker *checkoutWorker) Ready() bool {
+	return worker.ready.Load() && worker.nc.IsConnected() && worker.store.Ready()
+}
 
 func (worker *checkoutWorker) Close() error {
 	var result error

@@ -45,7 +45,7 @@ Each domain service owns its state and publishes facts about that state:
 | Cart | Cart contents and monotonically increasing cart versions |
 | Checkout | Orders and durable saga state |
 | Shipping | Quotes, shipments, and carrier idempotency |
-| Payment | Token vault, authorizations, captures, and provider idempotency |
+| Payment | Stateless signed payment/authorization references and deterministic provider outcomes |
 | Email | Delivery attempts and notification outcome |
 | Recommendation / ad / assistant | Generated result and failure outcome |
 | Storefront projection | Disposable, rebuildable query views; never domain truth |

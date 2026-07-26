@@ -126,7 +126,7 @@ The emitted dependencies are:
 | `currencyservice` | `nats` |
 | `emailservice` | `nats`, `provider_store` |
 | `frontend` | `nats` |
-| `paymentservice` | `nats`, `provider_store` |
+| `paymentservice` | `nats`, `token_verifier` |
 | `productcatalogservice` | `catalog`, `nats` |
 | `recommendationservice` | `nats` |
 | `shippingservice` | `nats`, `provider_store` |

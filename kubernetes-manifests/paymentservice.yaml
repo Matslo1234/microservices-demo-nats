@@ -19,9 +19,11 @@ metadata:
   labels:
     app: paymentservice
 spec:
-  # Provider outcomes are persisted by a single writer.
   strategy:
-    type: Recreate
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
   selector:
     matchLabels:
       app: paymentservice
@@ -37,32 +39,9 @@ spec:
       serviceAccountName: paymentservice
       terminationGracePeriodSeconds: 35
       securityContext:
-        fsGroup: 1000
         runAsGroup: 1000
         runAsNonRoot: true
         runAsUser: 1000
-      initContainers:
-      - name: volume-permissions
-        image: busybox:1.37.0
-        command: ["sh", "-ec", "chown 1000:1000 /data"]
-        securityContext:
-          allowPrivilegeEscalation: false
-          capabilities:
-            drop: ["ALL"]
-            add: ["CHOWN"]
-          readOnlyRootFilesystem: true
-          runAsNonRoot: false
-          runAsUser: 0
-        volumeMounts:
-        - name: payment-data
-          mountPath: /data
-        resources:
-          requests:
-            cpu: 5m
-            memory: 8Mi
-          limits:
-            cpu: 50m
-            memory: 2Gi
       containers:
       - name: server
         securityContext:
@@ -87,8 +66,6 @@ spec:
           value: "true"
         - name: NATS_REQUIRED_SUBSCRIPTIONS
           value: "boutique.qry.payment.tokenize.v1,payment-commands-v1"
-        - name: PAYMENT_STORE_PATH
-          value: /var/lib/payment/provider-state.json
         envFrom:
         - configMapRef:
             name: nats-client-config
@@ -98,8 +75,6 @@ spec:
         - name: nats-ca
           mountPath: /etc/nats-ca
           readOnly: true
-        - name: payment-data
-          mountPath: /var/lib/payment
         readinessProbe:
           httpGet:
             path: /readyz
@@ -122,21 +97,8 @@ spec:
       - name: nats-ca
         configMap:
           name: nats-ca
-      - name: payment-data
-        persistentVolumeClaim:
-          claimName: payment-data
 ---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: paymentservice
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: payment-data
-spec:
-  accessModes: ["ReadWriteOnce"]
-  resources:
-    requests:
-      storage: 1Gi

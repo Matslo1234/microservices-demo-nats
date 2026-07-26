@@ -29,7 +29,7 @@ class PaymentHealthServer {
       response.writeHead(200, { 'Content-Type': 'text/plain; version=0.0.4' });
       response.end(
         `boutique_dependency_ready{service="paymentservice",dependency="nats"} ${ready ? 1 : 0}\n` +
-        'boutique_dependency_ready{service="paymentservice",dependency="provider_store"} 1\n'
+        'boutique_dependency_ready{service="paymentservice",dependency="token_verifier"} 1\n'
       );
       return;
     }

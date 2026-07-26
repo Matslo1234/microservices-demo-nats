@@ -28,4 +28,3 @@ release/wi-kubernetes-manifests.yaml
 vendor/
 gha-creds-*.json
 docs/development/*
-!docs/development/benchmark-progress.md

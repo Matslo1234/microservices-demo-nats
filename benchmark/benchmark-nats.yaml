@@ -787,7 +787,7 @@ data:
       {
         printf '%s' '{"apiVersion":"v1","kind":"Secret","metadata":{"name":"nats-server-auth","namespace":"nats","labels":{"app.kubernetes.io/name":"nats","app.kubernetes.io/component":"setup","app.kubernetes.io/part-of":"online-boutique"}},"type":"Opaque","data":{'
         first=true
-        for key in JETSTREAM_ENCRYPTION_KEY SYS_PASSWORD ADMIN_PASSWORD; do
+        for key in JETSTREAM_ENCRYPTION_KEY SYS_PASSWORD ADMIN_PASSWORD PAYMENT_SIGNING_KEY; do
           value=$(random_secret) || return 1
           if [ "${first}" = true ]; then first=false; else printf ','; fi
           printf '"%s":"%s"' "${key}" "$(b64_text "${value}")"
@@ -840,13 +840,18 @@ data:
       user=$3
       password=$4
       output=$5
-      printf '%s\n' "{\"apiVersion\":\"v1\",\"kind\":\"Secret\",\"metadata\":{\"name\":\"${name}\",\"namespace\":\"${namespace}\",\"labels\":{\"app.kubernetes.io/name\":\"nats\",\"app.kubernetes.io/component\":\"setup\",\"app.kubernetes.io/part-of\":\"online-boutique\"}},\"type\":\"Opaque\",\"data\":{\"NATS_URL\":\"$(b64_text "${nats_url}")\",\"NATS_USER\":\"$(b64_text "${user}")\",\"NATS_PASSWORD\":\"${password}\"}}" > "${output}"
+      payment_signing_key=${6:-}
+      extra_data=
+      if [ -n "${payment_signing_key}" ]; then
+        extra_data=",\"PAYMENT_SIGNING_KEY\":\"${payment_signing_key}\""
+      fi
+      printf '%s\n' "{\"apiVersion\":\"v1\",\"kind\":\"Secret\",\"metadata\":{\"name\":\"${name}\",\"namespace\":\"${namespace}\",\"labels\":{\"app.kubernetes.io/name\":\"nats\",\"app.kubernetes.io/component\":\"setup\",\"app.kubernetes.io/part-of\":\"online-boutique\"}},\"type\":\"Opaque\",\"data\":{\"NATS_URL\":\"$(b64_text "${nats_url}")\",\"NATS_USER\":\"$(b64_text "${user}")\",\"NATS_PASSWORD\":\"${password}\"${extra_data}}}" > "${output}"
     }
 
     reconcile() {
       write_auth_secret "${workdir}/auth.json" || return 1
       ensure_from_file secrets nats nats-server-auth "${workdir}/auth.json" || return 1
-      for key in JETSTREAM_ENCRYPTION_KEY SYS_PASSWORD ADMIN_PASSWORD; do
+      for key in JETSTREAM_ENCRYPTION_KEY SYS_PASSWORD ADMIN_PASSWORD PAYMENT_SIGNING_KEY; do
         secret_data nats nats-server-auth "${key}" >/dev/null || return 1
       done
       for service in ${services}; do
@@ -872,7 +877,12 @@ data:
       for service in ${services}; do
         key=$(printf '%s' "${service}" | tr '[:lower:]' '[:upper:]')_PASSWORD
         password=$(secret_data nats nats-server-auth "${key}") || return 1
-        write_credentials_secret default "nats-credentials-${service}" "${service}" "${password}" "${workdir}/credential-${service}.json" || return 1
+        if [ "${service}" = paymentservice ]; then
+          payment_signing_key=$(secret_data nats nats-server-auth PAYMENT_SIGNING_KEY) || return 1
+          write_credentials_secret default "nats-credentials-${service}" "${service}" "${password}" "${workdir}/credential-${service}.json" "${payment_signing_key}" || return 1
+        else
+          write_credentials_secret default "nats-credentials-${service}" "${service}" "${password}" "${workdir}/credential-${service}.json" || return 1
+        fi
         sync_from_file secrets default "nats-credentials-${service}" "${workdir}/credential-${service}.json" || return 1
       done
 
@@ -1007,29 +1017,19 @@ spec:
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: checkout-data
+  name: redis-checkout-data
+  labels:
+    app: redis-checkout
 spec:
-  accessModes:
-  - ReadWriteOnce
+  accessModes: ["ReadWriteOnce"]
   resources:
     requests:
-      storage: 1Gi
+      storage: 5Gi
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: email-data
-spec:
-  accessModes:
-  - ReadWriteOnce
-  resources:
-    requests:
-      storage: 1Gi
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: payment-data
 spec:
   accessModes:
   - ReadWriteOnce
@@ -1381,128 +1381,212 @@ spec:
           name: nats-ca
         name: nats-ca
 ---
+# Copyright 2018 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 apiVersion: apps/v1
 kind: Deployment
 metadata:
+  name: checkoutservice
   labels:
     app: checkoutservice
-  name: checkoutservice
 spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
   selector:
     matchLabels:
       app: checkoutservice
-  strategy:
-    type: Recreate
   template:
     metadata:
-      annotations:
-        prometheus.io/path: /metrics
-        prometheus.io/port: "8080"
-        prometheus.io/scrape: "true"
       labels:
         app: checkoutservice
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: /metrics
     spec:
-      containers:
-      - env:
-        - name: PORT
-          value: "8080"
-        - name: NATS_REQUIRED
-          value: "true"
-        - name: NATS_REQUIRED_SUBSCRIPTIONS
-          value: checkout-catalog-v1,checkout-currency-v1,checkout-cart-v1,checkout-order-commands-v1,checkout-saga-shipping-v1,checkout-saga-payment-v1
-        - name: CHECKOUT_STORE_PATH
-          value: /var/lib/checkout/sagas.json
-        - name: CHECKOUT_SAGA_STEP_TIMEOUT
-          value: 30s
-        - name: CHECKOUT_PROJECTION_CATCHUP_TIMEOUT
-          value: 10m
-        - name: GOMEMLIMIT
-          value: 400MiB
-        envFrom:
-        - configMapRef:
-            name: nats-client-config
-        - secretRef:
-            name: nats-credentials-checkoutservice
-        image: matslo123/checkoutservice@sha256:dd1e2cd16e5d3ec0c1237921d0fd0a1297b75a8e47798f12e6d23b9be3155f0f
-        livenessProbe:
-          httpGet:
-            path: /healthz
-            port: health
-        name: server
-        ports:
-        - containerPort: 8080
-          name: health
-        readinessProbe:
-          httpGet:
-            path: /readyz
-            port: health
-        resources:
-          limits:
-            cpu: "2"
-            memory: 2Gi
-          requests:
-            cpu: 500m
-            memory: 128Mi
-        securityContext:
-          allowPrivilegeEscalation: false
-          capabilities:
-            drop:
-            - ALL
-          privileged: false
-          readOnlyRootFilesystem: true
-        startupProbe:
-          failureThreshold: 180
-          httpGet:
-            path: /healthz
-            port: health
-          periodSeconds: 5
-        volumeMounts:
-        - mountPath: /etc/nats-ca
-          name: nats-ca
-          readOnly: true
-        - mountPath: /var/lib/checkout
-          name: checkout-data
-      initContainers:
-      - command:
-        - sh
-        - -ec
-        - chown 1000:1000 /data
-        image: busybox:1.37.0
-        name: volume-permissions
-        resources:
-          limits:
-            cpu: 50m
-            memory: 2Gi
-          requests:
-            cpu: 5m
-            memory: 8Mi
-        securityContext:
-          allowPrivilegeEscalation: false
-          capabilities:
-            add:
-            - CHOWN
-            drop:
-            - ALL
-          readOnlyRootFilesystem: true
-          runAsNonRoot: false
-          runAsUser: 0
-        volumeMounts:
-        - mountPath: /data
-          name: checkout-data
+      serviceAccountName: checkoutservice
+      terminationGracePeriodSeconds: 35
       securityContext:
         fsGroup: 1000
         runAsGroup: 1000
         runAsNonRoot: true
         runAsUser: 1000
-      serviceAccountName: checkoutservice
-      terminationGracePeriodSeconds: 35
+      containers:
+        - name: server
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            privileged: false
+            readOnlyRootFilesystem: true
+          image: matslo123/checkoutservice@sha256:547be8fe50ff17c4729e4e3db9312b63efe581d7d514f2416354395ca951f63c
+          ports:
+          - name: health
+            containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            periodSeconds: 5
+            failureThreshold: 180
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+          env:
+          - name: PORT
+            value: "8080"
+          - name: NATS_REQUIRED
+            value: "true"
+          - name: NATS_REQUIRED_SUBSCRIPTIONS
+            value: "checkout-catalog-v1,checkout-currency-v1,checkout-cart-v1,checkout-order-commands-v1,checkout-saga-shipping-v1,checkout-saga-payment-v1"
+          - name: CHECKOUT_REDIS_ADDR
+            value: redis-checkout:6379
+          - name: CHECKOUT_REDIS_PREFIX
+            value: checkout:v1
+          - name: CHECKOUT_SAGA_STEP_TIMEOUT
+            value: 30s
+          - name: CHECKOUT_PROJECTION_CATCHUP_TIMEOUT
+            value: 10m
+          - name: GOMEMLIMIT
+            value: "400MiB"
+          envFrom:
+          - configMapRef:
+              name: nats-client-config
+          - secretRef:
+              name: nats-credentials-checkoutservice
+          volumeMounts:
+          - name: nats-ca
+            mountPath: /etc/nats-ca
+            readOnly: true
+          resources:
+            requests:
+              cpu: 500m
+              memory: 128Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
       volumes:
-      - configMap:
+      - name: nats-ca
+        configMap:
           name: nats-ca
-        name: nats-ca
-      - name: checkout-data
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis-checkout
+  labels:
+    app: redis-checkout
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: redis-checkout
+  template:
+    metadata:
+      labels:
+        app: redis-checkout
+    spec:
+      securityContext:
+        fsGroup: 1000
+        runAsGroup: 1000
+        runAsNonRoot: true
+        runAsUser: 1000
+      initContainers:
+      - name: volume-permissions
+        image: redis:8.2-alpine
+        command: ["sh", "-ec", "chown 1000:1000 /data"]
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+            add: ["CHOWN"]
+          readOnlyRootFilesystem: true
+          runAsNonRoot: false
+          runAsUser: 0
+        volumeMounts:
+        - name: redis-data
+          mountPath: /data
+        resources:
+          requests:
+            cpu: 5m
+            memory: 8Mi
+          limits:
+            cpu: 50m
+            memory: 64Mi
+      containers:
+      - name: redis
+        image: redis:8.2-alpine
+        # Checkout acknowledges JetStream input only after this store commits.
+        # Fsync every write keeps that acknowledgement boundary crash-durable.
+        args: ["redis-server", "--appendonly", "yes", "--appendfsync", "always"]
+        ports:
+        - name: redis
+          containerPort: 6379
+        readinessProbe:
+          exec:
+            command: ["redis-cli", "ping"]
+          periodSeconds: 5
+        livenessProbe:
+          exec:
+            command: ["redis-cli", "ping"]
+          periodSeconds: 5
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+          readOnlyRootFilesystem: true
+        volumeMounts:
+        - name: redis-data
+          mountPath: /data
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 1Gi
+      volumes:
+      - name: redis-data
         persistentVolumeClaim:
-          claimName: checkout-data
+          claimName: redis-checkout-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-checkout
+  labels:
+    app: redis-checkout
+spec:
+  selector:
+    app: redis-checkout
+  ports:
+  - name: redis
+    port: 6379
+    targetPort: redis
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -1877,7 +1961,10 @@ spec:
     matchLabels:
       app: paymentservice
   strategy:
-    type: Recreate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+    type: RollingUpdate
   template:
     metadata:
       annotations:
@@ -1899,14 +1986,12 @@ spec:
           value: "true"
         - name: NATS_REQUIRED_SUBSCRIPTIONS
           value: boutique.qry.payment.tokenize.v1,payment-commands-v1
-        - name: PAYMENT_STORE_PATH
-          value: /var/lib/payment/provider-state.json
         envFrom:
         - configMapRef:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-paymentservice
-        image: matslo123/paymentservice@sha256:156c4747e072ced9249f93ec9850d1e486bf88efba98110f0a5cabac89d3b79f
+        image: matslo123/paymentservice@sha256:80acca8f5e510bee061aecdf263465a984a031b3a15c1a31ab97537cc3498da7
         livenessProbe:
           failureThreshold: 6
           httpGet:
@@ -1940,37 +2025,7 @@ spec:
         - mountPath: /etc/nats-ca
           name: nats-ca
           readOnly: true
-        - mountPath: /var/lib/payment
-          name: payment-data
-      initContainers:
-      - command:
-        - sh
-        - -ec
-        - chown 1000:1000 /data
-        image: busybox:1.37.0
-        name: volume-permissions
-        resources:
-          limits:
-            cpu: 50m
-            memory: 2Gi
-          requests:
-            cpu: 5m
-            memory: 8Mi
-        securityContext:
-          allowPrivilegeEscalation: false
-          capabilities:
-            add:
-            - CHOWN
-            drop:
-            - ALL
-          readOnlyRootFilesystem: true
-          runAsNonRoot: false
-          runAsUser: 0
-        volumeMounts:
-        - mountPath: /data
-          name: payment-data
       securityContext:
-        fsGroup: 1000
         runAsGroup: 1000
         runAsNonRoot: true
         runAsUser: 1000
@@ -1980,9 +2035,6 @@ spec:
       - configMap:
           name: nats-ca
         name: nats-ca
-      - name: payment-data
-        persistentVolumeClaim:
-          claimName: payment-data
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -3096,3 +3148,40 @@ spec:
   policyTypes:
   - Ingress
   - Egress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: checkout-to-redis
+spec:
+  podSelector:
+    matchLabels:
+      app: checkoutservice
+  policyTypes: ["Egress"]
+  egress:
+  - to:
+    - podSelector:
+        matchLabels:
+          app: redis-checkout
+    ports:
+    - protocol: TCP
+      port: 6379
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: redis-from-checkout
+spec:
+  podSelector:
+    matchLabels:
+      app: redis-checkout
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app: checkoutservice
+    ports:
+    - protocol: TCP
+      port: 6379
+  egress: []

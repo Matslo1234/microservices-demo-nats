@@ -36,7 +36,8 @@ forbid(ROOT / "src/checkoutservice", checkout,
        "NewCartServiceClient", "NewProductCatalogServiceClient", "NewCurrencyServiceClient",
        "NewShippingServiceClient", "NewPaymentServiceClient", "NewEmailServiceClient")
 require(ROOT / "src/checkoutservice", checkout,
-        "checkout-order-commands-v1", "sagas.json", "Outbox", "Inbox",
+        "checkout-order-commands-v1", "CHECKOUT_REDIS_ADDR", "TxPipelined", "Watch",
+        "Outbox", "Inbox",
         "WAITING_FOR_QUOTE", "WAITING_FOR_AUTHORIZATION", "WAITING_FOR_SHIPMENT",
         "WAITING_FOR_CAPTURE", "COMPENSATING", "MANUAL_REVIEW",
         "boutique.cmd.payment.release-authorization.v1",
@@ -48,8 +49,11 @@ payment_path, payment = source("src", "paymentservice", "nats_worker.js")
 require(payment_path, payment,
         "boutique.qry.payment.tokenize.v1", "payment-commands-v1",
         "INVALID_OR_EXPIRED_TOKEN", "authorization_declined", "capture_failed", "release_failed",
-        "state.value.outcomes", "Nats-Msg-Id")
-forbid(payment_path, payment, "credit_card_number:", "credit_card_cvv:")
+        "ptok_v1", "pauth_v1", "PAYMENT_SIGNING_KEY",
+        "crypto.hkdfSync", "crypto.timingSafeEqual", "Nats-Msg-Id")
+forbid(payment_path, payment,
+       "credit_card_number:", "credit_card_cvv:", "PaymentState", "PAYMENT_STORE_PATH",
+       "provider-state.json")
 server_path, payment_server = source("src", "paymentservice", "server.js")
 forbid(server_path, payment_server, "JSON.stringify(call.request)")
 
@@ -71,9 +75,27 @@ require(ROOT / "src/storefrontprojectionservice", projection,
         'js.KeyValue("STOREFRONT_ORDERS")', '"boutique.evt.order.completed.v1"',
         '"boutique.evt.order.manual-review-required.v1"', '"order":', "orderQuery")
 
+checkout_manifest_path, checkout_manifest = source(
+    "kubernetes-manifests", "checkoutservice.yaml")
+require(checkout_manifest_path, checkout_manifest,
+        "CHECKOUT_REDIS_ADDR", "redis-checkout:6379", "redis-checkout-data",
+        "type: RollingUpdate", "maxUnavailable: 0",
+        "nats-client-config", "nats-ca")
+forbid(checkout_manifest_path, checkout_manifest, "CHECKOUT_STORE_PATH")
+
+payment_manifest_path, payment_manifest = source(
+    "kubernetes-manifests", "paymentservice.yaml")
+require(payment_manifest_path, payment_manifest,
+        "type: RollingUpdate", "maxUnavailable: 0", "nats-client-config", "nats-ca")
+forbid(payment_manifest_path, payment_manifest,
+       "PAYMENT_STORE_PATH", "payment-data", "PersistentVolumeClaim", "type: Recreate")
+
+setup_path, setup = source("kubernetes-manifests", "nats", "base", "setup.yaml")
+require(setup_path, setup,
+        "PAYMENT_SIGNING_KEY", '[ "${service}" = paymentservice ]',
+        'sync_from_file secrets default "nats-credentials-${service}"')
+
 for manifest_name, store_path, claim in (
-    ("checkoutservice.yaml", "CHECKOUT_STORE_PATH", "checkout-data"),
-    ("paymentservice.yaml", "PAYMENT_STORE_PATH", "payment-data"),
     ("shippingservice.yaml", "SHIPPING_STORE_PATH", "shipping-data"),
     ("emailservice.yaml", "EMAIL_STORE_PATH", "email-data"),
 ):

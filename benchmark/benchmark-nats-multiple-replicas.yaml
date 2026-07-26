@@ -1283,7 +1283,7 @@ metadata:
   name: nats-setup
   namespace: nats
 spec:
-  replicas: 1
+  replicas: 3
   selector:
     matchLabels:
       app.kubernetes.io/name: nats-setup
@@ -1358,6 +1358,7 @@ metadata:
     app: adservice
   name: adservice
 spec:
+  replicas: 3
   selector:
     matchLabels:
       app: adservice
@@ -1437,7 +1438,6 @@ metadata:
     app: benchmarkservice
   name: benchmarkservice
 spec:
-  replicas: 1
   selector:
     matchLabels:
       app: benchmarkservice
@@ -1517,6 +1517,7 @@ metadata:
     app: cartservice
   name: cartservice
 spec:
+  replicas: 3
   selector:
     matchLabels:
       app: cartservice
@@ -1609,7 +1610,7 @@ metadata:
   labels:
     app: checkoutservice
 spec:
-  replicas: 2
+  replicas: 3
   strategy:
     type: RollingUpdate
     rollingUpdate:
@@ -1802,6 +1803,7 @@ metadata:
     app: currencyservice
   name: currencyservice
 spec:
+  replicas: 3
   selector:
     matchLabels:
       app: currencyservice
@@ -1877,6 +1879,7 @@ metadata:
     app: emailservice
   name: emailservice
 spec:
+  replicas: 3
   selector:
     matchLabels:
       app: emailservice
@@ -2028,6 +2031,7 @@ metadata:
     app: frontend
   name: frontend
 spec:
+  replicas: 3
   selector:
     matchLabels:
       app: frontend
@@ -2158,6 +2162,7 @@ metadata:
     app: paymentservice
   name: paymentservice
 spec:
+  replicas: 3
   selector:
     matchLabels:
       app: paymentservice
@@ -2239,6 +2244,7 @@ metadata:
     app: productcatalogservice
   name: productcatalogservice
 spec:
+  replicas: 3
   selector:
     matchLabels:
       app: productcatalogservice
@@ -2314,6 +2320,7 @@ metadata:
     app: recommendationservice
   name: recommendationservice
 spec:
+  replicas: 3
   selector:
     matchLabels:
       app: recommendationservice
@@ -2487,6 +2494,7 @@ metadata:
     app: shippingservice
   name: shippingservice
 spec:
+  replicas: 3
   selector:
     matchLabels:
       app: shippingservice
@@ -2601,7 +2609,7 @@ metadata:
     app: storefrontprojectionservice
   name: storefrontprojectionservice
 spec:
-  replicas: 1
+  replicas: 3
   selector:
     matchLabels:
       app: storefrontprojectionservice
@@ -3329,237 +3337,6 @@ spec:
   policyTypes:
   - Ingress
   - Egress
----
-apiVersion: autoscaling/v2
-kind: HorizontalPodAutoscaler
-metadata:
-  labels:
-    app: adservice
-  name: adservice
-spec:
-  maxReplicas: 10
-  metrics:
-  - resource:
-      name: cpu
-      target:
-        averageUtilization: 60
-        type: Utilization
-    type: Resource
-  minReplicas: 1
-  scaleTargetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: adservice
----
-apiVersion: autoscaling/v2
-kind: HorizontalPodAutoscaler
-metadata:
-  labels:
-    app: cartservice
-  name: cartservice
-spec:
-  maxReplicas: 10
-  metrics:
-  - resource:
-      name: cpu
-      target:
-        averageUtilization: 60
-        type: Utilization
-    type: Resource
-  minReplicas: 1
-  scaleTargetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: cartservice
----
-apiVersion: autoscaling/v2
-kind: HorizontalPodAutoscaler
-metadata:
-  labels:
-    app: checkoutservice
-  name: checkoutservice
-spec:
-  maxReplicas: 10
-  metrics:
-  - resource:
-      name: cpu
-      target:
-        averageUtilization: 60
-        type: Utilization
-    type: Resource
-  minReplicas: 1
-  scaleTargetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: checkoutservice
----
-apiVersion: autoscaling/v2
-kind: HorizontalPodAutoscaler
-metadata:
-  labels:
-    app: currencyservice
-  name: currencyservice
-spec:
-  maxReplicas: 10
-  metrics:
-  - resource:
-      name: cpu
-      target:
-        averageUtilization: 60
-        type: Utilization
-    type: Resource
-  minReplicas: 1
-  scaleTargetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: currencyservice
----
-apiVersion: autoscaling/v2
-kind: HorizontalPodAutoscaler
-metadata:
-  labels:
-    app: emailservice
-  name: emailservice
-spec:
-  maxReplicas: 10
-  metrics:
-  - resource:
-      name: cpu
-      target:
-        averageUtilization: 60
-        type: Utilization
-    type: Resource
-  minReplicas: 1
-  scaleTargetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: emailservice
----
-apiVersion: autoscaling/v2
-kind: HorizontalPodAutoscaler
-metadata:
-  labels:
-    app: frontend
-  name: frontend
-spec:
-  maxReplicas: 10
-  metrics:
-  - resource:
-      name: cpu
-      target:
-        averageUtilization: 60
-        type: Utilization
-    type: Resource
-  minReplicas: 1
-  scaleTargetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: frontend
----
-apiVersion: autoscaling/v2
-kind: HorizontalPodAutoscaler
-metadata:
-  labels:
-    app: paymentservice
-  name: paymentservice
-spec:
-  maxReplicas: 10
-  metrics:
-  - resource:
-      name: cpu
-      target:
-        averageUtilization: 60
-        type: Utilization
-    type: Resource
-  minReplicas: 1
-  scaleTargetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: paymentservice
----
-apiVersion: autoscaling/v2
-kind: HorizontalPodAutoscaler
-metadata:
-  labels:
-    app: productcatalogservice
-  name: productcatalogservice
-spec:
-  maxReplicas: 10
-  metrics:
-  - resource:
-      name: cpu
-      target:
-        averageUtilization: 60
-        type: Utilization
-    type: Resource
-  minReplicas: 1
-  scaleTargetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: productcatalogservice
----
-apiVersion: autoscaling/v2
-kind: HorizontalPodAutoscaler
-metadata:
-  labels:
-    app: recommendationservice
-  name: recommendationservice
-spec:
-  maxReplicas: 10
-  metrics:
-  - resource:
-      name: cpu
-      target:
-        averageUtilization: 60
-        type: Utilization
-    type: Resource
-  minReplicas: 1
-  scaleTargetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: recommendationservice
----
-apiVersion: autoscaling/v2
-kind: HorizontalPodAutoscaler
-metadata:
-  labels:
-    app: shippingservice
-  name: shippingservice
-spec:
-  maxReplicas: 10
-  metrics:
-  - resource:
-      name: cpu
-      target:
-        averageUtilization: 60
-        type: Utilization
-    type: Resource
-  minReplicas: 1
-  scaleTargetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: shippingservice
----
-apiVersion: autoscaling/v2
-kind: HorizontalPodAutoscaler
-metadata:
-  labels:
-    app: storefrontprojectionservice
-  name: storefrontprojectionservice
-spec:
-  maxReplicas: 10
-  metrics:
-  - resource:
-      name: cpu
-      target:
-        averageUtilization: 60
-        type: Utilization
-    type: Resource
-  minReplicas: 1
-  scaleTargetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: storefrontprojectionservice
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy

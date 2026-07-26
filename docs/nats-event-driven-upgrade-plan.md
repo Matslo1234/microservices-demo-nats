@@ -456,8 +456,9 @@ expected operating condition:
 - Use a transactional outbox for service databases. For the existing Redis cart,
   write the cart, aggregate version, inbox record, and outbox record in one Redis
   transaction, then relay the outbox to JetStream.
-- Make payment, shipping, email, and assistant handlers idempotent using
-  `command_id`/`order_id`.
+- Make payment outcomes deterministic from `command_id`/`order_id` and signed
+  provider references; use durable inbox/outcome state for handlers that perform
+  non-deterministic shipping, email, or assistant side effects.
 - Use `aggregate_version` and compare-and-set in projections so a delayed event
   cannot overwrite newer state.
 - Serialize commands for the same cart/order. Start with one logical worker for
@@ -491,10 +492,12 @@ message acknowledgement. Business-level idempotency remains mandatory.
 - Restrict payment subjects to `checkoutservice` and `paymentservice`.
 - Never place PAN, CVV, raw provider errors, assistant images, or credentials in
   JetStream, logs, dead-letter payloads, or trace attributes.
-- Tokenize before `order.submit`; make tokens short-lived, order-bound, and
-  unusable by other NATS identities.
-- `paymentservice` or the external provider owns the token vault. Expire or
-  consume the token after capture/cancellation and never persist raw card data
+- Tokenize before `order.submit`; make tokens short-lived, order-bound,
+  authenticated by a payment-only signing key, and unusable by other NATS
+  identities.
+- The demo payment service uses self-contained signed tokens and deterministic
+  signed authorization references so replicas keep no provider state. A real
+  external provider may own a token vault instead. Never persist raw card data
   as the token's application-side value.
 - Minimize PII in order events. Use separate restricted streams/accounts if
   address-bearing events require different retention or consumer access.

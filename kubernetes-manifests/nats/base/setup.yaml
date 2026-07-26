@@ -75,8 +75,9 @@ roleRef:
 ---
 # This script uses only the Kubernetes API and OpenSSL supplied by the public
 # image below. Broker auth, TLS, and the JetStream encryption key are
-# create-only. Client CA and credential resources are derived from those
-# broker Secrets and patched back into sync when they already exist.
+# create-only, as is the payment token signing key. Client CA and credential
+# resources are derived from those broker Secrets and patched back into sync
+# when they already exist.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -305,7 +306,7 @@ data:
       {
         printf '%s' '{"apiVersion":"v1","kind":"Secret","metadata":{"name":"nats-server-auth","namespace":"nats","labels":{"app.kubernetes.io/name":"nats","app.kubernetes.io/component":"setup","app.kubernetes.io/part-of":"online-boutique"}},"type":"Opaque","data":{'
         first=true
-        for key in JETSTREAM_ENCRYPTION_KEY SYS_PASSWORD ADMIN_PASSWORD; do
+        for key in JETSTREAM_ENCRYPTION_KEY SYS_PASSWORD ADMIN_PASSWORD PAYMENT_SIGNING_KEY; do
           value=$(random_secret) || return 1
           if [ "${first}" = true ]; then first=false; else printf ','; fi
           printf '"%s":"%s"' "${key}" "$(b64_text "${value}")"
@@ -358,13 +359,18 @@ data:
       user=$3
       password=$4
       output=$5
-      printf '%s\n' "{\"apiVersion\":\"v1\",\"kind\":\"Secret\",\"metadata\":{\"name\":\"${name}\",\"namespace\":\"${namespace}\",\"labels\":{\"app.kubernetes.io/name\":\"nats\",\"app.kubernetes.io/component\":\"setup\",\"app.kubernetes.io/part-of\":\"online-boutique\"}},\"type\":\"Opaque\",\"data\":{\"NATS_URL\":\"$(b64_text "${nats_url}")\",\"NATS_USER\":\"$(b64_text "${user}")\",\"NATS_PASSWORD\":\"${password}\"}}" > "${output}"
+      payment_signing_key=${6:-}
+      extra_data=
+      if [ -n "${payment_signing_key}" ]; then
+        extra_data=",\"PAYMENT_SIGNING_KEY\":\"${payment_signing_key}\""
+      fi
+      printf '%s\n' "{\"apiVersion\":\"v1\",\"kind\":\"Secret\",\"metadata\":{\"name\":\"${name}\",\"namespace\":\"${namespace}\",\"labels\":{\"app.kubernetes.io/name\":\"nats\",\"app.kubernetes.io/component\":\"setup\",\"app.kubernetes.io/part-of\":\"online-boutique\"}},\"type\":\"Opaque\",\"data\":{\"NATS_URL\":\"$(b64_text "${nats_url}")\",\"NATS_USER\":\"$(b64_text "${user}")\",\"NATS_PASSWORD\":\"${password}\"${extra_data}}}" > "${output}"
     }
 
     reconcile() {
       write_auth_secret "${workdir}/auth.json" || return 1
       ensure_from_file secrets nats nats-server-auth "${workdir}/auth.json" || return 1
-      for key in JETSTREAM_ENCRYPTION_KEY SYS_PASSWORD ADMIN_PASSWORD; do
+      for key in JETSTREAM_ENCRYPTION_KEY SYS_PASSWORD ADMIN_PASSWORD PAYMENT_SIGNING_KEY; do
         secret_data nats nats-server-auth "${key}" >/dev/null || return 1
       done
       for service in ${services}; do
@@ -390,7 +396,12 @@ data:
       for service in ${services}; do
         key=$(printf '%s' "${service}" | tr '[:lower:]' '[:upper:]')_PASSWORD
         password=$(secret_data nats nats-server-auth "${key}") || return 1
-        write_credentials_secret default "nats-credentials-${service}" "${service}" "${password}" "${workdir}/credential-${service}.json" || return 1
+        if [ "${service}" = paymentservice ]; then
+          payment_signing_key=$(secret_data nats nats-server-auth PAYMENT_SIGNING_KEY) || return 1
+          write_credentials_secret default "nats-credentials-${service}" "${service}" "${password}" "${workdir}/credential-${service}.json" "${payment_signing_key}" || return 1
+        else
+          write_credentials_secret default "nats-credentials-${service}" "${service}" "${password}" "${workdir}/credential-${service}.json" || return 1
+        fi
         sync_from_file secrets default "nats-credentials-${service}" "${workdir}/credential-${service}.json" || return 1
       done
 

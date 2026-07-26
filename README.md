@@ -34,7 +34,8 @@ flowchart LR
     NATS --> Payment
     NATS --> Email[email]
     NATS --> Projection
-    Cart -->|Redis protocol| Redis[(redis-cart)]
+    Cart -->|Redis protocol| CartRedis[(redis-cart)]
+    Checkout -->|Redis protocol| CheckoutRedis[(redis-checkout)]
 
     Apps[All domain workloads] -.->|HTTP health and metrics :8080| Prometheus
     Kubernetes[Kubernetes pod logs] -.->|Kubernetes API| Alloy
@@ -52,10 +53,10 @@ flowchart LR
 | [cartservice](src/cartservice) | C# | Shopping cart storage and cart commands. |
 | [productcatalogservice](src/productcatalogservice) | Go | Product catalogue. |
 | [currencyservice](src/currencyservice) | Node.js | Currency conversion. |
-| [paymentservice](src/paymentservice) | Node.js | Mock payment processing. |
+| [paymentservice](src/paymentservice) | Node.js | Stateless mock payment processing with replica-independent signed tokens. |
 | [shippingservice](src/shippingservice) | Go | Mock shipping quotes and fulfilment. |
 | [emailservice](src/emailservice) | Python | Order notifications. |
-| [checkoutservice](src/checkoutservice) | Go | Checkout orchestration. |
+| [checkoutservice](src/checkoutservice) | Go | Stateless checkout orchestration backed by shared transactional Redis state. |
 | [recommendationservice](src/recommendationservice) | Python | Product recommendations. |
 | [adservice](src/adservice) | Java | Contextual advertisements. |
 | [storefrontprojectionservice](src/storefrontprojectionservice) | Go | NATS-backed storefront read model. |
@@ -124,6 +125,7 @@ your own build):
 
 ```sh
 kubectl apply -f release/kubernetes-manifests.yaml
+kubectl rollout status deployment/checkoutservice --timeout=10m
 ```
 
 Check the status of the deploy. Wait for all pods to start.
