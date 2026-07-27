@@ -999,7 +999,7 @@ data:
       {
         printf '%s' '{"apiVersion":"v1","kind":"Secret","metadata":{"name":"nats-server-auth","namespace":"nats","labels":{"app.kubernetes.io/name":"nats","app.kubernetes.io/component":"setup","app.kubernetes.io/part-of":"online-boutique"}},"type":"Opaque","data":{'
         first=true
-        for key in JETSTREAM_ENCRYPTION_KEY SYS_PASSWORD ADMIN_PASSWORD PAYMENT_SIGNING_KEY; do
+        for key in JETSTREAM_ENCRYPTION_KEY SYS_PASSWORD ADMIN_PASSWORD PAYMENT_SIGNING_KEY SHIPPING_PROVIDER_SECRET; do
           value=$(random_secret) || return 1
           if [ "${first}" = true ]; then first=false; else printf ','; fi
           printf '"%s":"%s"' "${key}" "$(b64_text "${value}")"
@@ -1053,9 +1053,13 @@ data:
       password=$4
       output=$5
       payment_signing_key=${6:-}
+      shipping_provider_secret=${7:-}
       extra_data=
       if [ -n "${payment_signing_key}" ]; then
         extra_data=",\"PAYMENT_SIGNING_KEY\":\"${payment_signing_key}\""
+      fi
+      if [ -n "${shipping_provider_secret}" ]; then
+        extra_data="${extra_data},\"SHIPPING_PROVIDER_SECRET\":\"${shipping_provider_secret}\""
       fi
       printf '%s\n' "{\"apiVersion\":\"v1\",\"kind\":\"Secret\",\"metadata\":{\"name\":\"${name}\",\"namespace\":\"${namespace}\",\"labels\":{\"app.kubernetes.io/name\":\"nats\",\"app.kubernetes.io/component\":\"setup\",\"app.kubernetes.io/part-of\":\"online-boutique\"}},\"type\":\"Opaque\",\"data\":{\"NATS_URL\":\"$(b64_text "${nats_url}")\",\"NATS_USER\":\"$(b64_text "${user}")\",\"NATS_PASSWORD\":\"${password}\"${extra_data}}}" > "${output}"
     }
@@ -1063,7 +1067,7 @@ data:
     reconcile() {
       write_auth_secret "${workdir}/auth.json" || return 1
       ensure_from_file secrets nats nats-server-auth "${workdir}/auth.json" || return 1
-      for key in JETSTREAM_ENCRYPTION_KEY SYS_PASSWORD ADMIN_PASSWORD PAYMENT_SIGNING_KEY; do
+      for key in JETSTREAM_ENCRYPTION_KEY SYS_PASSWORD ADMIN_PASSWORD PAYMENT_SIGNING_KEY SHIPPING_PROVIDER_SECRET; do
         secret_data nats nats-server-auth "${key}" >/dev/null || return 1
       done
       for service in ${services}; do
@@ -1092,6 +1096,9 @@ data:
         if [ "${service}" = paymentservice ]; then
           payment_signing_key=$(secret_data nats nats-server-auth PAYMENT_SIGNING_KEY) || return 1
           write_credentials_secret default "nats-credentials-${service}" "${service}" "${password}" "${workdir}/credential-${service}.json" "${payment_signing_key}" || return 1
+        elif [ "${service}" = shippingservice ]; then
+          shipping_provider_secret=$(secret_data nats nats-server-auth SHIPPING_PROVIDER_SECRET) || return 1
+          write_credentials_secret default "nats-credentials-${service}" "${service}" "${password}" "${workdir}/credential-${service}.json" "" "${shipping_provider_secret}" || return 1
         else
           write_credentials_secret default "nats-credentials-${service}" "${service}" "${password}" "${workdir}/credential-${service}.json" || return 1
         fi
@@ -1241,17 +1248,6 @@ spec:
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: email-data
-spec:
-  accessModes:
-  - ReadWriteOnce
-  resources:
-    requests:
-      storage: 1Gi
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
   labels:
     app: redis-cart
   name: redis-cart-data
@@ -1261,17 +1257,6 @@ spec:
   resources:
     requests:
       storage: 5Gi
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: shipping-data
-spec:
-  accessModes:
-  - ReadWriteOnce
-  resources:
-    requests:
-      storage: 1Gi
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -1881,7 +1866,10 @@ spec:
     matchLabels:
       app: emailservice
   strategy:
-    type: Recreate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+    type: RollingUpdate
   template:
     metadata:
       annotations:
@@ -1899,8 +1887,6 @@ spec:
           value: "true"
         - name: NATS_REQUIRED_SUBSCRIPTIONS
           value: email-order-completed-v1
-        - name: EMAIL_STORE_PATH
-          value: /var/lib/email/inbox.json
         envFrom:
         - configMapRef:
             name: nats-client-config
@@ -1939,35 +1925,7 @@ spec:
         - mountPath: /etc/nats-ca
           name: nats-ca
           readOnly: true
-        - mountPath: /var/lib/email
-          name: email-data
       initContainers:
-      - command:
-        - sh
-        - -ec
-        - chown 1000:1000 /data
-        image: busybox:1.37.0
-        name: volume-permissions
-        resources:
-          limits:
-            cpu: 50m
-            memory: 2Gi
-          requests:
-            cpu: 5m
-            memory: 8Mi
-        securityContext:
-          allowPrivilegeEscalation: false
-          capabilities:
-            add:
-            - CHOWN
-            drop:
-            - ALL
-          readOnlyRootFilesystem: true
-          runAsNonRoot: false
-          runAsUser: 0
-        volumeMounts:
-        - mountPath: /data
-          name: email-data
       - command:
         - sh
         - -ec
@@ -2007,7 +1965,6 @@ spec:
           name: nats-ca
           readOnly: true
       securityContext:
-        fsGroup: 1000
         runAsGroup: 1000
         runAsNonRoot: true
         runAsUser: 1000
@@ -2017,9 +1974,6 @@ spec:
       - configMap:
           name: nats-ca
         name: nats-ca
-      - name: email-data
-        persistentVolumeClaim:
-          claimName: email-data
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -2185,6 +2139,8 @@ spec:
           value: "true"
         - name: NATS_REQUIRED_SUBSCRIPTIONS
           value: boutique.qry.payment.tokenize.v1,payment-commands-v1
+        - name: PAYMENT_SIGNING_KEY_ID
+          value: primary-v1
         envFrom:
         - configMapRef:
             name: nats-client-config
@@ -2491,7 +2447,10 @@ spec:
     matchLabels:
       app: shippingservice
   strategy:
-    type: Recreate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+    type: RollingUpdate
   template:
     metadata:
       annotations:
@@ -2511,8 +2470,6 @@ spec:
           value: "true"
         - name: NATS_REQUIRED_SUBSCRIPTIONS
           value: shipping-cart-quotes-v1,shipping-commands-v1
-        - name: SHIPPING_STORE_PATH
-          value: /var/lib/shipping/provider-state.json
         envFrom:
         - configMapRef:
             name: nats-client-config
@@ -2550,37 +2507,7 @@ spec:
         - mountPath: /etc/nats-ca
           name: nats-ca
           readOnly: true
-        - mountPath: /var/lib/shipping
-          name: shipping-data
-      initContainers:
-      - command:
-        - sh
-        - -ec
-        - chown 1000:1000 /data
-        image: busybox:1.37.0
-        name: volume-permissions
-        resources:
-          limits:
-            cpu: 50m
-            memory: 2Gi
-          requests:
-            cpu: 5m
-            memory: 8Mi
-        securityContext:
-          allowPrivilegeEscalation: false
-          capabilities:
-            add:
-            - CHOWN
-            drop:
-            - ALL
-          readOnlyRootFilesystem: true
-          runAsNonRoot: false
-          runAsUser: 0
-        volumeMounts:
-        - mountPath: /data
-          name: shipping-data
       securityContext:
-        fsGroup: 1000
         runAsGroup: 1000
         runAsNonRoot: true
         runAsUser: 1000
@@ -2590,9 +2517,6 @@ spec:
       - configMap:
           name: nats-ca
         name: nats-ca
-      - name: shipping-data
-        persistentVolumeClaim:
-          claimName: shipping-data
 ---
 apiVersion: apps/v1
 kind: Deployment

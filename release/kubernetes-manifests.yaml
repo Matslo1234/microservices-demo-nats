@@ -605,9 +605,11 @@ metadata:
   labels:
     app: emailservice
 spec:
-  # Notification outcomes are persisted by a single writer.
   strategy:
-    type: Recreate
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
   selector:
     matchLabels:
       app: emailservice
@@ -623,32 +625,9 @@ spec:
       serviceAccountName: emailservice
       terminationGracePeriodSeconds: 35
       securityContext:
-        fsGroup: 1000
         runAsGroup: 1000
         runAsNonRoot: true
         runAsUser: 1000
-      initContainers:
-      - name: volume-permissions
-        image: busybox:1.37.0
-        command: ["sh", "-ec", "chown 1000:1000 /data"]
-        securityContext:
-          allowPrivilegeEscalation: false
-          capabilities:
-            drop: ["ALL"]
-            add: ["CHOWN"]
-          readOnlyRootFilesystem: true
-          runAsNonRoot: false
-          runAsUser: 0
-        volumeMounts:
-        - name: email-data
-          mountPath: /data
-        resources:
-          requests:
-            cpu: 5m
-            memory: 8Mi
-          limits:
-            cpu: 50m
-            memory: 2Gi
       containers:
       - name: server
         securityContext:
@@ -669,8 +648,6 @@ spec:
           value: "true"
         - name: NATS_REQUIRED_SUBSCRIPTIONS
           value: "email-order-completed-v1"
-        - name: EMAIL_STORE_PATH
-          value: /var/lib/email/inbox.json
         envFrom:
         - configMapRef:
             name: nats-client-config
@@ -680,8 +657,6 @@ spec:
         - name: nats-ca
           mountPath: /etc/nats-ca
           readOnly: true
-        - name: email-data
-          mountPath: /var/lib/email
         readinessProbe:
           periodSeconds: 5
           httpGet:
@@ -703,24 +678,11 @@ spec:
       - name: nats-ca
         configMap:
           name: nats-ca
-      - name: email-data
-        persistentVolumeClaim:
-          claimName: email-data
 ---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: emailservice
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: email-data
-spec:
-  accessModes: ["ReadWriteOnce"]
-  resources:
-    requests:
-      storage: 1Gi
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -1209,6 +1171,8 @@ spec:
           value: "true"
         - name: NATS_REQUIRED_SUBSCRIPTIONS
           value: "boutique.qry.payment.tokenize.v1,payment-commands-v1"
+        - name: PAYMENT_SIGNING_KEY_ID
+          value: primary-v1
         envFrom:
         - configMapRef:
             name: nats-client-config
@@ -1414,9 +1378,11 @@ metadata:
   labels:
     app: shippingservice
 spec:
-  # Provider outcomes are persisted by a single writer.
   strategy:
-    type: Recreate
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
   selector:
     matchLabels:
       app: shippingservice
@@ -1432,32 +1398,9 @@ spec:
       serviceAccountName: shippingservice
       terminationGracePeriodSeconds: 35
       securityContext:
-        fsGroup: 1000
         runAsGroup: 1000
         runAsNonRoot: true
         runAsUser: 1000
-      initContainers:
-      - name: volume-permissions
-        image: busybox:1.37.0
-        command: ["sh", "-ec", "chown 1000:1000 /data"]
-        securityContext:
-          allowPrivilegeEscalation: false
-          capabilities:
-            drop: ["ALL"]
-            add: ["CHOWN"]
-          readOnlyRootFilesystem: true
-          runAsNonRoot: false
-          runAsUser: 0
-        volumeMounts:
-        - name: shipping-data
-          mountPath: /data
-        resources:
-          requests:
-            cpu: 5m
-            memory: 8Mi
-          limits:
-            cpu: 50m
-            memory: 2Gi
       containers:
       - name: server
         securityContext:
@@ -1480,8 +1423,6 @@ spec:
           value: "true"
         - name: NATS_REQUIRED_SUBSCRIPTIONS
           value: "shipping-cart-quotes-v1,shipping-commands-v1"
-        - name: SHIPPING_STORE_PATH
-          value: /var/lib/shipping/provider-state.json
         envFrom:
         - configMapRef:
             name: nats-client-config
@@ -1491,8 +1432,6 @@ spec:
         - name: nats-ca
           mountPath: /etc/nats-ca
           readOnly: true
-        - name: shipping-data
-          mountPath: /var/lib/shipping
         readinessProbe:
           periodSeconds: 5
           httpGet:
@@ -1513,24 +1452,11 @@ spec:
       - name: nats-ca
         configMap:
           name: nats-ca
-      - name: shipping-data
-        persistentVolumeClaim:
-          claimName: shipping-data
 ---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: shippingservice
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: shipping-data
-spec:
-  accessModes: ["ReadWriteOnce"]
-  resources:
-    requests:
-      storage: 1Gi
 ---
 apiVersion: apps/v1
 kind: Deployment

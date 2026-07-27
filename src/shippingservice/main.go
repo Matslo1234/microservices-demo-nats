@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -17,6 +19,74 @@ import (
 )
 
 var log *logrus.Logger
+
+type shippingRuntime struct {
+	mu          sync.RWMutex
+	worker      *shippingEventWorker
+	stop        chan struct{}
+	initialized atomic.Bool
+	closed      atomic.Bool
+}
+
+func startShippingRuntime() *shippingRuntime {
+	runtime := &shippingRuntime{stop: make(chan struct{})}
+	go runtime.initialize()
+	return runtime
+}
+
+func (runtime *shippingRuntime) initialize() {
+	for {
+		worker, err := startShippingEvents()
+		if err == nil {
+			runtime.mu.Lock()
+			if runtime.closed.Load() {
+				runtime.mu.Unlock()
+				worker.Close()
+				return
+			}
+			runtime.worker = worker
+			runtime.initialized.Store(true)
+			runtime.mu.Unlock()
+			return
+		}
+		log.WithError(err).Warn("shipping NATS initialization interrupted; retrying")
+		select {
+		case <-runtime.stop:
+			return
+		case <-time.After(time.Second):
+		}
+	}
+}
+
+func (runtime *shippingRuntime) Ready() bool {
+	if runtime == nil || runtime.closed.Load() || !runtime.initialized.Load() {
+		return false
+	}
+	runtime.mu.RLock()
+	defer runtime.mu.RUnlock()
+	return runtime.worker.Ready()
+}
+
+func (runtime *shippingRuntime) ProviderReady() bool {
+	if runtime == nil || runtime.closed.Load() || !runtime.initialized.Load() {
+		return false
+	}
+	runtime.mu.RLock()
+	defer runtime.mu.RUnlock()
+	return runtime.worker == nil || runtime.worker.provider != nil
+}
+
+func (runtime *shippingRuntime) Close() {
+	if runtime == nil || !runtime.closed.CompareAndSwap(false, true) {
+		return
+	}
+	close(runtime.stop)
+	runtime.mu.Lock()
+	worker := runtime.worker
+	runtime.worker = nil
+	runtime.mu.Unlock()
+	worker.Close()
+}
 
 func init() {
 	log = logrus.New()
@@ -40,18 +110,15 @@ func main() {
 		log.Info("Profiling disabled.")
 	}
 
-	eventWorker, err := startShippingEvents()
-	if err != nil {
-		log.Fatalf("failed to start shipping NATS consumers: %v", err)
-	}
-	defer eventWorker.Close()
+	runtime := startShippingRuntime()
+	defer runtime.Close()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(response http.ResponseWriter, _ *http.Request) {
 		_, _ = response.Write([]byte("ok\n"))
 	})
 	mux.HandleFunc("/readyz", func(response http.ResponseWriter, _ *http.Request) {
-		if !eventWorker.Ready() {
+		if !runtime.Ready() {
 			http.Error(response, "shipping NATS consumers are not ready", http.StatusServiceUnavailable)
 			return
 		}
@@ -60,15 +127,15 @@ func main() {
 	mux.HandleFunc("/metrics", func(response http.ResponseWriter, _ *http.Request) {
 		response.Header().Set("Content-Type", "text/plain; version=0.0.4")
 		ready := 0
-		if eventWorker.Ready() {
+		if runtime.Ready() {
 			ready = 1
 		}
 		_, _ = fmt.Fprintf(response, "boutique_dependency_ready{service=\"shippingservice\",dependency=\"nats\"} %d\n", ready)
 		providerReady := 0
-		if eventWorker == nil || eventWorker.provider != nil {
+		if runtime.ProviderReady() {
 			providerReady = 1
 		}
-		_, _ = fmt.Fprintf(response, "boutique_dependency_ready{service=\"shippingservice\",dependency=\"provider_store\"} %d\n", providerReady)
+		_, _ = fmt.Fprintf(response, "boutique_dependency_ready{service=\"shippingservice\",dependency=\"provider_config\"} %d\n", providerReady)
 	})
 
 	port := os.Getenv("PORT")

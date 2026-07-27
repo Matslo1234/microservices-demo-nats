@@ -1,60 +1,9 @@
 {
   "schema_version": 1,
   "accepted_findings": {
-    "application_pvc": [
-      "application_pvc::benchmark/benchmark-nats-hpa.yaml::Deployment/emailservice::email-data#1",
-      "application_pvc::benchmark/benchmark-nats-hpa.yaml::Deployment/shippingservice::shipping-data#1",
-      "application_pvc::benchmark/benchmark-nats-multiple-replicas.yaml::Deployment/emailservice::email-data#1",
-      "application_pvc::benchmark/benchmark-nats-multiple-replicas.yaml::Deployment/shippingservice::shipping-data#1",
-      "application_pvc::benchmark/benchmark-nats.yaml::Deployment/emailservice::email-data#1",
-      "application_pvc::benchmark/benchmark-nats.yaml::Deployment/shippingservice::shipping-data#1",
-      "application_pvc::kubernetes-manifests/emailservice.yaml::Deployment/emailservice::email-data#1",
-      "application_pvc::kubernetes-manifests/shippingservice.yaml::Deployment/shippingservice::shipping-data#1",
-      "application_pvc::release/kubernetes-manifests-no-loadgenerator.yaml::Deployment/emailservice::email-data#1",
-      "application_pvc::release/kubernetes-manifests-no-loadgenerator.yaml::Deployment/shippingservice::shipping-data#1",
-      "application_pvc::release/kubernetes-manifests.yaml::Deployment/emailservice::email-data#1",
-      "application_pvc::release/kubernetes-manifests.yaml::Deployment/shippingservice::shipping-data#1"
-    ],
-    "database_import": [
-      "database_import::src/emailservice/nats_worker.py::import sqlite3#1"
-    ],
-    "local_journal_path": [
-      "local_journal_path::benchmark/benchmark-nats-hpa.yaml::- name: EMAIL_STORE_PATH#1",
-      "local_journal_path::benchmark/benchmark-nats-hpa.yaml::- name: SHIPPING_STORE_PATH#1",
-      "local_journal_path::benchmark/benchmark-nats-hpa.yaml::value: /var/lib/email/inbox.json#1",
-      "local_journal_path::benchmark/benchmark-nats-hpa.yaml::value: /var/lib/shipping/provider-state.json#1",
-      "local_journal_path::benchmark/benchmark-nats-multiple-replicas.yaml::- name: EMAIL_STORE_PATH#1",
-      "local_journal_path::benchmark/benchmark-nats-multiple-replicas.yaml::- name: SHIPPING_STORE_PATH#1",
-      "local_journal_path::benchmark/benchmark-nats-multiple-replicas.yaml::value: /var/lib/email/inbox.json#1",
-      "local_journal_path::benchmark/benchmark-nats-multiple-replicas.yaml::value: /var/lib/shipping/provider-state.json#1",
-      "local_journal_path::benchmark/benchmark-nats.yaml::- name: EMAIL_STORE_PATH#1",
-      "local_journal_path::benchmark/benchmark-nats.yaml::- name: SHIPPING_STORE_PATH#1",
-      "local_journal_path::benchmark/benchmark-nats.yaml::value: /var/lib/email/inbox.json#1",
-      "local_journal_path::benchmark/benchmark-nats.yaml::value: /var/lib/shipping/provider-state.json#1",
-      "local_journal_path::kubernetes-manifests/emailservice.yaml::- name: EMAIL_STORE_PATH#1",
-      "local_journal_path::kubernetes-manifests/emailservice.yaml::value: /var/lib/email/inbox.json#1",
-      "local_journal_path::kubernetes-manifests/shippingservice.yaml::- name: SHIPPING_STORE_PATH#1",
-      "local_journal_path::kubernetes-manifests/shippingservice.yaml::value: /var/lib/shipping/provider-state.json#1",
-      "local_journal_path::release/kubernetes-manifests-no-loadgenerator.yaml::- name: EMAIL_STORE_PATH#1",
-      "local_journal_path::release/kubernetes-manifests-no-loadgenerator.yaml::- name: SHIPPING_STORE_PATH#1",
-      "local_journal_path::release/kubernetes-manifests-no-loadgenerator.yaml::value: /var/lib/email/inbox.json#1",
-      "local_journal_path::release/kubernetes-manifests-no-loadgenerator.yaml::value: /var/lib/shipping/provider-state.json#1",
-      "local_journal_path::release/kubernetes-manifests.yaml::- name: EMAIL_STORE_PATH#1",
-      "local_journal_path::release/kubernetes-manifests.yaml::- name: SHIPPING_STORE_PATH#1",
-      "local_journal_path::release/kubernetes-manifests.yaml::value: /var/lib/email/inbox.json#1",
-      "local_journal_path::release/kubernetes-manifests.yaml::value: /var/lib/shipping/provider-state.json#1",
-      "local_journal_path::src/emailservice/nats_worker.py::return configured_path.with_name(configured_path.name + \".sqlite3\")#1",
-      "local_journal_path::src/emailservice/nats_worker.py::state = _State(os.getenv(\"EMAIL_STORE_PATH\", \"/tmp/email/inbox.json\"))#1",
-      "local_journal_path::src/shippingservice/nats_events.go::storePath := os.Getenv(\"SHIPPING_STORE_PATH\")#1",
-      "local_journal_path::src/shippingservice/nats_events.go::storePath = \"/tmp/shipping/provider-state.json\"#1"
-    ],
-    "single_writer_comment": [
-      "single_writer_comment::kubernetes-manifests/emailservice.yaml::# Notification outcomes are persisted by a single writer.#1",
-      "single_writer_comment::kubernetes-manifests/shippingservice.yaml::# Provider outcomes are persisted by a single writer.#1",
-      "single_writer_comment::release/kubernetes-manifests-no-loadgenerator.yaml::# Notification outcomes are persisted by a single writer.#1",
-      "single_writer_comment::release/kubernetes-manifests-no-loadgenerator.yaml::# Provider outcomes are persisted by a single writer.#1",
-      "single_writer_comment::release/kubernetes-manifests.yaml::# Notification outcomes are persisted by a single writer.#1",
-      "single_writer_comment::release/kubernetes-manifests.yaml::# Provider outcomes are persisted by a single writer.#1"
-    ]
+    "application_pvc": [],
+    "database_import": [],
+    "local_journal_path": [],
+    "single_writer_comment": []
   }
 }

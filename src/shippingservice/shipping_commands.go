@@ -4,195 +4,71 @@
 package main
 
 import (
-	"bytes"
 	"context"
+	"crypto/hmac"
 	"crypto/sha256"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"os"
-	"path/filepath"
 	"sync"
 	"time"
 
 	commandsv1 "github.com/GoogleCloudPlatform/microservices-demo/protos/commands/v1"
 	commonv1 "github.com/GoogleCloudPlatform/microservices-demo/protos/common/v1"
 	eventsv1 "github.com/GoogleCloudPlatform/microservices-demo/protos/events/v1"
+	stateless "github.com/GoogleCloudPlatform/microservices-demo/src/shared/stateless/go"
 	"github.com/nats-io/nats.go"
 	"github.com/sirupsen/logrus"
 	"google.golang.org/protobuf/proto"
-	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
+const (
+	shippingOrderQuoteSlot     = "shipping.order-quote"
+	shippingCreateShipmentSlot = "shipping.create-shipment"
+	shippingCancelShipmentSlot = "shipping.cancel-shipment"
+)
+
 type shippingOutcome struct {
-	MessageID string `json:"message_id"`
-	Subject   string `json:"subject"`
-	Data      []byte `json:"data"`
-}
-type shippingProviderStore struct {
-	mu       sync.Mutex
-	path     string
-	Outcomes map[string]shippingOutcome `json:"outcomes"`
+	MessageID string
+	Subject   string
+	Data      []byte
 }
 
-const shippingStoreVersion = 1
-
-type shippingStoreRecord struct {
-	Version   int                        `json:"version"`
-	Snapshot  map[string]shippingOutcome `json:"snapshot,omitempty"`
-	CommandID string                     `json:"command_id,omitempty"`
-	Outcome   *shippingOutcome           `json:"outcome,omitempty"`
+// shippingProvider is a deterministic demo carrier. It does not retain
+// outcomes: every value which looks provider-generated is an HMAC of the
+// business idempotency identity under a replica-shared provider secret.
+type shippingProvider struct {
+	key []byte
 }
 
-func openShippingProviderStore(path string) (*shippingProviderStore, error) {
-	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
-		return nil, err
+func newShippingProvider(secret string) (*shippingProvider, error) {
+	if len(secret) < 32 {
+		return nil, errors.New("shipping provider secret must contain at least 32 characters")
 	}
-	store := &shippingProviderStore{path: path, Outcomes: map[string]shippingOutcome{}}
-	encoded, err := os.ReadFile(path)
-	if err == nil {
-		if err := store.load(encoded); err != nil {
-			return nil, err
-		}
-	}
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return nil, err
-	}
-	if store.Outcomes == nil {
-		store.Outcomes = map[string]shippingOutcome{}
-	}
-	return store, nil
+	key := sha256.Sum256([]byte("boutique/shipping-provider/v1\x00" + secret))
+	return &shippingProvider{key: key[:]}, nil
 }
 
-func (store *shippingProviderStore) load(encoded []byte) error {
-	legacy := struct {
-		Version  int                        `json:"version"`
-		Outcomes map[string]shippingOutcome `json:"outcomes"`
-	}{}
-	if err := json.Unmarshal(encoded, &legacy); err == nil && legacy.Version == 0 && legacy.Outcomes != nil {
-		store.Outcomes = legacy.Outcomes
-		return store.writeSnapshot()
+func (provider *shippingProvider) stableID(kind string, parts ...string) string {
+	hash := hmac.New(sha256.New, provider.key)
+	_, _ = hash.Write([]byte(kind))
+	for _, part := range parts {
+		_, _ = hash.Write([]byte{0})
+		_, _ = hash.Write([]byte(part))
 	}
-
-	lines := bytes.SplitAfter(encoded, []byte{'\n'})
-	validBytes := 0
-	for index, line := range lines {
-		trimmed := bytes.TrimSpace(line)
-		if len(trimmed) == 0 {
-			validBytes += len(line)
-			continue
-		}
-		record := shippingStoreRecord{}
-		if err := json.Unmarshal(trimmed, &record); err != nil {
-			hasLaterRecord := false
-			for _, later := range lines[index+1:] {
-				if len(bytes.TrimSpace(later)) != 0 {
-					hasLaterRecord = true
-					break
-				}
-			}
-			if hasLaterRecord {
-				return fmt.Errorf("decode shipping store journal record %d: %w", index+1, err)
-			}
-			if err := os.Truncate(store.path, int64(validBytes)); err != nil {
-				return fmt.Errorf("remove incomplete shipping store journal record: %w", err)
-			}
-			break
-		}
-		if record.Version != shippingStoreVersion {
-			return fmt.Errorf("unsupported shipping store version %d", record.Version)
-		}
-		if record.Snapshot != nil {
-			store.Outcomes = record.Snapshot
-		} else if record.CommandID != "" && record.Outcome != nil {
-			store.Outcomes[record.CommandID] = *record.Outcome
-		} else {
-			return fmt.Errorf("shipping store journal record %d is incomplete", index+1)
-		}
-		validBytes += len(line)
-	}
-	return nil
+	id := hash.Sum(nil)[:16]
+	id[6] = (id[6] & 0x0f) | 0x50
+	id[8] = (id[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x", id[0:4], id[4:6], id[6:8], id[8:10], id[10:16])
 }
 
-func (store *shippingProviderStore) writeSnapshot() error {
-	temporary := store.path + ".tmp"
-	file, err := os.OpenFile(temporary, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
-	if err != nil {
-		return err
-	}
-	encoder := json.NewEncoder(file)
-	err = encoder.Encode(shippingStoreRecord{Version: shippingStoreVersion, Snapshot: store.Outcomes})
-	if err == nil {
-		err = file.Sync()
-	}
-	closeErr := file.Close()
-	if err == nil {
-		err = closeErr
-	}
-	if err != nil {
-		return err
-	}
-	return os.Rename(temporary, store.path)
-}
-
-func (store *shippingProviderStore) outcome(commandID string) (shippingOutcome, bool) {
-	store.mu.Lock()
-	defer store.mu.Unlock()
-	value, ok := store.Outcomes[commandID]
-	return value, ok
-}
-func (store *shippingProviderStore) record(commandID string, outcome shippingOutcome) error {
-	return store.recordBatch(map[string]shippingOutcome{commandID: outcome})
-}
-
-func (store *shippingProviderStore) recordBatch(outcomes map[string]shippingOutcome) error {
-	store.mu.Lock()
-	defer store.mu.Unlock()
-	pending := make(map[string]shippingOutcome, len(outcomes))
-	for commandID, outcome := range outcomes {
-		if _, ok := store.Outcomes[commandID]; !ok {
-			pending[commandID] = outcome
-		}
-	}
-	if len(pending) == 0 {
-		return nil
-	}
-
-	var encoded bytes.Buffer
-	encoder := json.NewEncoder(&encoded)
-	for commandID, outcome := range pending {
-		if err := encoder.Encode(shippingStoreRecord{
-			Version: shippingStoreVersion, CommandID: commandID, Outcome: &outcome,
-		}); err != nil {
-			return err
-		}
-	}
-	file, err := os.OpenFile(store.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
-	if err != nil {
-		return err
-	}
-	start, seekErr := file.Seek(0, io.SeekEnd)
-	if seekErr != nil {
-		_ = file.Close()
-		return seekErr
-	}
-	if _, err = file.Write(encoded.Bytes()); err == nil {
-		err = file.Sync()
-	}
-	closeErr := file.Close()
-	if err == nil {
-		err = closeErr
-	}
-	if err != nil {
-		_ = os.Truncate(store.path, start)
-		return err
-	}
-	for commandID, outcome := range pending {
-		store.Outcomes[commandID] = outcome
-	}
-	return nil
+func (provider *shippingProvider) trackingID(idempotencyKey string) string {
+	hash := hmac.New(sha256.New, provider.key)
+	_, _ = hash.Write([]byte("tracking\x00" + idempotencyKey))
+	sum := hash.Sum(nil)
+	left := (uint32(sum[0])<<16 | uint32(sum[1])<<8 | uint32(sum[2])) % 1_000_000
+	right := (uint32(sum[3])<<24 | uint32(sum[4])<<16 | uint32(sum[5])<<8 | uint32(sum[6])) % 10_000_000
+	return fmt.Sprintf("PH-%06d-%07d", left, right)
 }
 
 func (worker *shippingEventWorker) handleCommand(message *nats.Msg) error {
@@ -201,9 +77,7 @@ func (worker *shippingEventWorker) handleCommand(message *nats.Msg) error {
 
 func (worker *shippingEventWorker) handleCommandBatch(messages []*nats.Msg) []error {
 	outcomes := make([]shippingOutcome, len(messages))
-	needsRecord := make([]bool, len(messages))
 	results := make([]error, len(messages))
-	pending := make(map[string]shippingOutcome, len(messages))
 
 	for index, message := range messages {
 		envelope := &commonv1.MessageEnvelope{}
@@ -211,35 +85,17 @@ func (worker *shippingEventWorker) handleCommandBatch(messages []*nats.Msg) []er
 			results[index] = err
 			continue
 		}
-		if envelope.MessageId == "" || envelope.Data == nil {
-			results[index] = errors.New("shipping command envelope is incomplete")
-			continue
-		}
-		if outcome, ok := worker.provider.outcome(envelope.MessageId); ok {
-			outcomes[index] = outcome
-			continue
-		}
-		if outcome, ok := pending[envelope.MessageId]; ok {
-			outcomes[index] = outcome
-			needsRecord[index] = true
-			continue
-		}
-		outcome, err := buildShippingOutcome(message.Subject, envelope)
+		outcome, err := buildShippingOutcome(
+			message.Subject,
+			envelope,
+			worker.provider,
+			worker.failureMode,
+		)
 		if err != nil {
 			results[index] = err
 			continue
 		}
 		outcomes[index] = outcome
-		needsRecord[index] = true
-		pending[envelope.MessageId] = outcome
-	}
-
-	if err := worker.provider.recordBatch(pending); err != nil {
-		for index := range results {
-			if needsRecord[index] {
-				results[index] = err
-			}
-		}
 	}
 
 	var publish sync.WaitGroup
@@ -257,67 +113,200 @@ func (worker *shippingEventWorker) handleCommandBatch(messages []*nats.Msg) []er
 	return results
 }
 
-func buildShippingOutcome(subject string, envelope *commonv1.MessageEnvelope) (shippingOutcome, error) {
-	failureMode := os.Getenv("SHIPPING_FAILURE_MODE")
+func buildShippingOutcome(
+	subject string,
+	envelope *commonv1.MessageEnvelope,
+	provider *shippingProvider,
+	failureMode string,
+) (shippingOutcome, error) {
+	inputTime, err := validateShippingInput(envelope)
+	if err != nil {
+		return shippingOutcome{}, err
+	}
+	if provider == nil {
+		return shippingOutcome{}, errors.New("shipping provider is required")
+	}
+
 	switch subject {
 	case "boutique.cmd.shipping.calculate-order-quote.v1":
 		command := &commandsv1.ShippingCalculateOrderQuoteCommand{}
 		if err := envelope.Data.UnmarshalTo(command); err != nil {
 			return shippingOutcome{}, err
 		}
+		if command.CommandId == "" || command.OrderId == "" || command.Cart == nil {
+			return shippingOutcome{}, errors.New("shipping quote command is incomplete")
+		}
+		if command.OrderId != envelope.AggregateId {
+			return shippingOutcome{}, errors.New("shipping quote order does not match the envelope aggregate")
+		}
 		if failureMode == "quote" {
-			return newShippingOutcome("boutique.evt.shipping.order-quote-failed.v1", "boutique.shipping.OrderQuoteFailed.v1", command.OrderId, envelope,
-				&eventsv1.ShippingOrderQuoteFailedEvent{OrderId: command.OrderId, Failure: &commonv1.Failure{Code: "QUOTE_PROVIDER_UNAVAILABLE", Retryable: true, SafeMessage: "Shipping quote is unavailable."}})
+			return newShippingOutcome(
+				shippingOrderQuoteSlot,
+				"boutique.evt.shipping.order-quote-failed.v1",
+				"boutique.shipping.OrderQuoteFailed.v1",
+				command.OrderId,
+				envelope,
+				inputTime,
+				&eventsv1.ShippingOrderQuoteFailedEvent{
+					OrderId: command.OrderId,
+					Failure: &commonv1.Failure{
+						Code:        "QUOTE_PROVIDER_UNAVAILABLE",
+						Retryable:   true,
+						SafeMessage: "Shipping quote is unavailable.",
+					},
+				},
+			)
 		}
 		count := 0
-		for _, line := range command.Cart.GetItems() {
+		for _, line := range command.Cart.Items {
 			count += int(line.Quantity)
 		}
 		quote := CreateQuoteFromCount(count)
-		return newShippingOutcome("boutique.evt.shipping.order-quote-calculated.v1", "boutique.shipping.OrderQuoteCalculated.v1", command.OrderId, envelope,
-			&eventsv1.ShippingOrderQuoteCalculatedEvent{OrderId: command.OrderId, CostUsd: &commonv1.Money{CurrencyCode: "USD", Units: int64(quote.Dollars), Nanos: int32(quote.Cents * 10_000_000)},
-				QuoteId: shippingStableID("quote", command.OrderId), ExpiresAt: timestamppb.New(time.Now().UTC().Add(15 * time.Minute))})
+		return newShippingOutcome(
+			shippingOrderQuoteSlot,
+			"boutique.evt.shipping.order-quote-calculated.v1",
+			"boutique.shipping.OrderQuoteCalculated.v1",
+			command.OrderId,
+			envelope,
+			inputTime,
+			&eventsv1.ShippingOrderQuoteCalculatedEvent{
+				OrderId: command.OrderId,
+				CostUsd: &commonv1.Money{
+					CurrencyCode: "USD",
+					Units:        int64(quote.Dollars),
+					Nanos:        int32(quote.Cents * 10_000_000),
+				},
+				QuoteId:   provider.stableID("quote", command.CommandId, command.OrderId),
+				ExpiresAt: timestamppb.New(inputTime.Add(15 * time.Minute)),
+			},
+		)
 	case "boutique.cmd.shipping.create-shipment.v1":
 		command := &commandsv1.ShippingCreateShipmentCommand{}
 		if err := envelope.Data.UnmarshalTo(command); err != nil {
 			return shippingOutcome{}, err
 		}
-		if failureMode == "shipment" {
-			return newShippingOutcome("boutique.evt.shipping.shipment-creation-failed.v1", "boutique.shipping.ShipmentCreationFailed.v1", command.OrderId, envelope,
-				&eventsv1.ShippingShipmentCreationFailedEvent{OrderId: command.OrderId, Failure: &commonv1.Failure{Code: "CARRIER_UNAVAILABLE", Retryable: true, SafeMessage: "Shipment creation failed."}})
+		if command.CommandId == "" || command.OrderId == "" || command.IdempotencyKey == "" {
+			return shippingOutcome{}, errors.New("shipping create command is incomplete")
 		}
-		return newShippingOutcome("boutique.evt.shipping.shipment-created.v1", "boutique.shipping.ShipmentCreated.v1", command.OrderId, envelope,
-			&eventsv1.ShippingShipmentCreatedEvent{OrderId: command.OrderId, ShipmentId: shippingStableID("shipment", command.IdempotencyKey), TrackingId: shippingTrackingID(command.OrderId)})
+		if command.OrderId != envelope.AggregateId {
+			return shippingOutcome{}, errors.New("shipping create order does not match the envelope aggregate")
+		}
+		if failureMode == "shipment" {
+			return newShippingOutcome(
+				shippingCreateShipmentSlot,
+				"boutique.evt.shipping.shipment-creation-failed.v1",
+				"boutique.shipping.ShipmentCreationFailed.v1",
+				command.OrderId,
+				envelope,
+				inputTime,
+				&eventsv1.ShippingShipmentCreationFailedEvent{
+					OrderId: command.OrderId,
+					Failure: &commonv1.Failure{
+						Code:        "CARRIER_UNAVAILABLE",
+						Retryable:   true,
+						SafeMessage: "Shipment creation failed.",
+					},
+				},
+			)
+		}
+		return newShippingOutcome(
+			shippingCreateShipmentSlot,
+			"boutique.evt.shipping.shipment-created.v1",
+			"boutique.shipping.ShipmentCreated.v1",
+			command.OrderId,
+			envelope,
+			inputTime,
+			&eventsv1.ShippingShipmentCreatedEvent{
+				OrderId:    command.OrderId,
+				ShipmentId: provider.stableID("shipment", command.IdempotencyKey),
+				TrackingId: provider.trackingID(command.IdempotencyKey),
+			},
+		)
 	case "boutique.cmd.shipping.cancel-shipment.v1":
 		command := &commandsv1.ShippingCancelShipmentCommand{}
 		if err := envelope.Data.UnmarshalTo(command); err != nil {
 			return shippingOutcome{}, err
 		}
-		if failureMode == "cancel" {
-			return newShippingOutcome("boutique.evt.shipping.shipment-cancellation-failed.v1", "boutique.shipping.ShipmentCancellationFailed.v1", command.OrderId, envelope,
-				&eventsv1.ShippingShipmentCancellationFailedEvent{OrderId: command.OrderId, ShipmentId: command.ShipmentId, Failure: &commonv1.Failure{Code: "CARRIER_CANCELLATION_FAILED", SafeMessage: "Shipment cancellation requires review."}})
+		if command.CommandId == "" || command.OrderId == "" || command.ShipmentId == "" || command.IdempotencyKey == "" {
+			return shippingOutcome{}, errors.New("shipping cancellation command is incomplete")
 		}
-		return newShippingOutcome("boutique.evt.shipping.shipment-cancelled.v1", "boutique.shipping.ShipmentCancelled.v1", command.OrderId, envelope,
-			&eventsv1.ShippingShipmentCancelledEvent{OrderId: command.OrderId, ShipmentId: command.ShipmentId})
+		if command.OrderId != envelope.AggregateId {
+			return shippingOutcome{}, errors.New("shipping cancellation order does not match the envelope aggregate")
+		}
+		if failureMode == "cancel" {
+			return newShippingOutcome(
+				shippingCancelShipmentSlot,
+				"boutique.evt.shipping.shipment-cancellation-failed.v1",
+				"boutique.shipping.ShipmentCancellationFailed.v1",
+				command.OrderId,
+				envelope,
+				inputTime,
+				&eventsv1.ShippingShipmentCancellationFailedEvent{
+					OrderId:    command.OrderId,
+					ShipmentId: command.ShipmentId,
+					Failure: &commonv1.Failure{
+						Code:        "CARRIER_CANCELLATION_FAILED",
+						SafeMessage: "Shipment cancellation requires review.",
+					},
+				},
+			)
+		}
+		return newShippingOutcome(
+			shippingCancelShipmentSlot,
+			"boutique.evt.shipping.shipment-cancelled.v1",
+			"boutique.shipping.ShipmentCancelled.v1",
+			command.OrderId,
+			envelope,
+			inputTime,
+			&eventsv1.ShippingShipmentCancelledEvent{
+				OrderId:    command.OrderId,
+				ShipmentId: command.ShipmentId,
+			},
+		)
 	default:
 		return shippingOutcome{}, fmt.Errorf("unsupported shipping command %s", subject)
 	}
 }
 
-func newShippingOutcome(subject, messageType, orderID string, cause *commonv1.MessageEnvelope, payload proto.Message) (shippingOutcome, error) {
-	wrapper, err := anypb.New(payload)
+func validateShippingInput(envelope *commonv1.MessageEnvelope) (time.Time, error) {
+	if envelope == nil || envelope.MessageId == "" || envelope.CorrelationId == "" ||
+		envelope.AggregateId == "" || envelope.AggregateVersion == 0 || envelope.Data == nil ||
+		envelope.OccurredAt == nil {
+		return time.Time{}, errors.New("shipping input envelope is incomplete")
+	}
+	if err := envelope.OccurredAt.CheckValid(); err != nil {
+		return time.Time{}, fmt.Errorf("shipping input timestamp is invalid: %w", err)
+	}
+	return envelope.OccurredAt.AsTime().UTC(), nil
+}
+
+func newShippingOutcome(
+	slot string,
+	subject string,
+	messageType string,
+	orderID string,
+	cause *commonv1.MessageEnvelope,
+	occurredAt time.Time,
+	payload proto.Message,
+) (shippingOutcome, error) {
+	envelope, err := stateless.NewResultEnvelope(cause, stateless.ResultSpec{
+		Slot:             slot,
+		MessageType:      messageType,
+		Producer:         "shippingservice/phase3",
+		AggregateType:    "order",
+		AggregateID:      orderID,
+		AggregateVersion: cause.AggregateVersion,
+		OccurredAt:       occurredAt,
+		Payload:          payload,
+	})
 	if err != nil {
 		return shippingOutcome{}, err
 	}
-	messageID := shippingStableID(subject, cause.MessageId)
-	envelope := &commonv1.MessageEnvelope{MessageId: messageID, MessageType: messageType, SchemaVersion: 1, OccurredAt: timestamppb.Now(),
-		Producer: "shippingservice/phase5", AggregateType: "order", AggregateId: orderID, AggregateVersion: cause.AggregateVersion,
-		CorrelationId: cause.CorrelationId, CausationId: cause.MessageId, Traceparent: cause.Traceparent, Tracestate: cause.Tracestate, Data: wrapper}
-	encoded, err := proto.Marshal(envelope)
+	encoded, err := stateless.MarshalEnvelope(envelope)
 	if err != nil {
 		return shippingOutcome{}, err
 	}
-	return shippingOutcome{MessageID: messageID, Subject: subject, Data: encoded}, nil
+	return shippingOutcome{MessageID: envelope.MessageId, Subject: subject, Data: encoded}, nil
 }
 
 func (worker *shippingEventWorker) publishOutcome(outcome shippingOutcome) error {
@@ -337,21 +326,4 @@ func (worker *shippingEventWorker) publishOutcome(outcome shippingOutcome) error
 		"correlation_id": correlationID,
 	}).Debug("NATS event sent")
 	return nil
-}
-
-func shippingStableID(parts ...string) string {
-	hash := sha256.New()
-	for _, part := range parts {
-		_, _ = hash.Write([]byte(part))
-		_, _ = hash.Write([]byte{0})
-	}
-	id := hash.Sum(nil)[:16]
-	id[6] = (id[6] & 0xf) | 0x50
-	id[8] = (id[8] & 0x3f) | 0x80
-	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x", id[0:4], id[4:6], id[6:8], id[8:10], id[10:16])
-}
-
-func shippingTrackingID(orderID string) string {
-	sum := sha256.Sum256([]byte(orderID))
-	return fmt.Sprintf("PH-%06d-%07d", uint32(sum[0])<<16|uint32(sum[1])<<8|uint32(sum[2]), uint32(sum[3])<<24|uint32(sum[4])<<16|uint32(sum[5])<<8|uint32(sum[6]))
 }

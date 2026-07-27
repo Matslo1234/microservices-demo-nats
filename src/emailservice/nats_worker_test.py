@@ -2,93 +2,167 @@
 # Copyright 2026 Google LLC
 # Licensed under the Apache License, Version 2.0 (the "License");
 
-import json
-import tempfile
 import unittest
-from pathlib import Path
+from datetime import datetime, timezone
 
+from google.protobuf.any_pb2 import Any
+from google.protobuf.timestamp_pb2 import Timestamp
 from nats.js.errors import ServiceUnavailableError
 
 from nats_worker import (
-    _State,
+    FAILED_SUBJECT,
+    NOTIFICATION_TYPE,
+    RESULT_SLOT,
+    SENT_SUBJECT,
+    _build_outcome,
     _fetch_messages,
+    _process_message,
+    _provider_idempotency_key,
     _ready,
+    _result_message_id,
     _stop,
 )
+from protos.common.v1 import message_pb2
+from protos.events.v1 import events_pb2
 
 
-class StateTest(unittest.TestCase):
-  def test_outcomes_are_journaled_and_restored(self):
-    with tempfile.TemporaryDirectory() as directory:
-      path = Path(directory) / "inbox.json"
-      state = _State(path)
-      outcome = {
-          "subject": "boutique.evt.notification.order-confirmation-sent.v1",
-          "message_id": "event-1",
-          "data": "cGF5bG9hZA==",
-      }
-      self.assertEqual(outcome, state.record("source-1", outcome))
-      self.assertEqual(outcome, state.record("source-1", {"unexpected": True}))
-      second = {
-          "subject": "subject",
-          "message_id": "event-2",
-          "data": "c2Vjb25k",
-      }
-      self.assertEqual(
-          {"source-1": outcome, "source-2": second},
-          state.record_many([
-              ("source-1", {"unexpected": True}),
-              ("source-2", second),
-          ]))
-      state.close()
+def completed_order_envelope(
+    message_id="event-order-completed-42",
+    order_id="order-42",
+    occurred_at=None,
+):
+  completed = events_pb2.OrderCompletedEvent(
+      order=message_pb2.SanitizedOrderSnapshot(
+          order_id=order_id,
+          user_id="user-1",
+          email="buyer@example.com",
+      ))
+  wrapped = Any()
+  wrapped.Pack(completed, deterministic=True)
+  timestamp = Timestamp()
+  timestamp.FromDatetime(
+      occurred_at
+      or datetime(2026, 7, 27, 10, 30, 0, 123000, tzinfo=timezone.utc))
+  return message_pb2.MessageEnvelope(
+      message_id=message_id,
+      message_type="boutique.order.Completed.v1",
+      schema_version=1,
+      occurred_at=timestamp,
+      producer="checkoutservice",
+      aggregate_type="order",
+      aggregate_id=order_id,
+      aggregate_version=7,
+      correlation_id=order_id,
+      data=wrapped,
+  )
 
-      restored = _State(path)
-      self.assertEqual(outcome, restored.get("source-1"))
-      self.assertEqual(second, restored.get("source-2"))
-      restored.close()
 
-  def test_legacy_json_is_preserved_and_uses_sqlite_sidecar(self):
-    with tempfile.TemporaryDirectory() as directory:
-      path = Path(directory) / "inbox.json"
-      outcome = {
-          "subject": "subject",
-          "message_id": "event-1",
-          "data": "cGF5bG9hZA==",
-      }
-      legacy = json.dumps({"outcomes": {"source-1": outcome}}).encode()
-      path.write_bytes(legacy)
+class DeterministicProviderTest(unittest.TestCase):
+  def test_result_id_matches_phase0_contract_vector(self):
+    self.assertEqual(
+        "br1_BipmFE_ifI2JqRb67NFrgisjZYeejPTlkKhojRP1Mz8",
+        _result_message_id("event-order-completed-42", RESULT_SLOT))
 
-      state = _State(path)
-      self.assertEqual(Path(str(path) + ".sqlite3"), state.path)
-      self.assertEqual(legacy, path.read_bytes())
-      self.assertIsNone(state.get("source-1"))
-      self.assertEqual(outcome, state.record("source-1", outcome))
-      state.close()
+  def test_replicas_and_retries_build_identical_success(self):
+    envelope = completed_order_envelope()
+    replica_a = _build_outcome(envelope, "")
+    replica_b = _build_outcome(envelope, "")
+    retry = _build_outcome(envelope, "")
+    self.assertEqual(replica_a, replica_b)
+    self.assertEqual(replica_a, retry)
+    self.assertEqual(SENT_SUBJECT, replica_a["subject"])
+    self.assertEqual(
+        f"order-42:{NOTIFICATION_TYPE}",
+        replica_a["provider_idempotency_key"])
 
-      restored = _State(path)
-      self.assertEqual(outcome, restored.get("source-1"))
-      self.assertEqual(legacy, path.read_bytes())
-      restored.close()
+    result = message_pb2.MessageEnvelope.FromString(replica_a["data"])
+    self.assertEqual(envelope.occurred_at, result.occurred_at)
+    self.assertEqual(envelope.message_id, result.causation_id)
+    sent = events_pb2.NotificationOrderConfirmationSentEvent()
+    self.assertTrue(result.data.Unpack(sent))
+    self.assertEqual("order-42", sent.order_id)
+    self.assertEqual("b***@example.com", sent.masked_recipient)
+    self.assertTrue(sent.provider_message_id)
 
-  def test_large_history_is_queried_without_an_in_memory_index(self):
-    with tempfile.TemporaryDirectory() as directory:
-      path = Path(directory) / "outcomes.sqlite3"
-      state = _State(path)
-      for index in range(10_000):
-        state.record(
-            f"source-{index}",
-            {
-              "subject": "subject",
-              "message_id": f"event-{index}",
-              "data": "cGF5bG9hZA==",
-            })
-      state.close()
+  def test_failure_retries_reuse_provider_key_and_exact_result(self):
+    envelope = completed_order_envelope()
+    first = _build_outcome(envelope, "failed")
+    second = _build_outcome(envelope, "failed")
+    self.assertEqual(first, second)
+    self.assertEqual(FAILED_SUBJECT, first["subject"])
+    self.assertEqual(
+        _provider_idempotency_key("order-42"),
+        first["provider_idempotency_key"])
+    result = message_pb2.MessageEnvelope.FromString(first["data"])
+    failed = events_pb2.NotificationOrderConfirmationFailedEvent()
+    self.assertTrue(result.data.Unpack(failed))
+    self.assertEqual(1, failed.attempt_count)
 
-      restored = _State(path)
-      self.assertEqual(
-          "event-9999", restored.get("source-9999")["message_id"])
-      self.assertFalse(hasattr(restored, "outcomes"))
-      restored.close()
+  def test_business_key_is_order_plus_notification_type(self):
+    self.assertEqual(
+        "order-1:order-confirmation",
+        _provider_idempotency_key("order-1"))
+    self.assertEqual(
+        "order-1:shipping-update",
+        _provider_idempotency_key("order-1", "shipping-update"))
+
+  def test_invalid_envelope_is_rejected(self):
+    envelope = completed_order_envelope()
+    envelope.correlation_id = ""
+    with self.assertRaisesRegex(ValueError, "incomplete"):
+      _build_outcome(envelope, "")
+
+
+class PublishBeforeAckTest(unittest.IsolatedAsyncioTestCase):
+  async def asyncSetUp(self):
+    _stop.clear()
+    _ready.set()
+
+  async def asyncTearDown(self):
+    _stop.clear()
+    _ready.clear()
+
+  async def test_ambiguous_publish_retries_identical_result_on_another_replica(self):
+    envelope = completed_order_envelope()
+
+    class Message:
+      subject = "boutique.evt.order.completed.v1"
+      data = envelope.SerializeToString(deterministic=True)
+
+      def __init__(self):
+        self.acks = 0
+        self.naks = 0
+
+      async def ack(self):
+        self.acks += 1
+
+      async def nak(self, **_):
+        self.naks += 1
+
+    class Publisher:
+      def __init__(self, fail=False):
+        self.fail = fail
+        self.published = []
+
+      async def publish(self, subject, data, headers):
+        self.published.append((subject, data, headers))
+        if self.fail:
+          raise TimeoutError("ambiguous provider response")
+
+    message = Message()
+    first_replica = Publisher(fail=True)
+    await _process_message(message, first_replica, "")
+    self.assertEqual(0, message.acks)
+    self.assertEqual(1, message.naks)
+
+    second_replica = Publisher()
+    await _process_message(message, second_replica, "")
+    self.assertEqual(1, message.acks)
+    self.assertEqual(1, message.naks)
+    self.assertEqual(
+        first_replica.published[0],
+        second_replica.published[0],
+        "another replica changed the result after an ambiguous response")
 
 
 class FetchRecoveryTest(unittest.IsolatedAsyncioTestCase):

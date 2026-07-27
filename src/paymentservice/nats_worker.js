@@ -18,6 +18,8 @@ const PAYMENT_TOKEN_PREFIX = 'ptok_v1';
 const AUTHORIZATION_PREFIX = 'pauth_v1';
 const PAYMENT_TOKEN_TTL_MS = 15 * 60 * 1000;
 const SIGNING_KEY_CONTEXT = 'boutique/payment-provider/v1';
+const SIGNING_KEY_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
+const RESULT_ID_DOMAIN = 'boutique.result.v1';
 const COMMAND_PREFETCH = 256;
 const COMMAND_BATCH_DELAY_MS = 20;
 const COMMAND_PULL_EXPIRES_MS = 1000;
@@ -32,6 +34,28 @@ function stableID(...parts) {
   digest[8] = (digest[8] & 0x3f) | 0x80;
   const hex = digest.subarray(0, 16).toString('hex');
   return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20,32)}`;
+}
+
+function deriveResultMessageID(inputMessageID, resultSlot) {
+  if (typeof inputMessageID !== 'string' || !inputMessageID ||
+      typeof resultSlot !== 'string' || !resultSlot) {
+    throw new Error('result input message ID and slot are required');
+  }
+  const input = Buffer.from(inputMessageID, 'utf8');
+  const slot = Buffer.from(resultSlot, 'utf8');
+  const inputLength = Buffer.alloc(4);
+  const slotLength = Buffer.alloc(4);
+  inputLength.writeUInt32BE(input.length);
+  slotLength.writeUInt32BE(slot.length);
+  const digest = crypto.createHash('sha256')
+    .update(Buffer.from(RESULT_ID_DOMAIN, 'utf8'))
+    .update(Buffer.from([0]))
+    .update(inputLength)
+    .update(input)
+    .update(slotLength)
+    .update(slot)
+    .digest('base64url');
+  return `br1_${digest}`;
 }
 
 // Every payment replica receives the same dedicated signing secret. HKDF
@@ -49,59 +73,133 @@ function deriveSigningKey(sharedSecret) {
   ));
 }
 
-function signReference(prefix, payload, signingKey) {
+function createSigningKeyring(activeKeyID, activeSecret, verificationSecrets = {}) {
+  if (!SIGNING_KEY_ID_PATTERN.test(activeKeyID || '')) {
+    throw new Error('payment active signing key ID is invalid');
+  }
+  if (verificationSecrets === null || Array.isArray(verificationSecrets) ||
+      typeof verificationSecrets !== 'object') {
+    throw new Error('payment verification keys must be a JSON object');
+  }
+  const keys = new Map();
+  for (const [keyID, secret] of Object.entries(verificationSecrets)) {
+    if (!SIGNING_KEY_ID_PATTERN.test(keyID)) {
+      throw new Error(`payment verification key ID ${keyID} is invalid`);
+    }
+    keys.set(keyID, deriveSigningKey(secret));
+  }
+  const activeKey = deriveSigningKey(activeSecret);
+  if (keys.has(activeKeyID) &&
+      !crypto.timingSafeEqual(keys.get(activeKeyID), activeKey)) {
+    throw new Error('payment active key conflicts with its verification key');
+  }
+  keys.set(activeKeyID, activeKey);
+  const fingerprintHash = crypto.createHash('sha256');
+  for (const keyID of [...keys.keys()].sort()) {
+    fingerprintHash
+      .update(keyID)
+      .update(Buffer.from([0]))
+      .update(crypto.createHash('sha256').update(keys.get(keyID)).digest());
+  }
+  const fingerprint = fingerprintHash.digest('hex').slice(0, 16);
+  return { activeKeyID, keys, fingerprint };
+}
+
+function loadSigningKeyring(environment = process.env) {
+  let verificationSecrets = {};
+  if (environment.PAYMENT_VERIFICATION_KEYS) {
+    try {
+      verificationSecrets = JSON.parse(environment.PAYMENT_VERIFICATION_KEYS);
+    } catch (_) {
+      throw new Error('PAYMENT_VERIFICATION_KEYS must be valid JSON');
+    }
+  }
+  return createSigningKeyring(
+    environment.PAYMENT_SIGNING_KEY_ID,
+    environment.PAYMENT_SIGNING_KEY,
+    verificationSecrets,
+  );
+}
+
+function signingKey(keyring, keyID) {
+  if (!keyring || !(keyring.keys instanceof Map)) {
+    throw new Error('payment signing keyring is required');
+  }
+  const key = keyring.keys.get(keyID);
+  if (!key) throw new Error('UNKNOWN_PAYMENT_SIGNING_KEY');
+  return key;
+}
+
+function signReference(prefix, payload, keyring, keyID = keyring.activeKeyID) {
+  if (!SIGNING_KEY_ID_PATTERN.test(keyID || '')) {
+    throw new Error('payment signing key ID is invalid');
+  }
   const encodedPayload = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
-  const unsigned = `${prefix}.${encodedPayload}`;
-  const signature = crypto.createHmac('sha256', signingKey).update(unsigned).digest('base64url');
+  const unsigned = `${prefix}.${keyID}.${encodedPayload}`;
+  const signature = crypto.createHmac('sha256', signingKey(keyring, keyID))
+    .update(unsigned)
+    .digest('base64url');
   return `${unsigned}.${signature}`;
 }
 
-function verifyReference(reference, expectedPrefix, signingKey) {
+function verifyReference(reference, expectedPrefix, keyring) {
   if (typeof reference !== 'string' || reference.length > 2048) {
     throw new Error('INVALID_PAYMENT_REFERENCE');
   }
   const parts = reference.split('.');
-  if (parts.length !== 3 || parts[0] !== expectedPrefix || !parts[1] || !parts[2]) {
+  if (parts.length !== 4 || parts[0] !== expectedPrefix ||
+      !SIGNING_KEY_ID_PATTERN.test(parts[1] || '') || !parts[2] || !parts[3]) {
     throw new Error('INVALID_PAYMENT_REFERENCE');
   }
-  const unsigned = `${parts[0]}.${parts[1]}`;
-  const actual = Buffer.from(parts[2], 'base64url');
-  const expected = crypto.createHmac('sha256', signingKey).update(unsigned).digest();
+  const unsigned = `${parts[0]}.${parts[1]}.${parts[2]}`;
+  const actual = Buffer.from(parts[3], 'base64url');
+  let verificationKey;
+  try {
+    verificationKey = signingKey(keyring, parts[1]);
+  } catch (_) {
+    throw new Error('INVALID_PAYMENT_REFERENCE');
+  }
+  const expected = crypto.createHmac('sha256', verificationKey).update(unsigned).digest();
   if (actual.length !== expected.length || !crypto.timingSafeEqual(actual, expected)) {
     throw new Error('INVALID_PAYMENT_REFERENCE');
   }
   try {
-    return JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
+    return {
+      keyID: parts[1],
+      payload: JSON.parse(Buffer.from(parts[2], 'base64url').toString('utf8')),
+    };
   } catch (_) {
     throw new Error('INVALID_PAYMENT_REFERENCE');
   }
 }
 
-function verifyPaymentToken(paymentToken, orderID, signingKey, now = Date.now()) {
-  const payload = verifyReference(paymentToken, PAYMENT_TOKEN_PREFIX, signingKey);
+function verifyPaymentToken(paymentToken, orderID, keyring, now = Date.now()) {
+  const verified = verifyReference(paymentToken, PAYMENT_TOKEN_PREFIX, keyring);
+  const payload = verified.payload;
   if (payload.version !== 1 || payload.orderId !== orderID ||
       !Number.isSafeInteger(payload.expiresAt) || payload.expiresAt <= now ||
       typeof payload.nonce !== 'string' || !payload.nonce) {
     throw new Error('INVALID_OR_EXPIRED_TOKEN');
   }
-  return payload;
+  return verified;
 }
 
-function authorizationReference(command, signingKey) {
+function authorizationReference(command, keyring, keyID = keyring.activeKeyID) {
   return signReference(AUTHORIZATION_PREFIX, {
     version: 1,
     orderId: command.orderId,
     idempotencyKey: command.idempotencyKey,
-  }, signingKey);
+  }, keyring, keyID);
 }
 
-function verifyAuthorization(authorizationID, orderID, signingKey) {
-  const payload = verifyReference(authorizationID, AUTHORIZATION_PREFIX, signingKey);
+function verifyAuthorization(authorizationID, orderID, keyring) {
+  const verified = verifyReference(authorizationID, AUTHORIZATION_PREFIX, keyring);
+  const payload = verified.payload;
   if (payload.version !== 1 || payload.orderId !== orderID ||
       typeof payload.idempotencyKey !== 'string' || !payload.idempotencyKey) {
     throw new Error('INVALID_AUTHORIZATION');
   }
-  return payload;
+  return verified;
 }
 
 function occurredAtMilliseconds(envelope) {
@@ -155,7 +253,7 @@ function validateCard(request) {
   return { type: details.card_type, last4: number.slice(-4) };
 }
 
-function tokenize(signingKey, request, now = Date.now()) {
+function tokenize(keyring, request, now = Date.now()) {
   if (!request.order_id || !request.idempotency_key) throw new Error('INVALID_TOKEN_REQUEST');
   validateCard(request);
   const expiresAt = now + PAYMENT_TOKEN_TTL_MS;
@@ -164,11 +262,11 @@ function tokenize(signingKey, request, now = Date.now()) {
     orderId: request.order_id,
     expiresAt,
     nonce: crypto.randomBytes(16).toString('base64url'),
-  }, signingKey);
+  }, keyring);
   return { payment_token: paymentToken, expires_at: new Date(expiresAt).toISOString() };
 }
 
-function processTokenBatch(entries, signingKey) {
+function processTokenBatch(entries, keyring) {
   logger.debug({
     topic: TOKEN_SUBJECT,
     message_kind: 'query',
@@ -178,7 +276,7 @@ function processTokenBatch(entries, signingKey) {
   for (const entry of entries) {
     if (entry.error) continue;
     try {
-      entry.result = tokenize(signingKey, entry.request);
+      entry.result = tokenize(keyring, entry.request);
     } catch (tokenError) {
       entry.error = tokenError;
     }
@@ -201,7 +299,7 @@ function processTokenBatch(entries, signingKey) {
   }
 }
 
-function createTokenBatcher(signingKey) {
+function createTokenBatcher(keyring) {
   let buffered = [];
   let flushTimer;
   const flush = () => {
@@ -212,7 +310,7 @@ function createTokenBatcher(signingKey) {
     }
     const batch = buffered;
     buffered = [];
-    processTokenBatch(batch, signingKey);
+    processTokenBatch(batch, keyring);
   };
   return entry => {
     buffered.push(entry);
@@ -234,11 +332,15 @@ function failure(code, message, retryable = false) {
   return { code, retryable, safeMessage: message };
 }
 
-function outcome(contracts, cause, subject, messageType, PayloadType, payload) {
-  const messageID = stableID(subject, cause.messageId);
+function outcome(contracts, cause, resultSlot, subject, messageType, PayloadType, payload) {
+  if (!cause.messageId || !cause.correlationId || !cause.aggregateId ||
+      !cause.aggregateVersion || !cause.occurredAt) {
+    throw new Error('payment command envelope is incomplete');
+  }
+  const messageID = deriveResultMessageID(cause.messageId, resultSlot);
   const envelope = {
     messageId: messageID, messageType, schemaVersion: 1,
-    occurredAt: cause.occurredAt || { seconds: 0, nanos: 0 }, producer: 'paymentservice/phase5',
+    occurredAt: cause.occurredAt, producer: 'paymentservice/phase3',
     aggregateType: 'order', aggregateId: cause.aggregateId, aggregateVersion: cause.aggregateVersion,
     correlationId: cause.correlationId, causationId: cause.messageId, traceparent: cause.traceparent,
     tracestate: cause.tracestate, data: anyPayload(PayloadType, payload),
@@ -246,66 +348,93 @@ function outcome(contracts, cause, subject, messageType, PayloadType, payload) {
   return { messageID, subject, data: Buffer.from(contracts.Envelope.encode(envelope).finish()).toString('base64') };
 }
 
-function processCommand(signingKey, contracts, subject, envelope) {
+function processCommand(keyring, contracts, subject, envelope) {
+  const aggregateVersion = Number(envelope?.aggregateVersion);
+  if (!envelope?.messageId || !envelope?.correlationId || !envelope?.aggregateId ||
+      !Number.isSafeInteger(aggregateVersion) || aggregateVersion <= 0 ||
+      !envelope?.data?.value) {
+    throw new Error('payment command envelope is incomplete');
+  }
+  const commandTime = occurredAtMilliseconds(envelope);
   const mode = process.env.PAYMENT_FAILURE_MODE || '';
   if (subject === 'boutique.cmd.payment.authorize.v1') {
     const command = contracts.Authorize.decode(envelope.data.value);
-    let validToken = false;
+    let verifiedToken;
     try {
-      verifyPaymentToken(
+      verifiedToken = verifyPaymentToken(
         command.paymentToken,
         command.orderId,
-        signingKey,
-        occurredAtMilliseconds(envelope),
+        keyring,
+        commandTime,
       );
-      validToken = true;
     } catch (_) {
-      validToken = false;
+      verifiedToken = undefined;
     }
-    if (mode === 'authorization_declined' || !validToken) {
-      return outcome(contracts, envelope, 'boutique.evt.payment.authorization-declined.v1', 'boutique.payment.AuthorizationDeclined.v1',
+    if (!command.commandId || !command.orderId || !command.idempotencyKey ||
+        command.orderId !== envelope.aggregateId) {
+      throw new Error('INVALID_AUTHORIZE_COMMAND');
+    }
+    if (mode === 'authorization_declined' || !verifiedToken) {
+      return outcome(contracts, envelope, 'payment.authorize',
+        'boutique.evt.payment.authorization-declined.v1', 'boutique.payment.AuthorizationDeclined.v1',
         contracts.Declined, { orderId: command.orderId, declineCategory: mode ? 'TEST_DECLINE' : 'INVALID_OR_EXPIRED_TOKEN' });
     }
-    const authorizationID = authorizationReference(command, signingKey);
-    return outcome(contracts, envelope, 'boutique.evt.payment.authorized.v1', 'boutique.payment.Authorized.v1', contracts.Authorized,
+    // Bind the authorization to the token's signing key. During a rotation,
+    // an old token therefore reproduces the same authorization on old and new
+    // replicas while the old key remains in the overlap set.
+    const authorizationID = authorizationReference(command, keyring, verifiedToken.keyID);
+    return outcome(contracts, envelope, 'payment.authorize',
+      'boutique.evt.payment.authorized.v1', 'boutique.payment.Authorized.v1', contracts.Authorized,
       { orderId: command.orderId, authorizationId: authorizationID, amount: command.amount });
   }
   if (subject === 'boutique.cmd.payment.capture.v1') {
     const command = contracts.Capture.decode(envelope.data.value);
+    if (!command.commandId || !command.orderId || !command.authorizationId ||
+        !command.idempotencyKey || command.orderId !== envelope.aggregateId) {
+      throw new Error('INVALID_CAPTURE_COMMAND');
+    }
     let validAuthorization = false;
     try {
-      verifyAuthorization(command.authorizationId, command.orderId, signingKey);
+      verifyAuthorization(command.authorizationId, command.orderId, keyring);
       validAuthorization = true;
     } catch (_) {
       validAuthorization = false;
     }
     if (mode === 'capture_failed' || !validAuthorization) {
-      return outcome(contracts, envelope, 'boutique.evt.payment.capture-failed.v1', 'boutique.payment.CaptureFailed.v1', contracts.CaptureFailed,
+      return outcome(contracts, envelope, 'payment.capture',
+        'boutique.evt.payment.capture-failed.v1', 'boutique.payment.CaptureFailed.v1', contracts.CaptureFailed,
         { orderId: command.orderId, authorizationId: command.authorizationId, failure: failure('CAPTURE_FAILED', 'Payment capture failed.', true) });
     }
-    return outcome(contracts, envelope, 'boutique.evt.payment.captured.v1', 'boutique.payment.Captured.v1', contracts.Captured,
+    return outcome(contracts, envelope, 'payment.capture',
+      'boutique.evt.payment.captured.v1', 'boutique.payment.Captured.v1', contracts.Captured,
       { orderId: command.orderId, transactionId: stableID('capture', command.idempotencyKey), amount: command.amount });
   }
   if (subject === 'boutique.cmd.payment.release-authorization.v1') {
     const command = contracts.Release.decode(envelope.data.value);
+    if (!command.commandId || !command.orderId || !command.authorizationId ||
+        !command.idempotencyKey || command.orderId !== envelope.aggregateId) {
+      throw new Error('INVALID_RELEASE_COMMAND');
+    }
     let validAuthorization = false;
     try {
-      verifyAuthorization(command.authorizationId, command.orderId, signingKey);
+      verifyAuthorization(command.authorizationId, command.orderId, keyring);
       validAuthorization = true;
     } catch (_) {
       validAuthorization = false;
     }
     if (mode === 'release_failed' || !validAuthorization) {
-      return outcome(contracts, envelope, 'boutique.evt.payment.authorization-release-failed.v1', 'boutique.payment.AuthorizationReleaseFailed.v1',
+      return outcome(contracts, envelope, 'payment.release-authorization',
+        'boutique.evt.payment.authorization-release-failed.v1', 'boutique.payment.AuthorizationReleaseFailed.v1',
         contracts.ReleaseFailed, { orderId: command.orderId, authorizationId: command.authorizationId, failure: failure('AUTHORIZATION_RELEASE_FAILED', 'Authorization release requires review.') });
     }
-    return outcome(contracts, envelope, 'boutique.evt.payment.authorization-released.v1', 'boutique.payment.AuthorizationReleased.v1', contracts.Released,
+    return outcome(contracts, envelope, 'payment.release-authorization',
+      'boutique.evt.payment.authorization-released.v1', 'boutique.payment.AuthorizationReleased.v1', contracts.Released,
       { orderId: command.orderId, authorizationId: command.authorizationId });
   }
   throw new Error(`unsupported payment command ${subject}`);
 }
 
-async function processCommandBatch(messages, signingKey, contracts, js) {
+async function processCommandBatch(messages, keyring, contracts, js) {
   const commands = messages.map(message => {
     let correlationId = 'unknown';
     let messageId = 'unknown';
@@ -329,7 +458,7 @@ async function processCommandBatch(messages, signingKey, contracts, js) {
   for (const command of commands) {
     if (command.error) continue;
     try {
-      command.result = processCommand(signingKey, contracts, command.message.subject, command.envelope);
+      command.result = processCommand(keyring, contracts, command.message.subject, command.envelope);
     } catch (commandError) {
       command.error = commandError;
     }
@@ -365,7 +494,7 @@ async function processCommandBatch(messages, signingKey, contracts, js) {
   }));
 }
 
-async function runCommandConsumer(commandSubscription, signingKey, contracts, js,
+async function runCommandConsumer(commandSubscription, keyring, contracts, js,
     pullRefreshMs = COMMAND_PULL_REFRESH_MS) {
   // Legacy pull subscriptions do not request messages merely by being
   // iterated. Pull requests can also be lost during a reconnect without
@@ -396,7 +525,7 @@ async function runCommandConsumer(commandSubscription, signingKey, contracts, js
     const batch = buffered;
     buffered = [];
     processing = processing
-      .then(() => processCommandBatch(batch, signingKey, contracts, js))
+      .then(() => processCommandBatch(batch, keyring, contracts, js))
       .finally(() => {
         requestPull();
       });
@@ -430,7 +559,7 @@ function commandConsumerOptions() {
   return options;
 }
 
-async function superviseCommandConsumer(nc, js, signingKey, contracts, workerStatus, initialSubscription,
+async function superviseCommandConsumer(nc, js, keyring, contracts, workerStatus, initialSubscription,
     restartDelayMs = COMMAND_RESTART_DELAY_MS) {
   let commandSubscription = initialSubscription;
   while (!workerStatus.stopping && !nc.isClosed()) {
@@ -440,7 +569,7 @@ async function superviseCommandConsumer(nc, js, signingKey, contracts, workerSta
       }
       workerStatus.commandSubscription = commandSubscription;
       workerStatus.consumerReady = true;
-      await runCommandConsumer(commandSubscription, signingKey, contracts, js);
+      await runCommandConsumer(commandSubscription, keyring, contracts, js);
       if (workerStatus.stopping || nc.isClosed()) return;
       throw new Error('payment command consumer closed unexpectedly');
     } catch (workerError) {
@@ -461,19 +590,26 @@ async function superviseCommandConsumer(nc, js, signingKey, contracts, workerSta
 }
 
 async function startPaymentNATS() {
-  for (const key of ['NATS_URL', 'NATS_USER', 'NATS_PASSWORD', 'NATS_CA_FILE', 'PAYMENT_SIGNING_KEY']) {
+  for (const key of [
+    'NATS_URL',
+    'NATS_USER',
+    'NATS_PASSWORD',
+    'NATS_CA_FILE',
+    'PAYMENT_SIGNING_KEY_ID',
+    'PAYMENT_SIGNING_KEY',
+  ]) {
     if (!process.env[key]) throw new Error(`${key} is required`);
   }
   const contracts = await loadContracts();
-  const signingKey = deriveSigningKey(process.env.PAYMENT_SIGNING_KEY);
+  const keyring = loadSigningKeyring();
   const nc = await connect({ servers: process.env.NATS_URL, user: process.env.NATS_USER, pass: process.env.NATS_PASSWORD,
-    name: 'paymentservice/phase5', tls: { caFile: process.env.NATS_CA_FILE },
+    name: 'paymentservice/phase3', tls: { caFile: process.env.NATS_CA_FILE },
     reconnectTimeWait: 2000, maxReconnectAttempts: -1, pingInterval: 20000, maxPingOut: 2 });
   const js = nc.jetstream({ timeout: 5000 });
   const workerStatus = {
     connectionReady: !nc.isClosed(), consumerReady: false, stopping: false, commandSubscription: undefined,
   };
-  const enqueueTokenization = createTokenBatcher(signingKey);
+  const enqueueTokenization = createTokenBatcher(keyring);
 
   const tokenSubscription = nc.subscribe(TOKEN_SUBJECT, { queue: 'payment-tokenize-v1', callback: (err, message) => {
     if (err) return;
@@ -490,7 +626,7 @@ async function startPaymentNATS() {
   }});
 
   const commandSubscription = await js.pullSubscribe(COMMAND_SUBJECT, commandConsumerOptions());
-  superviseCommandConsumer(nc, js, signingKey, contracts, workerStatus, commandSubscription)
+  superviseCommandConsumer(nc, js, keyring, contracts, workerStatus, commandSubscription)
     .catch(workerError => {
       workerStatus.consumerReady = false;
       logger.error({ error: workerError.message }, 'payment consumer stopped');
@@ -504,7 +640,10 @@ async function startPaymentNATS() {
     workerStatus.connectionReady = false;
     logger.error({ error: statusError.message }, 'payment NATS status monitor stopped');
   });
-  logger.info('Stateless payment tokenization and durable command handlers are ready');
+  logger.info({
+    active_signing_key_id: keyring.activeKeyID,
+    signing_key_set_fingerprint: keyring.fingerprint,
+  }, 'Stateless payment tokenization and durable command handlers are ready');
   return {
     nc,
     tokenSubscription,
@@ -519,7 +658,8 @@ async function startPaymentNATS() {
 }
 
 module.exports = {
-  startPaymentNATS, stableID, deriveSigningKey, validateCard, tokenize, verifyPaymentToken,
-  authorizationReference, verifyAuthorization, occurredAtMilliseconds, loadContracts,
+  startPaymentNATS, stableID, deriveResultMessageID, deriveSigningKey, createSigningKeyring,
+  loadSigningKeyring, validateCard, tokenize, verifyPaymentToken, authorizationReference,
+  verifyAuthorization, occurredAtMilliseconds, loadContracts,
   processTokenBatch, processCommand, processCommandBatch, runCommandConsumer, superviseCommandConsumer,
 };

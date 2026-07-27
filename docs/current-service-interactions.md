@@ -93,9 +93,9 @@ Accepted`; clients poll `/operations/{id}` or `/orders/{id}`.
 | `recommendationservice` | Catalog, cart and page-view facts | Recommendation selection facts |
 | `adservice` | Page-view facts | Ad selection facts |
 | `checkoutservice` | Order command plus catalog/currency/cart/payment/shipping facts | Stateless workers over shared Redis saga/projection/inbox/outbox state; order lifecycle and downstream commands |
-| `shippingservice` | Shipping commands and cart facts | Persisted fake-provider outcomes and shipping facts |
-| `paymentservice` | Tokenization query and payment commands | Short-lived signed tokens, deterministic signed provider references, and payment facts |
-| `emailservice` | Completed-order facts | Persisted notification outcome and notification facts |
+| `shippingservice` | Shipping commands and cart facts | Deterministic fake-provider outcomes and shipping facts; no pod-owned provider state |
+| `paymentservice` | Tokenization query and payment commands | Key-ID-addressed short-lived tokens, deterministic signed provider references, and payment facts |
+| `emailservice` | Completed-order facts | Order/notification-keyed deterministic provider result and notification facts |
 | `storefrontprojectionservice` | `boutique.evt.>` | Query endpoints and five JetStream KV materialized views |
 
 The storefront projection stores products, carts, recent page context, orders,
@@ -150,9 +150,13 @@ Email and cart clearing remain independent from the completed-order decision.
 Card PAN and CVV exist only in the frontend-to-payment tokenization request and
 are not stored or published to JetStream. Payment tokens contain only an order
 binding, expiry, nonce, and HMAC; every replica derives the same verifier from
-its dedicated payment signing key. Authorization references are signed and
-deterministic, so any replica can authorize, capture, release, or safely
-recompute the same outcome without a local provider store.
+its active payment key set. Tokens and authorization references carry an
+explicit key ID, and overlapping verification keys keep in-flight work stable
+during rotation. Any replica can authorize, capture, release, or safely
+recompute the same outcome without a local provider store. Shipping references
+derive from a replica-shared provider secret and business idempotency key;
+email uses order ID plus notification type. Both providers derive result time
+from the input event and retain no application-local journal.
 
 ## Health, observability, and isolation
 

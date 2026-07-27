@@ -3,19 +3,29 @@
 
 const assert = require('assert');
 const {
-  deriveSigningKey, tokenize, verifyPaymentToken, processTokenBatch, loadContracts,
-  processCommand, runCommandConsumer, superviseCommandConsumer,
+  createSigningKeyring, deriveResultMessageID, tokenize, verifyPaymentToken,
+  loadSigningKeyring, processTokenBatch, loadContracts, processCommand, runCommandConsumer,
+  superviseCommandConsumer,
 } = require('./nats_worker');
 
 async function main() {
   const sharedCredential = 's0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
-  const replicaAKey = deriveSigningKey(sharedCredential);
-  const replicaBKey = deriveSigningKey(sharedCredential);
-  const unrelatedReplicaKey = deriveSigningKey(
+  const replicaAKeyring = createSigningKeyring('primary-v1', sharedCredential);
+  const replicaBKeyring = createSigningKeyring('primary-v1', sharedCredential);
+  const unrelatedReplicaKeyring = createSigningKeyring(
+    'primary-v1',
     'sffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff',
   );
-  assert.deepEqual(replicaAKey, replicaBKey, 'replicas derived different signing keys');
-  assert.notDeepEqual(replicaAKey, unrelatedReplicaKey, 'different credentials derived the same signing key');
+  assert.deepEqual(
+    replicaAKeyring,
+    replicaBKeyring,
+    'replicas derived different active signing-key sets',
+  );
+  assert.notEqual(
+    replicaAKeyring.keys.get('primary-v1').toString('hex'),
+    unrelatedReplicaKeyring.keys.get('primary-v1').toString('hex'),
+    'different credentials derived the same signing key',
+  );
 
   const now = Date.now();
   const request = {
@@ -23,41 +33,89 @@ async function main() {
     credit_card_number: '4432801561520454', credit_card_expiration_month: 12,
     credit_card_expiration_year: new Date().getFullYear() + 1, credit_card_cvv: '672',
   };
-  const tokenizedByReplicaA = tokenize(replicaAKey, request, now);
+  const tokenizedByReplicaA = tokenize(replicaAKeyring, request, now);
   const paymentToken = tokenizedByReplicaA.payment_token;
   assert.equal(new Date(tokenizedByReplicaA.expires_at).getTime(), now + 15 * 60 * 1000);
   assert.doesNotThrow(
-    () => verifyPaymentToken(paymentToken, request.order_id, replicaBKey, now),
+    () => verifyPaymentToken(paymentToken, request.order_id, replicaBKeyring, now),
     'a second replica could not verify the issued token',
   );
   assert.throws(
-    () => verifyPaymentToken(paymentToken, request.order_id, unrelatedReplicaKey, now),
+    () => verifyPaymentToken(paymentToken, request.order_id, unrelatedReplicaKeyring, now),
     /INVALID_PAYMENT_REFERENCE/,
     'a replica with another credential verified the token',
   );
   assert.throws(
-    () => verifyPaymentToken(paymentToken, 'another-order', replicaBKey, now),
+    () => verifyPaymentToken(paymentToken, 'another-order', replicaBKeyring, now),
     /INVALID_OR_EXPIRED_TOKEN/,
     'the payment token was not bound to its order',
   );
   assert.throws(
-    () => verifyPaymentToken(paymentToken, request.order_id, replicaBKey, now + 15 * 60 * 1000),
+    () => verifyPaymentToken(paymentToken, request.order_id, replicaBKeyring, now + 15 * 60 * 1000),
     /INVALID_OR_EXPIRED_TOKEN/,
     'an expired token was accepted',
   );
   const tokenParts = paymentToken.split('.');
-  tokenParts[2] = `${tokenParts[2][0] === 'A' ? 'B' : 'A'}${tokenParts[2].slice(1)}`;
+  tokenParts[3] = `${tokenParts[3][0] === 'A' ? 'B' : 'A'}${tokenParts[3].slice(1)}`;
   const tamperedToken = tokenParts.join('.');
   assert.throws(
-    () => verifyPaymentToken(tamperedToken, request.order_id, replicaBKey, now),
+    () => verifyPaymentToken(tamperedToken, request.order_id, replicaBKeyring, now),
     /INVALID_PAYMENT_REFERENCE/,
     'a token with a modified signature was accepted',
   );
-  const tokenPayload = JSON.parse(Buffer.from(paymentToken.split('.')[1], 'base64url').toString('utf8'));
+  assert.equal(paymentToken.split('.')[1], 'primary-v1', 'payment token omitted its signing key ID');
+  const tokenPayload = JSON.parse(Buffer.from(paymentToken.split('.')[2], 'base64url').toString('utf8'));
   assert.deepEqual(
     Object.keys(tokenPayload).sort(),
     ['expiresAt', 'nonce', 'orderId', 'version'],
     'payment token contains unexpected card data',
+  );
+
+  const oldCredential = 'old0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+  const newCredential = 'new0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+  const oldKeyring = createSigningKeyring('key-2026-06', oldCredential);
+  const overlapKeyring = createSigningKeyring(
+    'key-2026-07',
+    newCredential,
+    {'key-2026-06': oldCredential},
+  );
+  const newOnlyKeyring = createSigningKeyring('key-2026-07', newCredential);
+  const loadedOverlapKeyring = loadSigningKeyring({
+    PAYMENT_SIGNING_KEY_ID: 'key-2026-07',
+    PAYMENT_SIGNING_KEY: newCredential,
+    PAYMENT_VERIFICATION_KEYS: JSON.stringify({'key-2026-06': oldCredential}),
+  });
+  assert.deepEqual(
+    loadedOverlapKeyring,
+    overlapKeyring,
+    'replicas loaded different key sets from the same rotation configuration',
+  );
+  assert.throws(
+    () => loadSigningKeyring({
+      PAYMENT_SIGNING_KEY_ID: 'key-2026-07',
+      PAYMENT_SIGNING_KEY: newCredential,
+      PAYMENT_VERIFICATION_KEYS: '{',
+    }),
+    /valid JSON/,
+    'malformed overlap configuration was accepted',
+  );
+  const oldToken = tokenize(oldKeyring, request, now).payment_token;
+  assert.equal(oldToken.split('.')[1], 'key-2026-06');
+  assert.doesNotThrow(
+    () => verifyPaymentToken(oldToken, request.order_id, overlapKeyring, now),
+    'the rotation overlap did not retain verification for the old key ID',
+  );
+  const newToken = tokenize(overlapKeyring, request, now).payment_token;
+  assert.equal(newToken.split('.')[1], 'key-2026-07');
+  assert.throws(
+    () => verifyPaymentToken(newToken, request.order_id, oldKeyring, now),
+    /INVALID_PAYMENT_REFERENCE/,
+    'an old replica unexpectedly knew the new signing key',
+  );
+  assert.throws(
+    () => verifyPaymentToken(oldToken, request.order_id, newOnlyKeyring, now),
+    /INVALID_PAYMENT_REFERENCE/,
+    'an expired overlap set continued accepting an old key ID',
   );
 
   const tokenResponses = [];
@@ -68,12 +126,12 @@ async function main() {
       subject: 'boutique.qry.payment.tokenize.v1',
       respond: encoded => tokenResponses.push(JSON.parse(encoded)),
     },
-  })), replicaAKey);
+  })), replicaAKeyring);
   assert.equal(tokenResponses.filter(response => response.payment_token).length, 32,
     'token batch did not return every token');
   for (let index = 0; index < tokenResponses.length; index++) {
     assert.doesNotThrow(
-      () => verifyPaymentToken(tokenResponses[index].payment_token, `token-batch-${index}`, replicaBKey),
+      () => verifyPaymentToken(tokenResponses[index].payment_token, `token-batch-${index}`, replicaBKeyring),
       `replica B could not verify token batch item ${index}`,
     );
   }
@@ -85,12 +143,17 @@ async function main() {
   const envelope = { messageId: 'authorize-message', aggregateId: 'order-1', aggregateVersion: 2,
     correlationId: 'order-1', occurredAt,
     data: { value: contracts.Authorize.encode(authorize).finish() } };
+  assert.equal(
+    deriveResultMessageID('event-order-completed-42', 'notification.order-confirmation'),
+    'br1_BipmFE_ifI2JqRb67NFrgisjZYeejPTlkKhojRP1Mz8',
+    'payment result ID helper diverged from the Phase 0 contract',
+  );
   const resultFromReplicaB = processCommand(
-    replicaBKey, contracts, 'boutique.cmd.payment.authorize.v1', envelope,
+    replicaBKeyring, contracts, 'boutique.cmd.payment.authorize.v1', envelope,
   );
   assert.equal(resultFromReplicaB.subject, 'boutique.evt.payment.authorized.v1');
   const repeatedResultFromReplicaA = processCommand(
-    replicaAKey, contracts, 'boutique.cmd.payment.authorize.v1', envelope,
+    replicaAKeyring, contracts, 'boutique.cmd.payment.authorize.v1', envelope,
   );
   assert.deepEqual(
     repeatedResultFromReplicaA,
@@ -102,26 +165,64 @@ async function main() {
     'payment result omitted the protobuf Any type URL');
   const authorized = contracts.Authorized.decode(decodedResult.data.value);
   assert(authorized.authorizationId.startsWith('pauth_v1.'), 'authorization reference was not signed');
+  assert.equal(
+    authorized.authorizationId.split('.')[1],
+    'primary-v1',
+    'authorization reference omitted the signing key ID',
+  );
+
+  const rotatingAuthorize = {...authorize, paymentToken: oldToken};
+  const rotatingEnvelope = {
+    ...envelope,
+    messageId: 'rotating-authorize-message',
+    data: {value: contracts.Authorize.encode(rotatingAuthorize).finish()},
+  };
+  const beforeRotation = processCommand(
+    oldKeyring,
+    contracts,
+    'boutique.cmd.payment.authorize.v1',
+    rotatingEnvelope,
+  );
+  const duringOverlap = processCommand(
+    overlapKeyring,
+    contracts,
+    'boutique.cmd.payment.authorize.v1',
+    rotatingEnvelope,
+  );
+  assert.deepEqual(
+    beforeRotation,
+    duringOverlap,
+    'key rotation changed a retried authorization outcome during the overlap window',
+  );
+  const rotatingResult = contracts.Envelope.decode(
+    Buffer.from(duringOverlap.data, 'base64'),
+  );
+  const rotatingAuthorized = contracts.Authorized.decode(rotatingResult.data.value);
+  assert.equal(
+    rotatingAuthorized.authorizationId.split('.')[1],
+    'key-2026-06',
+    'authorization did not retain the token key identity during rotation',
+  );
 
   const wrongCredentialResult = processCommand(
-    unrelatedReplicaKey, contracts, 'boutique.cmd.payment.authorize.v1', envelope,
+    unrelatedReplicaKeyring, contracts, 'boutique.cmd.payment.authorize.v1', envelope,
   );
   assert.equal(wrongCredentialResult.subject, 'boutique.evt.payment.authorization-declined.v1',
     'a replica with the wrong signing key authorized the token');
-  const expiredForCommand = tokenize(replicaAKey, request, now - 15 * 60 * 1000).payment_token;
+  const expiredForCommand = tokenize(replicaAKeyring, request, now - 15 * 60 * 1000).payment_token;
   const expiredCommandResult = processCommand(
-    replicaBKey, contracts, 'boutique.cmd.payment.authorize.v1',
+    replicaBKeyring, contracts, 'boutique.cmd.payment.authorize.v1',
     {...envelope, messageId: 'expired-token-message',
       data: {value: contracts.Authorize.encode({...authorize, paymentToken: expiredForCommand}).finish()}},
   );
   assert.equal(expiredCommandResult.subject, 'boutique.evt.payment.authorization-declined.v1',
     'a token expired when the command was issued was authorized');
   const delayedToken = tokenize(
-    replicaAKey, request, now - 15 * 60 * 1000 - 10 * 1000,
+    replicaAKeyring, request, now - 15 * 60 * 1000 - 10 * 1000,
   ).payment_token;
   const delayedCommandTime = now - 20 * 1000;
   const delayedCommandResult = processCommand(
-    replicaBKey, contracts, 'boutique.cmd.payment.authorize.v1',
+    replicaBKeyring, contracts, 'boutique.cmd.payment.authorize.v1',
     {...envelope, messageId: 'delayed-token-message',
       occurredAt: {
         seconds: Math.floor(delayedCommandTime / 1000),
@@ -138,7 +239,7 @@ async function main() {
   const captureEnvelope = {...envelope, messageId: 'capture-message',
     data: { value: contracts.Capture.encode(capture).finish() }};
   const captured = processCommand(
-    replicaAKey, contracts, 'boutique.cmd.payment.capture.v1', captureEnvelope,
+    replicaAKeyring, contracts, 'boutique.cmd.payment.capture.v1', captureEnvelope,
   );
   assert.equal(captured.subject, 'boutique.evt.payment.captured.v1',
     'another replica could not capture the signed authorization');
@@ -148,14 +249,14 @@ async function main() {
   const releaseEnvelope = {...envelope, messageId: 'release-message',
     data: { value: contracts.Release.encode(release).finish() }};
   const released = processCommand(
-    replicaBKey, contracts, 'boutique.cmd.payment.release-authorization.v1', releaseEnvelope,
+    replicaBKeyring, contracts, 'boutique.cmd.payment.release-authorization.v1', releaseEnvelope,
   );
   assert.equal(released.subject, 'boutique.evt.payment.authorization-released.v1',
     'another replica could not release the signed authorization');
 
   const invalidCapture = processCommand(
-    replicaAKey, contracts, 'boutique.cmd.payment.capture.v1',
-    {...captureEnvelope, messageId: 'invalid-capture-message',
+    replicaAKeyring, contracts, 'boutique.cmd.payment.capture.v1',
+    {...captureEnvelope, messageId: 'invalid-capture-message', aggregateId: 'another-order',
       data: {value: contracts.Capture.encode({...capture, orderId: 'another-order'}).finish()}},
   );
   assert.equal(invalidCapture.subject, 'boutique.evt.payment.capture-failed.v1',
@@ -163,19 +264,19 @@ async function main() {
 
   process.env.PAYMENT_FAILURE_MODE = 'authorization_declined';
   const declined = processCommand(
-    replicaAKey, contracts, 'boutique.cmd.payment.authorize.v1',
+    replicaAKeyring, contracts, 'boutique.cmd.payment.authorize.v1',
     {...envelope, messageId: 'declined-message'},
   );
   assert.equal(declined.subject, 'boutique.evt.payment.authorization-declined.v1');
   process.env.PAYMENT_FAILURE_MODE = 'capture_failed';
   const captureFailed = processCommand(
-    replicaAKey, contracts, 'boutique.cmd.payment.capture.v1',
+    replicaAKeyring, contracts, 'boutique.cmd.payment.capture.v1',
     {...captureEnvelope, messageId: 'capture-failed-message'},
   );
   assert.equal(captureFailed.subject, 'boutique.evt.payment.capture-failed.v1');
   process.env.PAYMENT_FAILURE_MODE = 'release_failed';
   const releaseFailed = processCommand(
-    replicaAKey, contracts, 'boutique.cmd.payment.release-authorization.v1',
+    replicaAKeyring, contracts, 'boutique.cmd.payment.release-authorization.v1',
     {...releaseEnvelope, messageId: 'release-failed-message'},
   );
   assert.equal(releaseFailed.subject, 'boutique.evt.payment.authorization-release-failed.v1');
@@ -188,7 +289,7 @@ async function main() {
   for (let index = 0; index < 32; index++) {
     const orderID = `order-worker-${index}`;
     const workerRequest = {...request, order_id: orderID, idempotency_key: orderID};
-    const workerToken = tokenize(replicaAKey, workerRequest).payment_token;
+    const workerToken = tokenize(replicaAKeyring, workerRequest).payment_token;
     const workerCommand = {...authorize, commandId: `authorize-worker-${index}`, orderId: orderID,
       paymentToken: workerToken, idempotencyKey: `${orderID}/authorize`};
     const workerEnvelope = contracts.Envelope.encode({messageId: `authorize-worker-message-${index}`,
@@ -202,7 +303,7 @@ async function main() {
     async *[Symbol.asyncIterator]() {
       for (const message of messages) yield message;
     }};
-  await runCommandConsumer(subscription, replicaBKey, contracts, {
+  await runCommandConsumer(subscription, replicaBKeyring, contracts, {
     publish: async (_subject, _data, options) => { publishedMessageIDs.push(options.msgID); },
   });
   const expectedPull = [{batch: 256, expires: 1000, idle_heartbeat: 500},
@@ -221,7 +322,7 @@ async function main() {
     },
   };
   await runCommandConsumer(
-    waitingSubscription, replicaAKey, contracts, {publish: async () => {}}, 5,
+    waitingSubscription, replicaAKeyring, contracts, {publish: async () => {}}, 5,
   );
   assert(watchdogPulls.length >= 3, 'worker did not refresh pull credit while idle');
   assert(watchdogPulls.every(pull => pull.expires === 1000),
@@ -243,7 +344,7 @@ async function main() {
   await assert.rejects(
     runCommandConsumer(
       interruptedSubscription,
-      replicaAKey,
+      replicaAKeyring,
       contracts,
       {publish: async () => { interruptedPublishes++; }},
     ),
@@ -286,7 +387,7 @@ async function main() {
       },
       publish: async () => {},
     },
-    replicaAKey,
+    replicaAKeyring,
     contracts,
     recoveredStatus,
     failedSubscription,

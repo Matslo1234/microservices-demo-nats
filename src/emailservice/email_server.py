@@ -32,7 +32,7 @@ class HealthHandler(BaseHTTPRequestHandler):
       self._reply(
           200,
           f'boutique_dependency_ready{{service="emailservice",dependency="nats"}} {ready}\n'
-          f'boutique_dependency_ready{{service="emailservice",dependency="provider_store"}} {ready}\n',
+          f'boutique_dependency_ready{{service="emailservice",dependency="provider_config"}} 1\n',
           "text/plain; version=0.0.4")
       return
     self._reply(404, "not found\n")

@@ -1,225 +1,301 @@
 // Copyright 2018 Google LLC
-//
 // Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 package main
 
 import (
-	"encoding/json"
-	"fmt"
-	"os"
-	"path/filepath"
 	"regexp"
 	"testing"
+	"time"
 
 	commandsv1 "github.com/GoogleCloudPlatform/microservices-demo/protos/commands/v1"
 	commonv1 "github.com/GoogleCloudPlatform/microservices-demo/protos/common/v1"
+	eventsv1 "github.com/GoogleCloudPlatform/microservices-demo/protos/events/v1"
+	stateless "github.com/GoogleCloudPlatform/microservices-demo/src/shared/stateless/go"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-func TestShippingCommandOutcomesAreStableAndPersistent(t *testing.T) {
-	storePath := filepath.Join(t.TempDir(), "provider.json")
-	store, err := openShippingProviderStore(storePath)
+const (
+	testShippingSecret      = "shipping-provider-secret-aaaaaaaaaaaaaaaaaaaaaaaa"
+	otherTestShippingSecret = "shipping-provider-secret-bbbbbbbbbbbbbbbbbbbbbbbb"
+)
+
+func shippingTestEnvelope(t *testing.T, messageID, aggregateID string, version uint64, occurredAt time.Time, payload proto.Message) *commonv1.MessageEnvelope {
+	t.Helper()
+	wrapped, err := anypb.New(payload)
 	if err != nil {
 		t.Fatal(err)
 	}
-	command := &commandsv1.ShippingCreateShipmentCommand{CommandId: "ship-command", OrderId: "order-1", IdempotencyKey: "order-1/shipment"}
-	wrapped, err := anypb.New(command)
-	if err != nil {
-		t.Fatal(err)
-	}
-	envelope := &commonv1.MessageEnvelope{MessageId: "ship-command", AggregateId: "order-1", AggregateVersion: 3, CorrelationId: "order-1", Data: wrapped}
-	first, err := buildShippingOutcome("boutique.cmd.shipping.create-shipment.v1", envelope)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.record(envelope.MessageId, first); err != nil {
-		t.Fatal(err)
-	}
-	reopened, err := openShippingProviderStore(storePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	second, ok := reopened.outcome(envelope.MessageId)
-	if !ok || first.MessageID != second.MessageID || string(first.Data) != string(second.Data) {
-		t.Fatal("stored provider outcome changed after restart")
+	return &commonv1.MessageEnvelope{
+		MessageId:        messageID,
+		MessageType:      "test.command",
+		SchemaVersion:    1,
+		OccurredAt:       timestamppb.New(occurredAt),
+		Producer:         "test",
+		AggregateType:    "order",
+		AggregateId:      aggregateID,
+		AggregateVersion: version,
+		CorrelationId:    aggregateID,
+		Data:             wrapped,
 	}
 }
 
-func TestShippingProviderStoreMigratesLegacyStateAndRecoversTornAppend(t *testing.T) {
-	storePath := filepath.Join(t.TempDir(), "provider.json")
-	expected := shippingOutcome{MessageID: "event-1", Subject: "subject", Data: []byte("payload")}
-	legacy, err := json.Marshal(struct {
-		Outcomes map[string]shippingOutcome `json:"outcomes"`
-	}{Outcomes: map[string]shippingOutcome{"command-1": expected}})
+func shippingTestProvider(t *testing.T, secret string) *shippingProvider {
+	t.Helper()
+	provider, err := newShippingProvider(secret)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(storePath, legacy, 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	store, err := openShippingProviderStore(storePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if actual, ok := store.outcome("command-1"); !ok || actual.MessageID != expected.MessageID {
-		t.Fatal("legacy shipping outcome was not restored")
-	}
-	encoded, err := os.ReadFile(storePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	record := shippingStoreRecord{}
-	if err := json.Unmarshal(encoded, &record); err != nil || record.Version != shippingStoreVersion {
-		t.Fatalf("legacy shipping state was not migrated: record=%#v error=%v", record, err)
-	}
-
-	if err := os.WriteFile(storePath, append(encoded, []byte(`{"version":1,"command_id":`)...), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	recovered, err := openShippingProviderStore(storePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if actual, ok := recovered.outcome("command-1"); !ok || actual.MessageID != expected.MessageID {
-		t.Fatal("shipping outcome before torn append was not recovered")
-	}
-	repaired, err := os.ReadFile(storePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(repaired) != string(encoded) {
-		t.Fatalf("torn append was not removed: got %q, want %q", repaired, encoded)
-	}
+	return provider
 }
 
-func TestShippingProviderStorePersistsBatch(t *testing.T) {
-	storePath := filepath.Join(t.TempDir(), "provider.json")
-	store, err := openShippingProviderStore(storePath)
-	if err != nil {
+func decodeShippingResult(t *testing.T, outcome shippingOutcome) *commonv1.MessageEnvelope {
+	t.Helper()
+	envelope := &commonv1.MessageEnvelope{}
+	if err := proto.Unmarshal(outcome.Data, envelope); err != nil {
 		t.Fatal(err)
 	}
-	outcomes := map[string]shippingOutcome{}
-	for index := 0; index < shippingCommandBatchSize; index++ {
-		commandID := fmt.Sprintf("command-%d", index)
-		outcomes[commandID] = shippingOutcome{
-			MessageID: "event-" + commandID,
-			Subject:   "subject",
-			Data:      []byte("payload-" + commandID),
-		}
-	}
-	if err := store.recordBatch(outcomes); err != nil {
-		t.Fatal(err)
-	}
-	reopened, err := openShippingProviderStore(storePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for commandID, expected := range outcomes {
-		actual, ok := reopened.outcome(commandID)
-		if !ok || actual.MessageID != expected.MessageID || string(actual.Data) != string(expected.Data) {
-			t.Fatalf("batched outcome %s was not restored", commandID)
-		}
-	}
+	return envelope
 }
 
-func BenchmarkShippingProviderStoreRecordWithHistory(b *testing.B) {
-	storePath := filepath.Join(b.TempDir(), "provider.json")
-	history := make(map[string]shippingOutcome, 1_000)
-	for index := 0; index < 1_000; index++ {
-		key := fmt.Sprintf("command-%04d", index)
-		history[key] = shippingOutcome{MessageID: "event-" + key, Subject: "subject", Data: []byte("payload")}
-	}
-	legacy, err := json.Marshal(struct {
-		Outcomes map[string]shippingOutcome `json:"outcomes"`
-	}{Outcomes: history})
-	if err != nil {
-		b.Fatal(err)
-	}
-	if err := os.WriteFile(storePath, legacy, 0o600); err != nil {
-		b.Fatal(err)
-	}
-	store, err := openShippingProviderStore(storePath)
-	if err != nil {
-		b.Fatal(err)
-	}
+func TestShippingCommandsAreDeterministicAcrossReplicasAndRetries(t *testing.T) {
+	inputTime := time.Date(2026, 7, 27, 9, 30, 15, 123_000_000, time.UTC)
+	replicaA := shippingTestProvider(t, testShippingSecret)
+	replicaB := shippingTestProvider(t, testShippingSecret)
 
-	b.ResetTimer()
-	for index := 0; index < b.N; index++ {
-		key := fmt.Sprintf("benchmark-%d", index)
-		if err := store.record(key, shippingOutcome{
-			MessageID: "event-" + key, Subject: "subject", Data: []byte("payload"),
-		}); err != nil {
-			b.Fatal(err)
-		}
-	}
-}
-
-func TestShippingFailureInjectionCoversEveryProviderStep(t *testing.T) {
 	tests := []struct {
-		mode, subject, expected string
-		command                 proto.Message
+		name    string
+		subject string
+		slot    string
+		command proto.Message
 	}{
-		{"quote", "boutique.cmd.shipping.calculate-order-quote.v1", "boutique.evt.shipping.order-quote-failed.v1", &commandsv1.ShippingCalculateOrderQuoteCommand{OrderId: "order-q", Cart: &commonv1.CartSnapshot{}}},
-		{"shipment", "boutique.cmd.shipping.create-shipment.v1", "boutique.evt.shipping.shipment-creation-failed.v1", &commandsv1.ShippingCreateShipmentCommand{OrderId: "order-s"}},
-		{"cancel", "boutique.cmd.shipping.cancel-shipment.v1", "boutique.evt.shipping.shipment-cancellation-failed.v1", &commandsv1.ShippingCancelShipmentCommand{OrderId: "order-c", ShipmentId: "shipment-c"}},
+		{
+			name:    "quote",
+			subject: "boutique.cmd.shipping.calculate-order-quote.v1",
+			slot:    shippingOrderQuoteSlot,
+			command: &commandsv1.ShippingCalculateOrderQuoteCommand{
+				CommandId: "quote-command",
+				OrderId:   "order-1",
+				Cart: &commonv1.CartSnapshot{
+					UserId: "user-1",
+					Items: []*commonv1.CartLine{
+						{ProductId: "product-1", Quantity: 2},
+					},
+					CartVersion: 3,
+				},
+			},
+		},
+		{
+			name:    "create",
+			subject: "boutique.cmd.shipping.create-shipment.v1",
+			slot:    shippingCreateShipmentSlot,
+			command: &commandsv1.ShippingCreateShipmentCommand{
+				CommandId:      "shipment-command",
+				OrderId:        "order-1",
+				IdempotencyKey: "order-1/shipment",
+			},
+		},
+		{
+			name:    "cancel",
+			subject: "boutique.cmd.shipping.cancel-shipment.v1",
+			slot:    shippingCancelShipmentSlot,
+			command: &commandsv1.ShippingCancelShipmentCommand{
+				CommandId:      "cancel-command",
+				OrderId:        "order-1",
+				ShipmentId:     "shipment-1",
+				TrackingId:     "tracking-1",
+				IdempotencyKey: "order-1/cancel-shipment",
+			},
+		},
 	}
+
 	for _, test := range tests {
-		t.Run(test.mode, func(t *testing.T) {
-			t.Setenv("SHIPPING_FAILURE_MODE", test.mode)
-			wrapped, err := anypb.New(test.command)
+		t.Run(test.name, func(t *testing.T) {
+			sourceID := "source-" + test.name
+			envelope := shippingTestEnvelope(t, sourceID, "order-1", 4, inputTime, test.command)
+			first, err := buildShippingOutcome(test.subject, envelope, replicaA, "")
 			if err != nil {
 				t.Fatal(err)
 			}
-			envelope := &commonv1.MessageEnvelope{MessageId: "command-" + test.mode, AggregateId: "order-" + test.mode, Data: wrapped}
-			outcome, err := buildShippingOutcome(test.subject, envelope)
+			retry, err := buildShippingOutcome(test.subject, envelope, replicaA, "")
 			if err != nil {
 				t.Fatal(err)
 			}
-			if outcome.Subject != test.expected {
-				t.Fatalf("subject = %s, want %s", outcome.Subject, test.expected)
+			otherReplica, err := buildShippingOutcome(test.subject, envelope, replicaB, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if first.MessageID != retry.MessageID || first.MessageID != otherReplica.MessageID ||
+				string(first.Data) != string(retry.Data) || string(first.Data) != string(otherReplica.Data) {
+				t.Fatal("a retry or another replica changed the shipping outcome")
+			}
+			expectedID, err := stateless.DeriveResultMessageID(sourceID, test.slot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if first.MessageID != expectedID {
+				t.Fatalf("message ID = %s, want %s", first.MessageID, expectedID)
+			}
+			result := decodeShippingResult(t, first)
+			if !result.OccurredAt.AsTime().Equal(inputTime) {
+				t.Fatalf("result occurrence = %s, want input occurrence %s", result.OccurredAt.AsTime(), inputTime)
 			}
 		})
 	}
 }
 
-// TestTrackingIdFormat verifies the tracking ID matches the expected pattern.
-func TestTrackingIdFormat(t *testing.T) {
-	pattern := regexp.MustCompile(`^[A-Z]{2}-\d+-\d+$`)
-
-	for i := 0; i < 20; i++ {
-		id := CreateTrackingId("test-salt-value")
-		if !pattern.MatchString(id) {
-			t.Errorf("CreateTrackingId: '%s' does not match expected pattern '[A-Z]{2}-\\d+-\\d+'", id)
-		}
+func TestShippingProviderSecretControlsStableProviderReferences(t *testing.T) {
+	inputTime := time.Date(2026, 7, 27, 10, 0, 0, 0, time.UTC)
+	command := &commandsv1.ShippingCreateShipmentCommand{
+		CommandId:      "shipment-command",
+		OrderId:        "order-1",
+		IdempotencyKey: "order-1/shipment",
+	}
+	envelope := shippingTestEnvelope(t, "source-shipment", "order-1", 4, inputTime, command)
+	first, err := buildShippingOutcome(
+		"boutique.cmd.shipping.create-shipment.v1",
+		envelope,
+		shippingTestProvider(t, testShippingSecret),
+		"",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := buildShippingOutcome(
+		"boutique.cmd.shipping.create-shipment.v1",
+		envelope,
+		shippingTestProvider(t, otherTestShippingSecret),
+		"",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstPayload := &eventsv1.ShippingShipmentCreatedEvent{}
+	if err := decodeShippingResult(t, first).Data.UnmarshalTo(firstPayload); err != nil {
+		t.Fatal(err)
+	}
+	secondPayload := &eventsv1.ShippingShipmentCreatedEvent{}
+	if err := decodeShippingResult(t, second).Data.UnmarshalTo(secondPayload); err != nil {
+		t.Fatal(err)
+	}
+	if firstPayload.ShipmentId == secondPayload.ShipmentId ||
+		firstPayload.TrackingId == secondPayload.TrackingId {
+		t.Fatal("different provider secrets produced the same provider references")
+	}
+	if !regexp.MustCompile(`^PH-\d{6}-\d{7}$`).MatchString(firstPayload.TrackingId) {
+		t.Fatalf("tracking ID %q has an invalid format", firstPayload.TrackingId)
 	}
 }
 
-// TestTrackingIdUniqueness checks that generated IDs are not all identical.
-func TestTrackingIdUniqueness(t *testing.T) {
-	seen := make(map[string]bool)
-	for i := 0; i < 50; i++ {
-		id := CreateTrackingId("same-salt")
-		seen[id] = true
+func TestShippingQuoteUsesInputEventTime(t *testing.T) {
+	inputTime := time.Date(2026, 7, 27, 11, 0, 0, 0, time.UTC)
+	command := &commandsv1.ShippingCalculateOrderQuoteCommand{
+		CommandId: "quote-command",
+		OrderId:   "order-1",
+		Cart:      &commonv1.CartSnapshot{UserId: "user-1", CartVersion: 2},
 	}
-	if len(seen) < 2 {
-		t.Errorf("CreateTrackingId: expected unique IDs but got %d distinct values out of 50", len(seen))
+	outcome, err := buildShippingOutcome(
+		"boutique.cmd.shipping.calculate-order-quote.v1",
+		shippingTestEnvelope(t, "source-quote", "order-1", 3, inputTime, command),
+		shippingTestProvider(t, testShippingSecret),
+		"",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := &eventsv1.ShippingOrderQuoteCalculatedEvent{}
+	if err := decodeShippingResult(t, outcome).Data.UnmarshalTo(payload); err != nil {
+		t.Fatal(err)
+	}
+	if !payload.ExpiresAt.AsTime().Equal(inputTime.Add(15 * time.Minute)) {
+		t.Fatalf("quote expiry = %s, want %s", payload.ExpiresAt.AsTime(), inputTime.Add(15*time.Minute))
 	}
 }
 
-// TestCreateQuoteFromFloat verifies quote creation from float values.
+func TestShippingCartQuoteIsDeterministicAcrossReplicas(t *testing.T) {
+	inputTime := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
+	cart := &commonv1.CartSnapshot{
+		UserId: "user-1",
+		Items: []*commonv1.CartLine{
+			{ProductId: "product-1", Quantity: 1},
+		},
+		CartVersion: 5,
+	}
+	source := &eventsv1.CartItemAddedEvent{UserId: cart.UserId, Cart: cart}
+	envelope := shippingTestEnvelope(t, "cart-event-1", cart.UserId, cart.CartVersion, inputTime, source)
+	first, err := buildShippingCartOutcome(envelope, cart)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := buildShippingCartOutcome(envelope, cart)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.MessageID != second.MessageID || string(first.Data) != string(second.Data) {
+		t.Fatal("cart quote changed when rebuilt by another replica")
+	}
+	payload := &eventsv1.ShippingCartQuoteUpdatedEvent{}
+	if err := decodeShippingResult(t, first).Data.UnmarshalTo(payload); err != nil {
+		t.Fatal(err)
+	}
+	if !payload.ExpiresAt.AsTime().Equal(inputTime.Add(15 * time.Minute)) {
+		t.Fatal("cart quote expiry did not derive from the source event")
+	}
+}
+
+func TestShippingFailureInjectionIsDeterministic(t *testing.T) {
+	inputTime := time.Date(2026, 7, 27, 13, 0, 0, 0, time.UTC)
+	provider := shippingTestProvider(t, testShippingSecret)
+	tests := []struct {
+		mode, subject, expected string
+		command                 proto.Message
+	}{
+		{"quote", "boutique.cmd.shipping.calculate-order-quote.v1", "boutique.evt.shipping.order-quote-failed.v1", &commandsv1.ShippingCalculateOrderQuoteCommand{CommandId: "quote", OrderId: "order-1", Cart: &commonv1.CartSnapshot{}}},
+		{"shipment", "boutique.cmd.shipping.create-shipment.v1", "boutique.evt.shipping.shipment-creation-failed.v1", &commandsv1.ShippingCreateShipmentCommand{CommandId: "shipment", OrderId: "order-1", IdempotencyKey: "order-1/shipment"}},
+		{"cancel", "boutique.cmd.shipping.cancel-shipment.v1", "boutique.evt.shipping.shipment-cancellation-failed.v1", &commandsv1.ShippingCancelShipmentCommand{CommandId: "cancel", OrderId: "order-1", ShipmentId: "shipment-1", IdempotencyKey: "order-1/cancel"}},
+	}
+	for _, test := range tests {
+		t.Run(test.mode, func(t *testing.T) {
+			envelope := shippingTestEnvelope(t, "command-"+test.mode, "order-1", 2, inputTime, test.command)
+			first, err := buildShippingOutcome(test.subject, envelope, provider, test.mode)
+			if err != nil {
+				t.Fatal(err)
+			}
+			second, err := buildShippingOutcome(test.subject, envelope, provider, test.mode)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if first.Subject != test.expected || string(first.Data) != string(second.Data) {
+				t.Fatal("failure retry changed its deterministic outcome")
+			}
+		})
+	}
+}
+
+func TestShippingRejectsMissingBusinessIdempotencyKey(t *testing.T) {
+	command := &commandsv1.ShippingCreateShipmentCommand{
+		CommandId: "shipment-command",
+		OrderId:   "order-1",
+	}
+	_, err := buildShippingOutcome(
+		"boutique.cmd.shipping.create-shipment.v1",
+		shippingTestEnvelope(t, "source-shipment", "order-1", 4, time.Now().UTC(), command),
+		shippingTestProvider(t, testShippingSecret),
+		"",
+	)
+	if err == nil {
+		t.Fatal("shipping accepted a provider command without an idempotency key")
+	}
+}
+
+func TestShippingProviderRequiresStrongSharedSecret(t *testing.T) {
+	if _, err := newShippingProvider("short"); err == nil {
+		t.Fatal("shipping accepted a short provider secret")
+	}
+}
+
 func TestCreateQuoteFromFloat(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -234,66 +310,37 @@ func TestCreateQuoteFromFloat(t *testing.T) {
 		{"large value", 100.01, 100, 1},
 	}
 
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			q := CreateQuoteFromFloat(tc.value)
-			if q.Dollars != tc.dollars || q.Cents != tc.cents {
-				t.Errorf("CreateQuoteFromFloat(%v) = $%d.%d, want $%d.%d",
-					tc.value, q.Dollars, q.Cents, tc.dollars, tc.cents)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			quote := CreateQuoteFromFloat(test.value)
+			if quote.Dollars != test.dollars || quote.Cents != test.cents {
+				t.Errorf(
+					"CreateQuoteFromFloat(%v) = $%d.%d, want $%d.%d",
+					test.value,
+					quote.Dollars,
+					quote.Cents,
+					test.dollars,
+					test.cents,
+				)
 			}
 		})
 	}
 }
 
-// TestCreateQuoteFromCount verifies count-based quote generation.
 func TestCreateQuoteFromCount(t *testing.T) {
 	zeroQuote := CreateQuoteFromCount(0)
 	if zeroQuote.Dollars != 0 || zeroQuote.Cents != 0 {
 		t.Errorf("CreateQuoteFromCount(0) = %s, want $0.0", zeroQuote)
 	}
-
 	nonZeroQuote := CreateQuoteFromCount(5)
 	if nonZeroQuote.Dollars == 0 && nonZeroQuote.Cents == 0 {
 		t.Error("CreateQuoteFromCount(5) returned zero, expected a non-zero quote")
 	}
 }
 
-func TestShippingMessageIDIsStablePerCause(t *testing.T) {
-	first := shippingMessageID(shippingQuoteSubject, "cause-1")
-	if first != shippingMessageID(shippingQuoteSubject, "cause-1") {
-		t.Fatal("message ID changed for the same causal event")
-	}
-	if first == shippingMessageID(shippingQuoteSubject, "cause-2") {
-		t.Fatal("different causal events received the same message ID")
-	}
-}
-
-// TestGetRandomLetterCode verifies the output is a valid uppercase letter.
-func TestGetRandomLetterCode(t *testing.T) {
-	for i := 0; i < 100; i++ {
-		code := getRandomLetterCode()
-		if code < 65 || code > 90 {
-			t.Errorf("getRandomLetterCode: got %d (%c), expected range 65-90 (A-Z)", code, code)
-		}
-	}
-}
-
-// TestGetRandomNumber verifies the output has the correct number of digits.
-func TestGetRandomNumber(t *testing.T) {
-	for _, digits := range []int{1, 3, 5, 7, 10} {
-		result := getRandomNumber(digits)
-		if len(result) != digits {
-			t.Errorf("getRandomNumber(%d) = '%s' (len %d), expected length %d",
-				digits, result, len(result), digits)
-		}
-	}
-}
-
-// TestQuoteString verifies the string representation of a Quote.
 func TestQuoteString(t *testing.T) {
-	q := Quote{Dollars: 8, Cents: 99}
-	expected := "$8.99"
-	if q.String() != expected {
-		t.Errorf("Quote.String() = '%s', want '%s'", q.String(), expected)
+	quote := Quote{Dollars: 8, Cents: 99}
+	if quote.String() != "$8.99" {
+		t.Errorf("Quote.String() = %q, want %q", quote.String(), "$8.99")
 	}
 }

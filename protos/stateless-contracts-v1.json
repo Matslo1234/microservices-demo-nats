@@ -232,7 +232,7 @@
     },
     {
       "service": "emailservice",
-      "current_correctness_state": "Notification inbox and provider outcomes are in pod-mounted SQLite.",
+      "current_correctness_state": "The demo notification provider and result envelope are deterministic from the order notification key and source event; pods retain no outcome state.",
       "target_store": "Deterministic demo provider behavior or provider receipts in an email-owned external store.",
       "idempotency_contract": "Order ID plus notification type is the provider key; retries reuse the stored or deterministic result."
     },
@@ -250,7 +250,7 @@
     },
     {
       "service": "paymentservice",
-      "current_correctness_state": "Shared signing-key configuration and deterministic token/provider calculations; no outcome registry.",
+      "current_correctness_state": "Replica-shared key-ID-addressed signing sets support an explicit overlap window; provider calculations are deterministic and there is no outcome registry.",
       "target_store": "Identical active signing-key set on every replica; no pod-owned provider state.",
       "idempotency_contract": "Validated input and business idempotency key fully determine authorization, capture, and release results."
     },
@@ -268,7 +268,7 @@
     },
     {
       "service": "shippingservice",
-      "current_correctness_state": "Provider outcomes are in a pod-mounted append-only JSON journal and process-local map.",
+      "current_correctness_state": "The demo carrier derives quote, shipment, tracking, cancellation, timestamp, and result identities from validated inputs, stable input time, and a replica-shared provider secret.",
       "target_store": "Deterministic demo provider behavior or shipping-owned external receipts for a non-idempotent real provider.",
       "idempotency_contract": "Command business key and stable input time reproduce quote, shipment, tracking, cancellation, and result values."
     },

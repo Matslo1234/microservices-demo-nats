@@ -66,6 +66,8 @@ spec:
           value: "true"
         - name: NATS_REQUIRED_SUBSCRIPTIONS
           value: "boutique.qry.payment.tokenize.v1,payment-commands-v1"
+        - name: PAYMENT_SIGNING_KEY_ID
+          value: primary-v1
         envFrom:
         - configMapRef:
             name: nats-client-config

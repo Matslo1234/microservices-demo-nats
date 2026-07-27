@@ -49,7 +49,8 @@ payment_path, payment = source("src", "paymentservice", "nats_worker.js")
 require(payment_path, payment,
         "boutique.qry.payment.tokenize.v1", "payment-commands-v1",
         "INVALID_OR_EXPIRED_TOKEN", "authorization_declined", "capture_failed", "release_failed",
-        "ptok_v1", "pauth_v1", "PAYMENT_SIGNING_KEY",
+        "ptok_v1", "pauth_v1", "PAYMENT_SIGNING_KEY", "PAYMENT_SIGNING_KEY_ID",
+        "PAYMENT_VERIFICATION_KEYS", "createSigningKeyring",
         "crypto.hkdfSync", "crypto.timingSafeEqual", "Nats-Msg-Id")
 forbid(payment_path, payment,
        "credit_card_number:", "credit_card_cvv:", "PaymentState", "PAYMENT_STORE_PATH",
@@ -61,7 +62,10 @@ shipping_path = ROOT / "src" / "shippingservice"
 shipping = "\n".join(item.read_text() for item in shipping_path.glob("*.go"))
 require(shipping_path, shipping,
         "shipping-commands-v1", "calculate-order-quote", "create-shipment", "cancel-shipment",
-        "SHIPPING_FAILURE_MODE", "openShippingProviderStore")
+        "SHIPPING_FAILURE_MODE", "SHIPPING_PROVIDER_SECRET", "newShippingProvider")
+forbid(shipping_path, shipping,
+       "openShippingProviderStore", "shippingProviderStore", "SHIPPING_STORE_PATH",
+       "provider-state.json")
 
 email_path, email = source("src", "emailservice", "nats_worker.py")
 require(email_path, email,
@@ -86,13 +90,15 @@ forbid(checkout_manifest_path, checkout_manifest, "CHECKOUT_STORE_PATH")
 payment_manifest_path, payment_manifest = source(
     "kubernetes-manifests", "paymentservice.yaml")
 require(payment_manifest_path, payment_manifest,
-        "type: RollingUpdate", "maxUnavailable: 0", "nats-client-config", "nats-ca")
+        "type: RollingUpdate", "maxUnavailable: 0", "PAYMENT_SIGNING_KEY_ID",
+        "nats-client-config", "nats-ca")
 forbid(payment_manifest_path, payment_manifest,
        "PAYMENT_STORE_PATH", "payment-data", "PersistentVolumeClaim", "type: Recreate")
 
 setup_path, setup = source("kubernetes-manifests", "nats", "base", "setup.yaml")
 require(setup_path, setup,
         "PAYMENT_SIGNING_KEY", '[ "${service}" = paymentservice ]',
+        "SHIPPING_PROVIDER_SECRET", '[ "${service}" = shippingservice ]',
         'sync_from_file secrets default "nats-credentials-${service}"')
 
 for manifest_name, store_path, claim in (
@@ -100,7 +106,11 @@ for manifest_name, store_path, claim in (
     ("emailservice.yaml", "EMAIL_STORE_PATH", "email-data"),
 ):
     manifest_path, manifest = source("kubernetes-manifests", manifest_name)
-    require(manifest_path, manifest, store_path, claim, "nats-client-config", "nats-ca")
+    require(manifest_path, manifest,
+            "type: RollingUpdate", "maxUnavailable: 0",
+            "nats-client-config", "nats-ca")
+    forbid(manifest_path, manifest,
+           store_path, claim, "PersistentVolumeClaim", "type: Recreate")
 
 frontend_manifest_path, frontend_manifest = source("kubernetes-manifests", "frontend.yaml")
 forbid(frontend_manifest_path, frontend_manifest, "CHECKOUT_SERVICE_ADDR")

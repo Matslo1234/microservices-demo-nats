@@ -4,8 +4,6 @@
 package main
 
 import (
-	"context"
-	"crypto/sha256"
 	"errors"
 	"fmt"
 	"os"
@@ -15,10 +13,10 @@ import (
 
 	commonv1 "github.com/GoogleCloudPlatform/microservices-demo/protos/common/v1"
 	eventsv1 "github.com/GoogleCloudPlatform/microservices-demo/protos/events/v1"
+	stateless "github.com/GoogleCloudPlatform/microservices-demo/src/shared/stateless/go"
 	"github.com/nats-io/nats.go"
 	"github.com/sirupsen/logrus"
 	"google.golang.org/protobuf/proto"
-	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -35,7 +33,8 @@ type shippingEventWorker struct {
 	js                  nats.JetStreamContext
 	subscription        *nats.Subscription
 	commandSubscription *nats.Subscription
-	provider            *shippingProviderStore
+	provider            *shippingProvider
+	failureMode         string
 	publishTimeout      time.Duration
 	stop                chan struct{}
 	ready               atomic.Bool
@@ -74,12 +73,12 @@ func startShippingEvents() (*shippingEventWorker, error) {
 	if err != nil {
 		return nil, err
 	}
-	worker := &shippingEventWorker{publishTimeout: publishTimeout, stop: make(chan struct{})}
-	storePath := os.Getenv("SHIPPING_STORE_PATH")
-	if storePath == "" {
-		storePath = "/tmp/shipping/provider-state.json"
+	worker := &shippingEventWorker{
+		publishTimeout: publishTimeout,
+		failureMode:    os.Getenv("SHIPPING_FAILURE_MODE"),
+		stop:           make(chan struct{}),
 	}
-	worker.provider, err = openShippingProviderStore(storePath)
+	worker.provider, err = newShippingProvider(os.Getenv("SHIPPING_PROVIDER_SECRET"))
 	if err != nil {
 		return nil, err
 	}
@@ -251,55 +250,55 @@ func (worker *shippingEventWorker) handle(message *nats.Msg) error {
 	if cart == nil || cart.UserId == "" {
 		return fmt.Errorf("cart snapshot is missing")
 	}
+	outcome, err := buildShippingCartOutcome(envelope, cart)
+	if err != nil {
+		return err
+	}
+	return worker.publishOutcome(outcome)
+}
+
+func buildShippingCartOutcome(
+	envelope *commonv1.MessageEnvelope,
+	cart *commonv1.CartSnapshot,
+) (shippingOutcome, error) {
+	inputTime, err := validateShippingInput(envelope)
+	if err != nil {
+		return shippingOutcome{}, err
+	}
+	if cart == nil || cart.UserId == "" || cart.CartVersion == 0 {
+		return shippingOutcome{}, errors.New("cart snapshot is incomplete")
+	}
+	if envelope.AggregateId != cart.UserId || envelope.AggregateVersion != cart.CartVersion {
+		return shippingOutcome{}, errors.New("cart snapshot does not match the input aggregate")
+	}
 	count := 0
 	for _, line := range cart.Items {
 		count += int(line.Quantity)
 	}
 	quote := CreateQuoteFromCount(count)
-	now := time.Now().UTC()
 	payload := &eventsv1.ShippingCartQuoteUpdatedEvent{
 		UserId: cart.UserId, CartVersion: cart.CartVersion,
 		CostUsd:   &commonv1.Money{CurrencyCode: "USD", Units: int64(quote.Dollars), Nanos: int32(quote.Cents * 10_000_000)},
-		ExpiresAt: timestamppb.New(now.Add(15 * time.Minute)),
+		ExpiresAt: timestamppb.New(inputTime.Add(15 * time.Minute)),
 	}
-	wrapped, err := anypb.New(payload)
+	result, err := stateless.NewResultEnvelope(envelope, stateless.ResultSpec{
+		Slot:             "shipping.cart-quote",
+		MessageType:      "boutique.shipping.CartQuoteUpdated.v1",
+		Producer:         "shippingservice/phase3",
+		AggregateType:    "cart",
+		AggregateID:      cart.UserId,
+		AggregateVersion: cart.CartVersion,
+		OccurredAt:       inputTime,
+		Payload:          payload,
+	})
 	if err != nil {
-		return err
+		return shippingOutcome{}, err
 	}
-	messageID := shippingMessageID(shippingQuoteSubject, envelope.MessageId)
-	result := &commonv1.MessageEnvelope{
-		MessageId: messageID, MessageType: "boutique.shipping.CartQuoteUpdated.v1", SchemaVersion: 1,
-		OccurredAt: timestamppb.New(now), Producer: "shippingservice/phase3",
-		AggregateType: "cart", AggregateId: cart.UserId, AggregateVersion: cart.CartVersion,
-		CorrelationId: envelope.CorrelationId, CausationId: envelope.MessageId,
-		Traceparent: envelope.Traceparent, Tracestate: envelope.Tracestate, Data: wrapped,
-	}
-	encoded, err := proto.Marshal(result)
+	encoded, err := stateless.MarshalEnvelope(result)
 	if err != nil {
-		return err
+		return shippingOutcome{}, err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), worker.publishTimeout)
-	defer cancel()
-	out := &nats.Msg{Subject: shippingQuoteSubject, Data: encoded, Header: nats.Header{}}
-	out.Header.Set("Nats-Msg-Id", messageID)
-	_, err = worker.js.PublishMsg(out, nats.Context(ctx), nats.MsgId(messageID))
-	if err != nil {
-		return err
-	}
-	log.WithFields(logrus.Fields{
-		"topic":          shippingQuoteSubject,
-		"message_kind":   "event",
-		"message_id":     messageID,
-		"correlation_id": shippingCorrelationID(result.CorrelationId),
-	}).Debug("NATS event sent")
-	return nil
-}
-
-func shippingCorrelationID(value string) string {
-	if value == "" {
-		return "unknown"
-	}
-	return value
+	return shippingOutcome{MessageID: result.MessageId, Subject: shippingQuoteSubject, Data: encoded}, nil
 }
 
 func (worker *shippingEventWorker) Ready() bool {
@@ -313,18 +312,6 @@ func (worker *shippingEventWorker) Close() {
 	worker.ready.Store(false)
 	close(worker.stop)
 	_ = worker.nc.Drain()
-}
-
-func shippingMessageID(parts ...string) string {
-	hash := sha256.New()
-	for _, part := range parts {
-		_, _ = hash.Write([]byte(part))
-		_, _ = hash.Write([]byte{0})
-	}
-	id := hash.Sum(nil)[:16]
-	id[6] = (id[6] & 0x0f) | 0x50
-	id[8] = (id[8] & 0x3f) | 0x80
-	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x", id[0:4], id[4:6], id[6:8], id[8:10], id[10:16])
 }
 
 func shippingDuration(name string, fallback time.Duration) (time.Duration, error) {

@@ -34,8 +34,9 @@ random_secret() {
 
 # Credential rotation must not silently make existing encrypted JetStream data
 # unreadable or split route trust during a rolling restart. Preserve the data
-# encryption key, payment signing key, and TLS material; their rotation is a
-# separate maintenance procedure documented in the runbook.
+# encryption key, payment signing key, shipping provider secret, and TLS
+# material; their rotation is a separate maintenance procedure documented in
+# the runbook.
 if [[ "${rotate}" == "--rotate" ]] && \
    kubectl --namespace nats get secret nats-server-auth >/dev/null 2>&1 && \
    kubectl --namespace nats get secret nats-server-tls >/dev/null 2>&1; then
@@ -49,6 +50,8 @@ if [[ "${rotate}" == "--rotate" ]] && \
     -o jsonpath='{.data.JETSTREAM_ENCRYPTION_KEY}' | base64 --decode)"
   payment_signing_key="$(kubectl --namespace nats get secret nats-server-auth \
     -o jsonpath='{.data.PAYMENT_SIGNING_KEY}' | base64 --decode)"
+  shipping_provider_secret="$(kubectl --namespace nats get secret nats-server-auth \
+    -o jsonpath='{.data.SHIPPING_PROVIDER_SECRET}' | base64 --decode)"
 else
   openssl req -x509 -newkey rsa:3072 -sha256 -nodes -days 3650 \
     -subj "/CN=Online Boutique NATS CA" \
@@ -72,6 +75,7 @@ else
     -out "${secret_dir}/tls.crt" >/dev/null 2>&1
   jetstream_encryption_key="$(random_secret)"
   payment_signing_key="$(random_secret)"
+  shipping_provider_secret="$(random_secret)"
 fi
 
 declare -A passwords
@@ -97,6 +101,7 @@ done
 cat >"${secret_dir}/server.env" <<EOF
 JETSTREAM_ENCRYPTION_KEY=${jetstream_encryption_key}
 PAYMENT_SIGNING_KEY=${payment_signing_key}
+SHIPPING_PROVIDER_SECRET=${shipping_provider_secret}
 SYS_PASSWORD=$(random_secret)
 ADMIN_PASSWORD=$(random_secret)
 FRONTEND_PASSWORD=${passwords[frontend]}
@@ -148,6 +153,8 @@ NATS_PASSWORD=${passwords[${service}]}
 EOF
     if [[ "${service}" == "paymentservice" ]]; then
       printf 'PAYMENT_SIGNING_KEY=%s\n' "${payment_signing_key}"
+    elif [[ "${service}" == "shippingservice" ]]; then
+      printf 'SHIPPING_PROVIDER_SECRET=%s\n' "${shipping_provider_secret}"
     fi
   } >"${secret_dir}/client.env"
   kubectl --namespace default create secret generic "nats-credentials-${service}" \
@@ -161,4 +168,4 @@ kubectl --namespace nats create secret generic nats-messageoperations-credential
   --from-literal=NATS_PASSWORD="${passwords[messageoperationsservice]}" \
   --dry-run=client -o yaml | kubectl apply -f -
 
-echo "Generated NATS credentials and the payment signing key without writing private material to the repository; existing TLS, JetStream encryption, and payment signing keys were preserved during credential rotation."
+echo "Generated NATS credentials and provider keys without writing private material to the repository; existing TLS, JetStream encryption, payment signing, and shipping provider keys were preserved during credential rotation."
