@@ -214,7 +214,7 @@
     },
     {
       "service": "cartservice",
-      "current_correctness_state": "Carts, versions, inbox entries, and a globally scanned outbox are in Redis; catalog validation also uses pod-local projection state.",
+      "current_correctness_state": "Cart-keyed state, versions, inbox identities, and exact deterministic result journals are committed atomically in the cart Redis Cluster; handlers republish stored results before acknowledging.",
       "target_store": "Cart-keyed clustered Redis records with atomic inbox, aggregate transition, and stored deterministic results; catalog validation uses shared KV.",
       "idempotency_contract": "Input message ID is the inbox key, user ID is the transaction partition, and duplicate inputs republish stored result slots."
     },

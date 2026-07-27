@@ -28,6 +28,7 @@ public sealed class PrimitivesTests
     public void AggregateKeysShareOneOpaqueRedisClusterHashTag()
     {
         var keys = AggregateKeys.For("cart:v1", "user}7", "command-1");
+        var aggregateKeys = AggregateKeys.ForAggregate("cart:v1", "user}7");
 
         var tags = new[] { keys.State, keys.Version, keys.Inbox }
             .Select(key => key[(key.IndexOf('{') + 1)..key.IndexOf('}')])
@@ -36,6 +37,8 @@ public sealed class PrimitivesTests
         Assert.Single(tags);
         Assert.DoesNotContain("user", tags[0], StringComparison.OrdinalIgnoreCase);
         Assert.Equal(64, tags[0].Length);
+        Assert.Equal(keys.State, aggregateKeys.State);
+        Assert.Equal(keys.Version, aggregateKeys.Version);
     }
 
     [Fact]
@@ -71,6 +74,22 @@ public sealed class PrimitivesTests
         Assert.Equal(input.MessageId, first.CausationId);
         Assert.Equal(input.CorrelationId, first.CorrelationId);
         Assert.Equal(1U, first.SchemaVersion);
+    }
+
+    [Fact]
+    public void ResultMetadataSupportsARejectionBeforeTheFirstCartVersion()
+    {
+        var metadata = ResultEnvelopes.CreateMetadata(
+            new InputEnvelopeIdentity("command-1", "operation-1"),
+            "cart.mutation",
+            "boutique.cart.CommandRejected.v1",
+            DateTimeOffset.UnixEpoch,
+            "cartservice/phase4",
+            "cart",
+            "user-1",
+            0);
+
+        Assert.Equal(0UL, metadata.AggregateVersion);
     }
 
     [Theory]

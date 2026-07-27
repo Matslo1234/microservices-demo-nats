@@ -18,9 +18,27 @@ using Boutique.Common.V1;
 
 namespace cartservice.cartstore
 {
+    public sealed record CartStoredResult(
+        string Subject,
+        string MessageId,
+        ReadOnlyMemory<byte> Data);
+
+    public sealed record CartCommandCommit(
+        CartStoredResult Result,
+        bool Duplicate,
+        int ConflictRetries,
+        int DependencyRetries);
+
     public interface ICartCommandStore
     {
-        Task HandleAddItemCommandAsync(CartAddItemCommand command, MessageEnvelope envelope);
-        Task HandleClearCommandAsync(CartClearCommand command, MessageEnvelope envelope);
+        Task<CartCommandCommit> HandleAddItemCommandAsync(
+            CartAddItemCommand command,
+            MessageEnvelope envelope,
+            CancellationToken cancellationToken = default);
+
+        Task<CartCommandCommit> HandleClearCommandAsync(
+            CartClearCommand command,
+            MessageEnvelope envelope,
+            CancellationToken cancellationToken = default);
     }
 }

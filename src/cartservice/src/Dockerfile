@@ -20,10 +20,12 @@ FROM --platform=$BUILDPLATFORM mcr.microsoft.com/dotnet/sdk:10.0.100-noble@sha25
 ARG TARGETARCH=amd64
 WORKDIR /workspace/src/cartservice/src
 COPY src/cartservice/src/cartservice.csproj .
+COPY src/shared/stateless/dotnet/Boutique.Stateless/Boutique.Stateless.csproj /workspace/src/shared/stateless/dotnet/Boutique.Stateless/
 COPY protos /workspace/protos
 RUN dotnet restore cartservice.csproj \
     -a $TARGETARCH
 COPY src/cartservice/src .
+COPY src/shared/stateless/dotnet/Boutique.Stateless /workspace/src/shared/stateless/dotnet/Boutique.Stateless
 RUN dotnet publish cartservice.csproj \
     -p:PublishSingleFile=true \
     -a $TARGETARCH \

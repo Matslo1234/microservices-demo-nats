@@ -46,7 +46,7 @@ namespace cartservice.logging
 
         public override void Write<TState>(
             in LogEntry<TState> logEntry,
-            IExternalScopeProvider scopeProvider,
+            IExternalScopeProvider? scopeProvider,
             TextWriter textWriter)
         {
             var message = logEntry.Formatter(logEntry.State, logEntry.Exception);

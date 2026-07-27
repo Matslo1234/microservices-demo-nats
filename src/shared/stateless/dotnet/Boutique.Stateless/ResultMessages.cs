@@ -80,11 +80,6 @@ public static class ResultEnvelopes
         ArgumentException.ThrowIfNullOrWhiteSpace(producer);
         ArgumentException.ThrowIfNullOrWhiteSpace(aggregateType);
         ArgumentException.ThrowIfNullOrWhiteSpace(aggregateId);
-        if (aggregateVersion == 0)
-        {
-            throw new ArgumentOutOfRangeException(nameof(aggregateVersion));
-        }
-
         return new ResultEnvelopeMetadata(
             ResultMessageIds.Derive(input.MessageId, resultSlot),
             messageType,

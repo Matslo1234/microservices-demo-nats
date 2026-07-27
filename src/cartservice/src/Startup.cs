@@ -8,7 +8,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using cartservice.cartstore;
-using Microsoft.Extensions.Caching.StackExchangeRedis;
+using Boutique.Stateless;
 using StackExchange.Redis;
 using cartservice.messaging;
 
@@ -16,7 +16,7 @@ namespace cartservice
 {
     public class Startup
     {
-        private string cartStoreDescription;
+        private string cartStoreDescription = "Cart store is not configured";
 
         public Startup(IConfiguration configuration)
         {
@@ -31,43 +31,44 @@ namespace cartservice
         {
             services.AddRouting();
 
-            string redisAddress = Configuration["REDIS_ADDR"];
-            string spannerProjectId = Configuration["SPANNER_PROJECT"];
-            string spannerConnectionString = Configuration["SPANNER_CONNECTION_STRING"];
-            string alloyDBConnectionString = Configuration["ALLOYDB_PRIMARY_IP"];
+            var redisAddress = Configuration["REDIS_ADDR"];
+            if (string.IsNullOrWhiteSpace(redisAddress))
+            {
+                throw new InvalidOperationException(
+                    "REDIS_ADDR is required for the aggregate-local cart store.");
+            }
 
-            if (!string.IsNullOrEmpty(redisAddress))
+            cartStoreDescription = "Using aggregate-local Redis Cluster cart store";
+            services.AddSingleton<CartMetrics>();
+            services.AddSingleton<IConnectionMultiplexer>(_ =>
             {
-                cartStoreDescription = "Using Redis cart store";
-                services.AddSingleton<IConnectionMultiplexer>(_ =>
-                {
-                    var redisOptions = ConfigurationOptions.Parse(redisAddress);
-                    redisOptions.AbortOnConnectFail = false;
-                    return ConnectionMultiplexer.Connect(redisOptions);
-                });
-                services.AddSingleton<RedisOutboxCartStore>();
-                services.AddSingleton<ICartStore>(provider => provider.GetRequiredService<RedisOutboxCartStore>());
-                services.AddSingleton<ICartCommandStore>(provider => provider.GetRequiredService<RedisOutboxCartStore>());
-                services.AddSingleton<NatsOutboxRelay>();
-                services.AddSingleton<ICartMessagingHealth>(provider => provider.GetRequiredService<NatsOutboxRelay>());
-                services.AddHostedService(provider => provider.GetRequiredService<NatsOutboxRelay>());
-            }
-            else if (!string.IsNullOrEmpty(spannerProjectId) || !string.IsNullOrEmpty(spannerConnectionString))
-            {
-                cartStoreDescription = "Using Spanner cart store";
-                services.AddSingleton<ICartStore, SpannerCartStore>();
-            }
-            else if (!string.IsNullOrEmpty(alloyDBConnectionString))
-            {
-                cartStoreDescription = "Using AlloyDB cart store";
-                services.AddSingleton<ICartStore, AlloyDBCartStore>();
-            }
-            else
-            {
-                cartStoreDescription = "Redis address was not specified; using the in-memory cart store";
-                services.AddDistributedMemoryCache();
-                services.AddSingleton<ICartStore, RedisCartStore>();
-            }
+                var redisOptions = ConfigurationOptions.Parse(redisAddress);
+                redisOptions.AbortOnConnectFail = false;
+                redisOptions.ResolveDns = true;
+                redisOptions.ConnectRetry = 5;
+                redisOptions.ConnectTimeout = 2_000;
+                redisOptions.AsyncTimeout = 5_000;
+                redisOptions.SyncTimeout = 5_000;
+                redisOptions.KeepAlive = 20;
+                redisOptions.ReconnectRetryPolicy =
+                    new ExponentialRetry(1_000, 10_000);
+                return ConnectionMultiplexer.Connect(redisOptions);
+            });
+            services.AddSingleton<IAtomicAggregateStore>(provider =>
+                new RedisAtomicAggregateStore(
+                    provider.GetRequiredService<IConnectionMultiplexer>().GetDatabase(),
+                    "cart:v1"));
+            services.AddSingleton<RedisAggregateCartStore>();
+            services.AddSingleton<ICartStore>(provider =>
+                provider.GetRequiredService<RedisAggregateCartStore>());
+            services.AddSingleton<ICartCommandStore>(provider =>
+                provider.GetRequiredService<RedisAggregateCartStore>());
+            services.AddSingleton<CartCommandProcessor>();
+            services.AddSingleton<NatsCartCommandWorker>();
+            services.AddSingleton<ICartMessagingHealth>(provider =>
+                provider.GetRequiredService<NatsCartCommandWorker>());
+            services.AddHostedService(provider =>
+                provider.GetRequiredService<NatsCartCommandWorker>());
         }
 
         // This method gets called by the runtime. Use this method to configure the HTTP request pipeline.
@@ -104,10 +105,11 @@ namespace cartservice
                 {
                     var cartStore = context.RequestServices.GetRequiredService<ICartStore>();
                     var messaging = context.RequestServices.GetServices<ICartMessagingHealth>();
+                    var metrics = context.RequestServices.GetRequiredService<CartMetrics>();
                     context.Response.ContentType = "text/plain; version=0.0.4";
-                    await context.Response.WriteAsync(
-                        $"boutique_dependency_ready{{service=\"cartservice\",dependency=\"cart_store\"}} {(cartStore.Ping() ? 1 : 0)}\n" +
-                        $"boutique_dependency_ready{{service=\"cartservice\",dependency=\"nats\"}} {(messaging.All(health => health.Ready) ? 1 : 0)}\n");
+                    await context.Response.WriteAsync(metrics.Render(
+                        cartStore.Ping(),
+                        messaging.All(health => health.Ready)));
                 });
             });
         }

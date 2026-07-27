@@ -18,9 +18,9 @@ namespace cartservice.cartstore
 {
     public interface ICartStore
     {
-        Task AddItemAsync(string userId, string productId, int quantity);
-        Task EmptyCartAsync(string userId);
-        Task<Hipstershop.Cart> GetCartAsync(string userId);
+        Task<Hipstershop.Cart> GetCartAsync(
+            string userId,
+            CancellationToken cancellationToken = default);
         bool Ping();
     }
 }

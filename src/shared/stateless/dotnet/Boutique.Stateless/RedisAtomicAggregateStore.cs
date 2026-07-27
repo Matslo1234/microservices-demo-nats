@@ -12,20 +12,32 @@ public sealed record AggregateKeys(string State, string Version, string Inbox)
 {
     public static AggregateKeys For(string prefix, string aggregateId, string inputMessageId)
     {
+        ArgumentException.ThrowIfNullOrWhiteSpace(inputMessageId);
+        var (state, version, baseKey) = ForAggregate(prefix, aggregateId);
+        return new AggregateKeys(
+            state,
+            version,
+            $"{baseKey}:inbox:{Digest(inputMessageId)}");
+    }
+
+    public static (string State, string Version, string Base) ForAggregate(
+        string prefix,
+        string aggregateId)
+    {
         ArgumentException.ThrowIfNullOrWhiteSpace(prefix);
         ArgumentException.ThrowIfNullOrWhiteSpace(aggregateId);
-        ArgumentException.ThrowIfNullOrWhiteSpace(inputMessageId);
         var normalizedPrefix = prefix.Trim().Trim(':');
         var baseKey = $"{normalizedPrefix}:{{{Digest(aggregateId)}}}";
-        return new AggregateKeys(
-            $"{baseKey}:state",
-            $"{baseKey}:version",
-            $"{baseKey}:inbox:{Digest(inputMessageId)}");
+        return ($"{baseKey}:state", $"{baseKey}:version", baseKey);
     }
 
     private static string Digest(string value) =>
         Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(value)));
 }
+
+public sealed record AtomicAggregateSnapshot(
+    ulong Version,
+    ReadOnlyMemory<byte> State);
 
 public sealed record AtomicCommitRequest(
     string AggregateId,
@@ -33,7 +45,8 @@ public sealed record AtomicCommitRequest(
     ulong ExpectedVersion,
     ReadOnlyMemory<byte> NextState,
     ReadOnlyMemory<byte> Journal,
-    TimeSpan JournalRetention);
+    TimeSpan JournalRetention,
+    bool AdvanceVersion = true);
 
 public sealed record AtomicCommitOutcome(
     ulong Version,
@@ -49,6 +62,10 @@ public sealed class AggregateConflictException(ulong expectedVersion, ulong actu
 
 public interface IAtomicAggregateStore
 {
+    Task<AtomicAggregateSnapshot> LoadAsync(
+        string aggregateId,
+        CancellationToken cancellationToken = default);
+
     Task<AtomicCommitOutcome> CommitAsync(
         AtomicCommitRequest request,
         CancellationToken cancellationToken = default);
@@ -64,6 +81,12 @@ public interface IAtomicAggregateStore
 // encoded in all three keys and follows MOVED/ASK responses for the caller.
 public sealed class RedisAtomicAggregateStore : IAtomicAggregateStore
 {
+    private const string LoadScript = """
+        local state = redis.call("GET", KEYS[1]) or ""
+        local current = tonumber(redis.call("GET", KEYS[2]) or "0")
+        return {current, state}
+        """;
+
     private const string CommitScript = """
         local existing = redis.call("GET", KEYS[3])
         local current = tonumber(redis.call("GET", KEYS[2]) or "0")
@@ -74,9 +97,12 @@ public sealed class RedisAtomicAggregateStore : IAtomicAggregateStore
         if current ~= expected then
           return {2, current, ""}
         end
-        local next_version = current + 1
-        redis.call("SET", KEYS[1], ARGV[2])
-        redis.call("SET", KEYS[2], tostring(next_version))
+        local next_version = current
+        if ARGV[5] == "1" then
+          next_version = current + 1
+          redis.call("SET", KEYS[1], ARGV[2])
+          redis.call("SET", KEYS[2], tostring(next_version))
+        end
         redis.call("SET", KEYS[3], ARGV[3], "PX", ARGV[4])
         return {0, next_version, ARGV[3]}
         """;
@@ -89,6 +115,26 @@ public sealed class RedisAtomicAggregateStore : IAtomicAggregateStore
         _database = database ?? throw new ArgumentNullException(nameof(database));
         ArgumentException.ThrowIfNullOrWhiteSpace(prefix);
         _prefix = prefix.Trim().Trim(':');
+    }
+
+    public async Task<AtomicAggregateSnapshot> LoadAsync(
+        string aggregateId,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var keys = AggregateKeys.ForAggregate(_prefix, aggregateId);
+        var raw = await _database.ScriptEvaluateAsync(
+            LoadScript,
+            [(RedisKey)keys.State, (RedisKey)keys.Version],
+            Array.Empty<RedisValue>()).WaitAsync(cancellationToken);
+        var values = (RedisResult[])raw!;
+        if (values.Length != 2)
+        {
+            throw new RedisServerException("Unexpected aggregate load response.");
+        }
+        var version = checked((ulong)(long)values[0]);
+        var state = (byte[]?)values[1] ?? [];
+        return new AtomicAggregateSnapshot(version, state);
     }
 
     public async Task<AtomicCommitOutcome> CommitAsync(
@@ -116,7 +162,8 @@ public sealed class RedisAtomicAggregateStore : IAtomicAggregateStore
                 request.ExpectedVersion.ToString(CultureInfo.InvariantCulture),
                 request.NextState.ToArray(),
                 request.Journal.ToArray(),
-                retentionMilliseconds
+                retentionMilliseconds,
+                request.AdvanceVersion ? 1 : 0
             ]).WaitAsync(cancellationToken);
         var values = (RedisResult[])raw!;
         if (values.Length != 3)
@@ -142,6 +189,10 @@ public sealed class RedisAtomicAggregateStore : IAtomicAggregateStore
     {
         var keys = AggregateKeys.For(_prefix, aggregateId, inputMessageId);
         var value = await _database.StringGetAsync(keys.Inbox).WaitAsync(cancellationToken);
-        return value.HasValue ? (byte[]?)value : null;
+        if (!value.HasValue)
+        {
+            return null;
+        }
+        return new ReadOnlyMemory<byte>((byte[])value!);
     }
 }

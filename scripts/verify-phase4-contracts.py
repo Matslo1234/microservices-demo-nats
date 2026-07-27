@@ -43,11 +43,22 @@ for required in (
     'new ConsumerConfig("cart-commands-v1")',
     'FilterSubject = "boutique.cmd.cart.>"',
     "ExpectedCartVersion",
-    "Condition.KeyNotExists(inboxKey)",
+    "RedisAtomicAggregateStore",
+    "ResultEnvelopes.CreateMetadata",
+    "CartResultJournal",
+    "PublishResultAsync",
+    "NatsJSPubOpts { MsgId = result.MessageId }",
     "CartCommandRejectedEvent",
     "AckAsync",
 ):
     require(cart, required, cart_dir)
+for forbidden in (
+    "NatsOutboxRelay",
+    "RedisOutboxCartStore",
+    "cart:outbox:pending",
+    "cart:outbox:messages",
+):
+    forbid(cart, forbidden, cart_dir)
 
 projection_dir = ROOT / "src" / "storefrontprojectionservice"
 projection = "\n".join(path.read_text() for path in projection_dir.glob("*.go"))

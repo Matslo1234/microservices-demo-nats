@@ -123,33 +123,11 @@ spec:
   - to:
     - podSelector:
         matchLabels:
-          app: redis-cart
-    - podSelector:
-        matchLabels:
           app: redis-cart-cluster
           app.kubernetes.io/component: server
     ports:
     - protocol: TCP
       port: 6379
----
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: redis-from-cart
-spec:
-  podSelector:
-    matchLabels:
-      app: redis-cart
-  policyTypes: ["Ingress", "Egress"]
-  ingress:
-  - from:
-    - podSelector:
-        matchLabels:
-          app: cartservice
-    ports:
-    - protocol: TCP
-      port: 6379
-  egress: []
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
