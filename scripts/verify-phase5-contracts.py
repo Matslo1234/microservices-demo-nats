@@ -30,14 +30,21 @@ require(ROOT / "src/frontend", frontend,
         "boutique.qry.payment.tokenize.v1", "boutique.cmd.order.submit.v1",
         '"/orders/{id}"', "http.StatusAccepted", "PaymentToken:")
 
-checkout_files = list((ROOT / "src/checkoutservice").glob("*.go"))
+checkout_files = [
+    item for item in (ROOT / "src/checkoutservice").glob("*.go")
+    if not item.name.endswith("_test.go")
+]
 checkout = "\n".join(item.read_text() for item in checkout_files)
 forbid(ROOT / "src/checkoutservice", checkout,
        "NewCartServiceClient", "NewProductCatalogServiceClient", "NewCurrencyServiceClient",
-       "NewShippingServiceClient", "NewPaymentServiceClient", "NewEmailServiceClient")
+       "NewShippingServiceClient", "NewPaymentServiceClient", "NewEmailServiceClient",
+       "relayOutbox", "RemoveOutboxBatch", "TxPipelined", ".Watch(",
+       'key("revision")', 'key("outbox")')
 require(ROOT / "src/checkoutservice", checkout,
-        "checkout-order-commands-v1", "CHECKOUT_REDIS_ADDR", "TxPipelined", "Watch",
-        "Outbox", "Inbox",
+        "checkout-order-commands-v1", "CHECKOUT_REDIS_ADDR", "commitOrderScript",
+        "ApplyOrder", "resultJournalRetention", "NewResultEnvelope",
+        "PublishMsg", "Nats-Msg-Id", "RedisLeaseStore", "DueDeadlines",
+        "checkoutDeadlineShards", "LoadOrderProjections",
         "WAITING_FOR_QUOTE", "WAITING_FOR_AUTHORIZATION", "WAITING_FOR_SHIPMENT",
         "WAITING_FOR_CAPTURE", "COMPENSATING", "MANUAL_REVIEW",
         "boutique.cmd.payment.release-authorization.v1",
@@ -82,10 +89,13 @@ require(ROOT / "src/storefrontprojectionservice", projection,
 checkout_manifest_path, checkout_manifest = source(
     "kubernetes-manifests", "checkoutservice.yaml")
 require(checkout_manifest_path, checkout_manifest,
-        "CHECKOUT_REDIS_ADDR", "redis-checkout:6379", "redis-checkout-data",
+        "CHECKOUT_REDIS_ADDR", "redis-checkout-cluster:6379", "CHECKOUT_REDIS_MODE",
+        "checkout:v2", "CHECKOUT_DEADLINE_LEASE",
         "type: RollingUpdate", "maxUnavailable: 0",
         "nats-client-config", "nats-ca")
-forbid(checkout_manifest_path, checkout_manifest, "CHECKOUT_STORE_PATH")
+forbid(checkout_manifest_path, checkout_manifest,
+       "CHECKOUT_STORE_PATH", "redis-checkout:6379", "redis-checkout-data",
+       "name: redis-checkout\n")
 
 payment_manifest_path, payment_manifest = source(
     "kubernetes-manifests", "paymentservice.yaml")

@@ -4,93 +4,105 @@
 package main
 
 import (
-	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	commandsv1 "github.com/GoogleCloudPlatform/microservices-demo/protos/commands/v1"
 	commonv1 "github.com/GoogleCloudPlatform/microservices-demo/protos/common/v1"
 	eventsv1 "github.com/GoogleCloudPlatform/microservices-demo/protos/events/v1"
+	stateless "github.com/GoogleCloudPlatform/microservices-demo/src/shared/stateless/go"
 	"github.com/redis/go-redis/v9"
+	"google.golang.org/protobuf/proto"
 )
 
 const (
-	redisStateSchemaVersion = 1
-	redisTransactionRetries = 128
-	defaultRedisStatePrefix = "checkout:v1"
+	redisStateSchemaVersion = 2
+	redisTransactionRetries = 16
+	defaultRedisStatePrefix = "checkout:v2"
+	checkoutDeadlineShards  = 64
+	resultJournalRetention  = 33 * 24 * time.Hour
 )
 
 var errStateStoreClosed = errors.New("checkout state store is closed")
 
-type orderFingerprint struct {
-	operationID           string
-	commandID             string
-	userID                string
-	email                 string
-	address               *commonv1.PostalAddress
-	currencyCode          string
-	paymentToken          string
-	cartVersion           uint64
-	catalogRevision       uint64
-	rateRevision          uint64
-	version               uint64
-	stage                 string
-	deadline              time.Time
-	snapshot              *commonv1.SanitizedOrderSnapshot
-	authorizationID       string
-	shipmentID            string
-	trackingID            string
-	cancelReason          *commonv1.Failure
-	authorizationReleased bool
-	shipmentCancelled     bool
-	needRelease           bool
-	needShipmentCancel    bool
+type checkoutRedisClient interface {
+	stateless.UniversalRedisClient
+	SetNX(ctx context.Context, key string, value any, expiration time.Duration) *redis.BoolCmd
+	Ping(ctx context.Context) *redis.StatusCmd
+	ZRangeByScore(ctx context.Context, key string, opt *redis.ZRangeBy) *redis.StringSliceCmd
+	Close() error
 }
 
-type stateFingerprint struct {
-	catalogRevision uint64
-	rates           *eventsv1.CurrencyRatesUpdatedEvent
-	products        map[string]*commonv1.ProductSnapshot
-	carts           map[string]*commonv1.CartSnapshot
-	orders          map[string]orderFingerprint
-	inbox           map[string]time.Time
-	outbox          map[string]outboxMessage
-}
-
-// stateStore contains only a Redis client and key configuration. All domain
-// state is loaded from Redis for each operation, so checkout pods can be
-// replaced or share work without relying on pod-local state.
 type stateStore struct {
-	client *redis.Client
+	client checkoutRedisClient
 	prefix string
 
-	lifecycleMu sync.RWMutex
-	closed      bool
-	closeErr    error
+	closed    atomic.Bool
+	conflicts atomic.Uint64
+	mu        sync.Mutex
+}
+
+type transitionOutcome struct {
+	Results   []resultMessage
+	Duplicate bool
+	Version   uint64
+}
+
+type dueDeadline struct {
+	OrderID string
+	Shard   int
+}
+
+type deadlineRecord struct {
+	OrderID  string    `json:"order_id"`
+	Version  uint64    `json:"version"`
+	Deadline time.Time `json:"deadline"`
+	WorkID   string    `json:"work_id"`
 }
 
 func openStateStoreWithPrefix(address, prefix string) (*stateStore, error) {
+	return openStateStore(address, prefix, false)
+}
+
+func openStateStore(address, prefix string, clustered bool) (*stateStore, error) {
 	if strings.TrimSpace(address) == "" {
 		return nil, errors.New("CHECKOUT_REDIS_ADDR is required")
 	}
 	if strings.TrimSpace(prefix) == "" {
 		prefix = defaultRedisStatePrefix
 	}
-	options := &redis.Options{Addr: address}
-	if strings.Contains(address, "://") {
-		parsed, err := redis.ParseURL(address)
-		if err != nil {
-			return nil, fmt.Errorf("parse checkout Redis URL: %w", err)
+	var client checkoutRedisClient
+	if clustered {
+		addresses := strings.Split(address, ",")
+		for index := range addresses {
+			addresses[index] = strings.TrimSpace(addresses[index])
 		}
-		options = parsed
+		client = redis.NewClusterClient(&redis.ClusterOptions{
+			Addrs:        addresses,
+			MaxRedirects: 16,
+			ReadTimeout:  3 * time.Second,
+			WriteTimeout: 3 * time.Second,
+		})
+	} else {
+		options := &redis.Options{Addr: address}
+		if strings.Contains(address, "://") {
+			parsed, err := redis.ParseURL(address)
+			if err != nil {
+				return nil, fmt.Errorf("parse checkout Redis URL: %w", err)
+			}
+			options = parsed
+		}
+		client = redis.NewClient(options)
 	}
-	client := redis.NewClient(options)
 	store := &stateStore{client: client, prefix: strings.TrimSuffix(prefix, ":")}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -98,446 +110,555 @@ func openStateStoreWithPrefix(address, prefix string) (*stateStore, error) {
 		_ = client.Close()
 		return nil, fmt.Errorf("connect checkout state store: %w", err)
 	}
-	if err := store.initialize(ctx); err != nil {
+	// A fresh-cluster schema marker catches accidentally reused Phase 1 data
+	// without introducing a migration or a global transaction revision.
+	schemaKey := store.prefix + ":schema"
+	if err := client.SetNX(ctx, schemaKey, redisStateSchemaVersion, 0).Err(); err != nil {
 		_ = client.Close()
-		return nil, err
+		return nil, fmt.Errorf("initialize checkout schema: %w", err)
+	}
+	version, err := client.Get(ctx, schemaKey).Int()
+	if err != nil || version != redisStateSchemaVersion {
+		_ = client.Close()
+		if err != nil {
+			return nil, fmt.Errorf("read checkout schema: %w", err)
+		}
+		return nil, fmt.Errorf("unsupported checkout schema %d", version)
 	}
 	return store, nil
 }
 
-func (store *stateStore) initialize(ctx context.Context) error {
-	_, err := store.client.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
-		pipe.HSetNX(ctx, store.key("metadata"), "schema_version", redisStateSchemaVersion)
-		pipe.SetNX(ctx, store.key("revision"), 0, 0)
-		return nil
-	})
-	if err != nil {
-		return fmt.Errorf("initialize checkout state store: %w", err)
-	}
-	version, err := store.client.HGet(ctx, store.key("metadata"), "schema_version").Int()
-	if err != nil {
-		return fmt.Errorf("read checkout state schema: %w", err)
-	}
-	if version != redisStateSchemaVersion {
-		return fmt.Errorf("unsupported checkout state schema %d", version)
-	}
-	return nil
+func digest(value string) string {
+	sum := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(sum[:])
 }
 
-func (store *stateStore) key(name string) string {
-	return store.prefix + ":" + name
+func deadlineShard(orderID string) int {
+	sum := sha256.Sum256([]byte(orderID))
+	return int(sum[0]) % checkoutDeadlineShards
 }
 
-func (store *stateStore) load(ctx context.Context, commands redis.Cmdable) (*persistedState, error) {
-	var (
-		metadataCommand *redis.MapStringStringCmd
-		productsCommand *redis.MapStringStringCmd
-		cartsCommand    *redis.MapStringStringCmd
-		ordersCommand   *redis.MapStringStringCmd
-		inboxCommand    *redis.MapStringStringCmd
-		outboxCommand   *redis.MapStringStringCmd
-	)
-	_, err := commands.Pipelined(ctx, func(pipe redis.Pipeliner) error {
-		metadataCommand = pipe.HGetAll(ctx, store.key("metadata"))
-		productsCommand = pipe.HGetAll(ctx, store.key("products"))
-		cartsCommand = pipe.HGetAll(ctx, store.key("carts"))
-		ordersCommand = pipe.HGetAll(ctx, store.key("orders"))
-		inboxCommand = pipe.HGetAll(ctx, store.key("inbox"))
-		outboxCommand = pipe.HGetAll(ctx, store.key("outbox"))
-		return nil
-	})
-	if err != nil {
-		return nil, fmt.Errorf("load checkout state: %w", err)
-	}
-
-	metadata, err := metadataCommand.Result()
-	if err != nil {
-		return nil, err
-	}
-	state := newPersistedState()
-	if encodedRevision := metadata["catalog_revision"]; encodedRevision != "" {
-		state.CatalogRevision, err = strconv.ParseUint(encodedRevision, 10, 64)
-		if err != nil {
-			return nil, fmt.Errorf("decode catalog revision: %w", err)
-		}
-	}
-	if encodedRates := metadata["rates"]; encodedRates != "" {
-		state.Rates = &eventsv1.CurrencyRatesUpdatedEvent{}
-		if err := json.Unmarshal([]byte(encodedRates), state.Rates); err != nil {
-			return nil, fmt.Errorf("decode currency rates: %w", err)
-		}
-	}
-	if err := decodeJSONHash(productsCommand, func(key string, value []byte) error {
-		product := &commonv1.ProductSnapshot{}
-		if err := json.Unmarshal(value, product); err != nil {
-			return err
-		}
-		state.Products[key] = product
-		return nil
-	}); err != nil {
-		return nil, fmt.Errorf("decode checkout products: %w", err)
-	}
-	if err := decodeJSONHash(cartsCommand, func(key string, value []byte) error {
-		cart := &commonv1.CartSnapshot{}
-		if err := json.Unmarshal(value, cart); err != nil {
-			return err
-		}
-		state.Carts[key] = cart
-		return nil
-	}); err != nil {
-		return nil, fmt.Errorf("decode checkout carts: %w", err)
-	}
-	if err := decodeJSONHash(ordersCommand, func(key string, value []byte) error {
-		order := &orderSaga{}
-		if err := json.Unmarshal(value, order); err != nil {
-			return err
-		}
-		state.Orders[key] = order
-		return nil
-	}); err != nil {
-		return nil, fmt.Errorf("decode checkout orders: %w", err)
-	}
-	inbox, err := inboxCommand.Result()
-	if err != nil {
-		return nil, err
-	}
-	for messageID, encodedTime := range inbox {
-		receivedAt, parseErr := time.Parse(time.RFC3339Nano, encodedTime)
-		if parseErr != nil {
-			return nil, fmt.Errorf("decode checkout inbox entry %q: %w", messageID, parseErr)
-		}
-		state.Inbox[messageID] = receivedAt
-	}
-	if err := decodeJSONHash(outboxCommand, func(key string, value []byte) error {
-		message := outboxMessage{}
-		if err := json.Unmarshal(value, &message); err != nil {
-			return err
-		}
-		state.Outbox[key] = message
-		return nil
-	}); err != nil {
-		return nil, fmt.Errorf("decode checkout outbox: %w", err)
-	}
-	return state, nil
+func (store *stateStore) orderBase(orderID string) string {
+	shard := deadlineShard(orderID)
+	return fmt.Sprintf("%s:{checkout-s%02d}:order:%s", store.prefix, shard, digest(orderID))
 }
 
-func decodeJSONHash(command *redis.MapStringStringCmd, decode func(string, []byte) error) error {
-	values, err := command.Result()
-	if err != nil {
-		return err
+func (store *stateStore) deadlineKey(shard int) string {
+	return fmt.Sprintf("%s:{checkout-s%02d}:deadlines", store.prefix, shard)
+}
+
+func (store *stateStore) projectionBase(kind, identity string) string {
+	return store.prefix + ":projection:{" + kind + "-" + digest(identity) + "}"
+}
+
+func (store *stateStore) projectionMarker(kind string) string {
+	return store.prefix + ":projection:{" + kind + "}"
+}
+
+const commitOrderScript = `
+local existing = redis.call("HGET", KEYS[4], ARGV[1])
+local current = tonumber(redis.call("GET", KEYS[2]) or "0")
+if existing then
+  return {1, current, existing}
+end
+if current ~= tonumber(ARGV[2]) then
+  return {2, current, ""}
+end
+if ARGV[4] ~= "" then
+  redis.call("SET", KEYS[1], ARGV[4])
+  redis.call("SET", KEYS[2], ARGV[3])
+end
+if ARGV[5] ~= "" then
+  redis.call("SETNX", KEYS[3], ARGV[5])
+end
+redis.call("HSET", KEYS[4], ARGV[1], ARGV[6])
+redis.call("PEXPIRE", KEYS[4], ARGV[7])
+if ARGV[8] == "set" then
+  redis.call("ZADD", KEYS[5], ARGV[9], ARGV[10])
+  redis.call("SET", KEYS[6], ARGV[11])
+elseif ARGV[8] == "remove" then
+  redis.call("ZREM", KEYS[5], ARGV[10])
+  redis.call("DEL", KEYS[6])
+end
+return {0, tonumber(ARGV[3]), ARGV[6]}
+`
+
+func (store *stateStore) ApplyOrder(
+	orderID string,
+	input *commonv1.MessageEnvelope,
+	base *persistedState,
+	update func(*persistedState) error,
+) (transitionOutcome, error) {
+	if store.closed.Load() {
+		return transitionOutcome{}, errStateStoreClosed
 	}
-	for key, value := range values {
-		if err := decode(key, []byte(value)); err != nil {
-			return err
-		}
+	if strings.TrimSpace(orderID) == "" || input == nil || strings.TrimSpace(input.MessageId) == "" {
+		return transitionOutcome{}, errors.New("order ID and input message ID are required")
 	}
-	return nil
-}
-
-func (store *stateStore) Update(update func(*persistedState) error) error {
-	return store.update(func(state *persistedState) (bool, error) {
-		return true, update(state)
-	})
-}
-
-func (store *stateStore) UpdateIfChanged(update func(*persistedState) (bool, error)) error {
-	return store.update(update)
-}
-
-// UpdateTracked retains the saga store API used by message handlers. Redis
-// transactions calculate the actual changed keys, so callers cannot
-// accidentally lose a mutation by omitting a tracking helper.
-func (store *stateStore) UpdateTracked(update func(*persistedState) error) error {
-	return store.Update(update)
-}
-
-func (store *stateStore) update(update func(*persistedState) (bool, error)) error {
-	store.lifecycleMu.RLock()
-	defer store.lifecycleMu.RUnlock()
-	if store.closed {
-		return errStateStoreClosed
+	at := input.GetOccurredAt().AsTime()
+	if input.GetOccurredAt() == nil || at.IsZero() {
+		return transitionOutcome{}, errors.New("input occurrence time is required")
 	}
+	baseKey := store.orderBase(orderID)
+	keys := []string{
+		baseKey + ":saga",
+		baseKey + ":version",
+		baseKey + ":accepted",
+		baseKey + ":results",
+		store.deadlineKey(deadlineShard(orderID)),
+		baseKey + ":deadline",
+	}
+	inputKey := digest(input.MessageId)
 
-	ctx := context.Background()
 	for attempt := 0; attempt < redisTransactionRetries; attempt++ {
-		err := store.client.Watch(ctx, func(transaction *redis.Tx) error {
-			state, err := store.load(ctx, transaction)
+		state, expected, accepted, err := store.loadOrderWorkspace(orderID, at, base)
+		if err != nil {
+			return transitionOutcome{}, err
+		}
+		state.Input = proto.Clone(input).(*commonv1.MessageEnvelope)
+		if err := update(state); err != nil {
+			return transitionOutcome{}, err
+		}
+		saga := state.Orders[orderID]
+		nextVersion := expected
+		var sagaJSON, acceptedJSON []byte
+		deadlineMode := "remove"
+		var deadlineMillis int64
+		var encodedDeadline []byte
+		if saga != nil {
+			nextVersion = saga.Version
+			sagaJSON, err = json.Marshal(saga)
 			if err != nil {
-				return err
+				return transitionOutcome{}, fmt.Errorf("encode checkout saga: %w", err)
 			}
-			before := fingerprint(state)
-			changed, err := update(state)
-			if err != nil {
-				return err
-			}
-			if !changed || !stateChanged(before, state) {
-				return nil
-			}
-			_, err = transaction.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
-				if err := store.writeChanges(ctx, pipe, before, state); err != nil {
-					return err
+			if !saga.Deadline.IsZero() {
+				deadlineMode = "set"
+				deadlineMillis = saga.Deadline.UTC().UnixMilli()
+				record := newDeadlineRecord(saga)
+				encodedDeadline, err = json.Marshal(record)
+				if err != nil {
+					return transitionOutcome{}, fmt.Errorf("encode checkout deadline: %w", err)
 				}
-				pipe.Incr(ctx, store.key("revision"))
-				return nil
-			})
-			return err
-		}, store.key("revision"))
-		if !errors.Is(err, redis.TxFailedErr) {
-			return err
-		}
-		time.Sleep(time.Duration(min(attempt+1, 10)) * time.Millisecond)
-	}
-	return errors.New("checkout state transaction retry limit exceeded")
-}
-
-func (store *stateStore) writeChanges(ctx context.Context, pipe redis.Pipeliner,
-	before stateFingerprint, after *persistedState) error {
-	metadataKey := store.key("metadata")
-	if before.catalogRevision != after.CatalogRevision {
-		pipe.HSet(ctx, metadataKey, "catalog_revision", strconv.FormatUint(after.CatalogRevision, 10))
-	}
-	if before.rates != after.Rates {
-		if after.Rates == nil {
-			pipe.HDel(ctx, metadataKey, "rates")
-		} else if err := setJSONHashValue(ctx, pipe, metadataKey, "rates", after.Rates); err != nil {
-			return err
-		}
-	}
-	if err := writePointerMapChanges(ctx, pipe, store.key("products"), before.products, after.Products); err != nil {
-		return err
-	}
-	if err := writePointerMapChanges(ctx, pipe, store.key("carts"), before.carts, after.Carts); err != nil {
-		return err
-	}
-	ordersKey := store.key("orders")
-	for key, order := range after.Orders {
-		if previous, ok := before.orders[key]; !ok || previous != fingerprintOrder(order) {
-			if err := setJSONHashValue(ctx, pipe, ordersKey, key, order); err != nil {
-				return err
+			}
+			if accepted == nil && expected == 0 {
+				accepted = acceptedFromState(orderID, state, saga)
+				acceptedJSON, err = json.Marshal(accepted)
+				if err != nil {
+					return transitionOutcome{}, fmt.Errorf("encode accepted order: %w", err)
+				}
 			}
 		}
-	}
-	deleteMissingHashValues(ctx, pipe, ordersKey, before.orders, after.Orders)
-
-	inboxKey := store.key("inbox")
-	for key, receivedAt := range after.Inbox {
-		if previous, ok := before.inbox[key]; ok && previous.Equal(receivedAt) {
+		journal, err := json.Marshal(state.Results)
+		if err != nil {
+			return transitionOutcome{}, fmt.Errorf("encode checkout result journal: %w", err)
+		}
+		if input.MessageType == "boutique.checkout.Deadline.v1" {
+			// The due member remains discoverable until its stored results are
+			// published and the fencing lease is completed.
+			deadlineMode = "keep"
+		}
+		response, err := store.client.Eval(context.Background(), commitOrderScript, keys,
+			inputKey, expected, nextVersion, sagaJSON, acceptedJSON, journal,
+			resultJournalRetention.Milliseconds(), deadlineMode, deadlineMillis, orderID, encodedDeadline).Result()
+		if err != nil {
+			if stateless.ClassifyRetry(err) == stateless.RetryDependency && attempt+1 < redisTransactionRetries {
+				time.Sleep(stateless.Backoff(attempt, time.Millisecond, 100*time.Millisecond))
+				continue
+			}
+			return transitionOutcome{}, err
+		}
+		values, ok := response.([]any)
+		if !ok || len(values) != 3 {
+			return transitionOutcome{}, fmt.Errorf("unexpected checkout commit response %T", response)
+		}
+		status, err := redisInt64(values[0])
+		if err != nil {
+			return transitionOutcome{}, err
+		}
+		version, err := redisInt64(values[1])
+		if err != nil {
+			return transitionOutcome{}, err
+		}
+		stored, err := redisBytes(values[2])
+		if err != nil {
+			return transitionOutcome{}, err
+		}
+		if status == 2 {
+			store.conflicts.Add(1)
+			if attempt+1 == redisTransactionRetries {
+				return transitionOutcome{}, fmt.Errorf("%w after %d attempts", stateless.ErrConflict, redisTransactionRetries)
+			}
+			time.Sleep(stateless.Backoff(attempt, time.Millisecond, 50*time.Millisecond))
 			continue
 		}
-		pipe.HSet(ctx, inboxKey, key, receivedAt.UTC().Format(time.RFC3339Nano))
+		results := []resultMessage{}
+		if len(stored) > 0 {
+			if err := json.Unmarshal(stored, &results); err != nil {
+				return transitionOutcome{}, fmt.Errorf("decode checkout result journal: %w", err)
+			}
+		}
+		return transitionOutcome{Results: results, Duplicate: status == 1, Version: uint64(version)}, nil
 	}
-	deleteMissingHashValues(ctx, pipe, inboxKey, before.inbox, after.Inbox)
+	return transitionOutcome{}, fmt.Errorf("%w: retry limit exceeded", stateless.ErrConflict)
+}
 
-	outboxKey := store.key("outbox")
-	for key, message := range after.Outbox {
-		if previous, ok := before.outbox[key]; !ok || !outboxMessagesEqual(previous, message) {
-			if err := setJSONHashValue(ctx, pipe, outboxKey, key, message); err != nil {
-				return err
+func newDeadlineRecord(saga *orderSaga) deadlineRecord {
+	deadline := saga.Deadline.UTC()
+	return deadlineRecord{
+		OrderID: saga.OrderID, Version: saga.Version, Deadline: deadline,
+		WorkID: stableID("checkout-deadline", saga.OrderID, strconv.FormatUint(saga.Version, 10),
+			strconv.FormatInt(deadline.UnixMilli(), 10)),
+	}
+}
+
+func (store *stateStore) loadOrderWorkspace(orderID string, at time.Time, base *persistedState) (*persistedState, uint64, *acceptedOrderRecord, error) {
+	state := newPersistedState(at)
+	if base != nil {
+		state.CatalogRevision = base.CatalogRevision
+		state.Rates = cloneRates(base.Rates)
+		for key, value := range base.Carts {
+			state.Carts[key] = cloneCart(value)
+		}
+		for key, value := range base.Products {
+			state.Products[key] = cloneProduct(value)
+		}
+		for key, value := range base.RemovedProducts {
+			state.RemovedProducts[key] = value
+		}
+	}
+	orderBase := store.orderBase(orderID)
+	version, err := store.client.Get(context.Background(), orderBase+":version").Uint64()
+	if err != nil && !errors.Is(err, redis.Nil) {
+		return nil, 0, nil, err
+	}
+	encoded, err := store.client.Get(context.Background(), orderBase+":saga").Bytes()
+	if err == nil {
+		saga := &orderSaga{}
+		if err := json.Unmarshal(encoded, saga); err != nil {
+			return nil, 0, nil, fmt.Errorf("decode checkout saga: %w", err)
+		}
+		state.Orders[orderID] = saga
+	} else if !errors.Is(err, redis.Nil) {
+		return nil, 0, nil, err
+	}
+	var accepted *acceptedOrderRecord
+	encoded, err = store.client.Get(context.Background(), orderBase+":accepted").Bytes()
+	if err == nil {
+		accepted = &acceptedOrderRecord{}
+		if err := json.Unmarshal(encoded, accepted); err != nil {
+			return nil, 0, nil, fmt.Errorf("decode accepted order: %w", err)
+		}
+		state.Rates = cloneRates(accepted.Rates)
+		state.CatalogRevision = accepted.CatalogRevision
+		if accepted.Cart != nil {
+			state.Carts[accepted.Cart.UserId] = cloneCart(accepted.Cart)
+		}
+		for _, product := range accepted.Products {
+			state.Products[product.ProductId] = cloneProduct(product)
+		}
+	} else if !errors.Is(err, redis.Nil) {
+		return nil, 0, nil, err
+	}
+	return state, version, accepted, nil
+}
+
+func acceptedFromState(orderID string, state *persistedState, saga *orderSaga) *acceptedOrderRecord {
+	record := &acceptedOrderRecord{
+		OrderID: orderID, Rates: cloneRates(state.Rates), CatalogRevision: saga.CatalogRevision,
+		RateRevision: saga.RateRevision,
+	}
+	if cart := state.Carts[saga.UserID]; cart != nil {
+		record.Cart = cloneCart(cart)
+		for _, line := range cart.Items {
+			if product := state.Products[line.ProductId]; product != nil {
+				record.Products = append(record.Products, cloneProduct(product))
 			}
 		}
 	}
-	deleteMissingHashValues(ctx, pipe, outboxKey, before.outbox, after.Outbox)
-	return nil
+	if saga.Snapshot != nil {
+		record.Order = proto.Clone(saga.Snapshot).(*commonv1.SanitizedOrderSnapshot)
+	}
+	return record
 }
 
-func setJSONHashValue(ctx context.Context, pipe redis.Pipeliner, hash, key string, value any) error {
+func cloneCart(value *commonv1.CartSnapshot) *commonv1.CartSnapshot {
+	if value == nil {
+		return nil
+	}
+	return proto.Clone(value).(*commonv1.CartSnapshot)
+}
+
+func cloneProduct(value *commonv1.ProductSnapshot) *commonv1.ProductSnapshot {
+	if value == nil {
+		return nil
+	}
+	return proto.Clone(value).(*commonv1.ProductSnapshot)
+}
+
+func cloneRates(value *eventsv1.CurrencyRatesUpdatedEvent) *eventsv1.CurrencyRatesUpdatedEvent {
+	if value == nil {
+		return nil
+	}
+	return proto.Clone(value).(*eventsv1.CurrencyRatesUpdatedEvent)
+}
+
+const applyProjectionScript = `
+local current = tonumber(redis.call("GET", KEYS[2]) or "0")
+local incoming = tonumber(ARGV[1])
+if incoming <= current then return 0 end
+redis.call("SET", KEYS[1], ARGV[2])
+redis.call("SET", KEYS[2], incoming)
+return 1
+`
+
+type productProjection struct {
+	Product *commonv1.ProductSnapshot `json:"product,omitempty"`
+	Removed bool                      `json:"removed,omitempty"`
+}
+
+func (store *stateStore) applyProjectionValue(base string, version uint64, value any) error {
 	encoded, err := json.Marshal(value)
 	if err != nil {
 		return err
 	}
-	pipe.HSet(ctx, hash, key, encoded)
-	return nil
+	_, err = store.client.Eval(context.Background(), applyProjectionScript,
+		[]string{base + ":value", base + ":version"}, version, encoded).Result()
+	return err
 }
 
-func writePointerMapChanges[T any](ctx context.Context, pipe redis.Pipeliner, hash string,
-	before, after map[string]*T) error {
-	for key, value := range after {
-		if previous, ok := before[key]; !ok || previous != value {
-			if err := setJSONHashValue(ctx, pipe, hash, key, value); err != nil {
+func (store *stateStore) ApplyProjection(subject string, envelope *commonv1.MessageEnvelope) error {
+	switch subject {
+	case "boutique.evt.catalog.product-upserted.v1":
+		payload := &eventsv1.CatalogProductUpsertedEvent{}
+		if err := envelope.Data.UnmarshalTo(payload); err != nil {
+			return err
+		}
+		if payload.Product != nil {
+			if err := store.applyProjectionValue(store.projectionBase("product", payload.Product.ProductId),
+				payload.Product.ProductVersion, productProjection{Product: payload.Product}); err != nil {
 				return err
 			}
 		}
-	}
-	deleteMissingHashValues(ctx, pipe, hash, before, after)
-	return nil
-}
-
-func deleteMissingHashValues[Before any, After any](ctx context.Context, pipe redis.Pipeliner,
-	hash string, before map[string]Before, after map[string]After) {
-	for key := range before {
-		if _, ok := after[key]; !ok {
-			pipe.HDel(ctx, hash, key)
+		return store.applyProjectionValue(store.projectionMarker("catalog"), payload.CatalogRevision,
+			payload.CatalogRevision)
+	case "boutique.evt.catalog.product-removed.v1":
+		payload := &eventsv1.CatalogProductRemovedEvent{}
+		if err := envelope.Data.UnmarshalTo(payload); err != nil {
+			return err
 		}
-	}
-}
-
-func fingerprint(state *persistedState) stateFingerprint {
-	value := stateFingerprint{
-		catalogRevision: state.CatalogRevision,
-		rates:           state.Rates,
-		products:        make(map[string]*commonv1.ProductSnapshot, len(state.Products)),
-		carts:           make(map[string]*commonv1.CartSnapshot, len(state.Carts)),
-		orders:          make(map[string]orderFingerprint, len(state.Orders)),
-		inbox:           make(map[string]time.Time, len(state.Inbox)),
-		outbox:          make(map[string]outboxMessage, len(state.Outbox)),
-	}
-	for key, product := range state.Products {
-		value.products[key] = product
-	}
-	for key, cart := range state.Carts {
-		value.carts[key] = cart
-	}
-	for key, order := range state.Orders {
-		value.orders[key] = fingerprintOrder(order)
-	}
-	for key, receivedAt := range state.Inbox {
-		value.inbox[key] = receivedAt
-	}
-	for key, message := range state.Outbox {
-		value.outbox[key] = message
-	}
-	return value
-}
-
-func fingerprintOrder(order *orderSaga) orderFingerprint {
-	if order == nil {
-		return orderFingerprint{}
-	}
-	return orderFingerprint{
-		operationID: order.OperationID, commandID: order.CommandID, userID: order.UserID,
-		email: order.Email, address: order.Address, currencyCode: order.CurrencyCode,
-		paymentToken: order.PaymentToken, cartVersion: order.CartVersion,
-		catalogRevision: order.CatalogRevision, rateRevision: order.RateRevision,
-		version: order.Version, stage: order.Stage, deadline: order.Deadline,
-		snapshot: order.Snapshot, authorizationID: order.AuthorizationID,
-		shipmentID: order.ShipmentID, trackingID: order.TrackingID,
-		cancelReason: order.CancelReason, authorizationReleased: order.AuthorizationReleased,
-		shipmentCancelled: order.ShipmentCancelled, needRelease: order.NeedRelease,
-		needShipmentCancel: order.NeedShipmentCancel,
+		if err := store.applyProjectionValue(store.projectionBase("product", payload.ProductId),
+			payload.ProductVersion, productProjection{Removed: true}); err != nil {
+			return err
+		}
+		return store.applyProjectionValue(store.projectionMarker("catalog"), payload.CatalogRevision,
+			payload.CatalogRevision)
+	case "boutique.evt.catalog.snapshot-completed.v1":
+		payload := &eventsv1.CatalogSnapshotCompletedEvent{}
+		if err := envelope.Data.UnmarshalTo(payload); err != nil {
+			return err
+		}
+		return store.applyProjectionValue(store.projectionMarker("catalog"), payload.CatalogRevision,
+			payload.CatalogRevision)
+	case "boutique.evt.currency.rates-updated.v1":
+		payload := &eventsv1.CurrencyRatesUpdatedEvent{}
+		if err := envelope.Data.UnmarshalTo(payload); err != nil {
+			return err
+		}
+		return store.applyProjectionValue(store.projectionMarker("rates"), payload.RateRevision, payload)
+	case "boutique.evt.cart.item-added.v1":
+		payload := &eventsv1.CartItemAddedEvent{}
+		if err := envelope.Data.UnmarshalTo(payload); err != nil {
+			return err
+		}
+		if payload.Cart == nil {
+			return nil
+		}
+		return store.applyProjectionValue(store.projectionBase("cart", payload.Cart.UserId),
+			payload.Cart.CartVersion, payload.Cart)
+	case "boutique.evt.cart.cleared.v1":
+		payload := &eventsv1.CartClearedEvent{}
+		if err := envelope.Data.UnmarshalTo(payload); err != nil {
+			return err
+		}
+		if payload.Cart == nil {
+			return nil
+		}
+		return store.applyProjectionValue(store.projectionBase("cart", payload.Cart.UserId),
+			payload.Cart.CartVersion, payload.Cart)
+	default:
+		return nil
 	}
 }
 
-func stateChanged(before stateFingerprint, after *persistedState) bool {
-	if before.catalogRevision != after.CatalogRevision || before.rates != after.Rates ||
-		len(before.products) != len(after.Products) || len(before.carts) != len(after.Carts) ||
-		len(before.orders) != len(after.Orders) || len(before.inbox) != len(after.Inbox) ||
-		len(before.outbox) != len(after.Outbox) {
-		return true
+func (store *stateStore) LoadOrderProjections(command *commandsv1.OrderSubmitCommand, at time.Time) (*persistedState, error) {
+	state := newPersistedState(at)
+	if err := store.loadJSON(store.projectionMarker("catalog"), &state.CatalogRevision); err != nil {
+		return nil, err
 	}
-	for key, value := range after.Products {
-		if before.products[key] != value {
-			return true
+	rates := &eventsv1.CurrencyRatesUpdatedEvent{}
+	if err := store.loadJSON(store.projectionMarker("rates"), rates); err != nil {
+		return nil, err
+	}
+	if rates.RateRevision > 0 {
+		state.Rates = rates
+	}
+	cart := &commonv1.CartSnapshot{}
+	if err := store.loadJSON(store.projectionBase("cart", command.UserId), cart); err != nil {
+		return nil, err
+	}
+	if cart.UserId != "" {
+		state.Carts[command.UserId] = cart
+		for _, line := range cart.Items {
+			projection := &productProjection{}
+			if err := store.loadJSON(store.projectionBase("product", line.ProductId), projection); err != nil {
+				return nil, err
+			}
+			if projection.Product != nil {
+				state.Products[line.ProductId] = projection.Product
+			}
+			if projection.Removed {
+				state.RemovedProducts[line.ProductId] = true
+			}
 		}
 	}
-	for key, value := range after.Carts {
-		if before.carts[key] != value {
-			return true
-		}
-	}
-	for key, value := range after.Orders {
-		if before.orders[key] != fingerprintOrder(value) {
-			return true
-		}
-	}
-	for key, value := range after.Inbox {
-		if previous, ok := before.inbox[key]; !ok || !previous.Equal(value) {
-			return true
-		}
-	}
-	for key, value := range after.Outbox {
-		if previous, ok := before.outbox[key]; !ok || !outboxMessagesEqual(previous, value) {
-			return true
-		}
-	}
-	return false
+	return state, nil
 }
 
-func outboxMessagesEqual(left, right outboxMessage) bool {
-	return left.MessageID == right.MessageID &&
-		left.Subject == right.Subject &&
-		bytes.Equal(left.Data, right.Data)
-}
-
-func (store *stateStore) View(view func(*persistedState) error) error {
-	store.lifecycleMu.RLock()
-	defer store.lifecycleMu.RUnlock()
-	if store.closed {
-		return errStateStoreClosed
+func (store *stateStore) loadJSON(base string, target any) error {
+	value, err := store.client.Get(context.Background(), base+":value").Bytes()
+	if errors.Is(err, redis.Nil) {
+		return nil
 	}
-	state, err := store.load(context.Background(), store.client)
 	if err != nil {
 		return err
 	}
-	return view(state)
+	if err := json.Unmarshal(value, target); err != nil {
+		return fmt.Errorf("decode projection %s: %w", base, err)
+	}
+	return nil
 }
 
-func (store *stateStore) Snapshot() (*persistedState, error) {
-	store.lifecycleMu.RLock()
-	defer store.lifecycleMu.RUnlock()
-	if store.closed {
-		return nil, errStateStoreClosed
-	}
-	return store.load(context.Background(), store.client)
-}
-
-func (store *stateStore) Outbox() []outboxMessage {
-	store.lifecycleMu.RLock()
-	defer store.lifecycleMu.RUnlock()
-	if store.closed {
-		log.WithError(errStateStoreClosed).Error("load checkout outbox failed")
-		return nil
-	}
-	values, err := store.client.HGetAll(context.Background(), store.key("outbox")).Result()
+func (store *stateStore) LoadOrder(orderID string) (*orderSaga, error) {
+	state, _, _, err := store.loadOrderWorkspace(orderID, time.Unix(1, 0), nil)
 	if err != nil {
-		log.WithError(err).Error("load checkout outbox failed")
-		return nil
+		return nil, err
 	}
-	messages := make([]outboxMessage, 0, len(values))
-	for messageID, encoded := range values {
-		message := outboxMessage{}
-		if err := json.Unmarshal([]byte(encoded), &message); err != nil {
-			log.WithError(err).WithField("message_id", messageID).Error("decode checkout outbox entry failed")
-			return nil
-		}
-		messages = append(messages, message)
-	}
-	sort.Slice(messages, func(i, j int) bool { return messages[i].MessageID < messages[j].MessageID })
-	return messages
+	return state.Orders[orderID], nil
 }
 
-func (store *stateStore) RemoveOutboxBatch(messageIDs []string) error {
-	if len(messageIDs) == 0 {
-		return nil
+func (store *stateStore) LoadAcceptedOrder(orderID string) (*acceptedOrderRecord, error) {
+	_, _, accepted, err := store.loadOrderWorkspace(orderID, time.Unix(1, 0), nil)
+	return accepted, err
+}
+
+func (store *stateStore) DueDeadlines(now time.Time, limitPerShard int) ([]dueDeadline, error) {
+	if limitPerShard <= 0 {
+		limitPerShard = 16
 	}
-	return store.Update(func(state *persistedState) error {
-		for _, messageID := range messageIDs {
-			state.deleteOutbox(messageID)
+	result := make([]dueDeadline, 0)
+	for shard := 0; shard < checkoutDeadlineShards; shard++ {
+		values, err := store.client.ZRangeByScore(context.Background(), store.deadlineKey(shard), &redis.ZRangeBy{
+			Min: "-inf", Max: strconv.FormatInt(now.UTC().UnixMilli(), 10), Offset: 0, Count: int64(limitPerShard),
+		}).Result()
+		if err != nil {
+			return nil, err
 		}
-		return nil
-	})
+		for _, orderID := range values {
+			result = append(result, dueDeadline{OrderID: orderID, Shard: shard})
+		}
+	}
+	return result, nil
+}
+
+func (store *stateStore) LoadDeadline(orderID string) (*deadlineRecord, []byte, error) {
+	value, err := store.client.Get(context.Background(), store.orderBase(orderID)+":deadline").Bytes()
+	if errors.Is(err, redis.Nil) {
+		return nil, nil, nil
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	record := &deadlineRecord{}
+	if err := json.Unmarshal(value, record); err != nil {
+		return nil, nil, fmt.Errorf("decode checkout deadline: %w", err)
+	}
+	return record, value, nil
+}
+
+const completeDeadlineScript = `
+local current = redis.call("GET", KEYS[2])
+if current and current == ARGV[2] then
+  redis.call("ZREM", KEYS[1], ARGV[1])
+  redis.call("DEL", KEYS[2])
+  return 1
+end
+return 0
+`
+
+func (store *stateStore) CompleteDeadline(orderID string, expected []byte) error {
+	_, err := store.client.Eval(context.Background(), completeDeadlineScript,
+		[]string{store.deadlineKey(deadlineShard(orderID)), store.orderBase(orderID) + ":deadline"},
+		orderID, expected).Result()
+	return err
+}
+
+const removeOrphanDeadlineScript = `
+if redis.call("EXISTS", KEYS[2]) == 0 then
+  return redis.call("ZREM", KEYS[1], ARGV[1])
+end
+return 0
+`
+
+func (store *stateStore) RemoveOrphanDeadline(orderID string) error {
+	_, err := store.client.Eval(context.Background(), removeOrphanDeadlineScript,
+		[]string{store.deadlineKey(deadlineShard(orderID)), store.orderBase(orderID) + ":deadline"},
+		orderID).Result()
+	return err
 }
 
 func (store *stateStore) Ready() bool {
-	store.lifecycleMu.RLock()
-	defer store.lifecycleMu.RUnlock()
-	if store.closed {
+	if store == nil || store.closed.Load() {
 		return false
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	if store.client.Ping(ctx).Err() != nil {
-		return false
-	}
-	return true
+	return store.client.Ping(ctx).Err() == nil
 }
 
 func (store *stateStore) Close() error {
-	store.lifecycleMu.Lock()
-	defer store.lifecycleMu.Unlock()
-	if store.closed {
-		return store.closeErr
+	if store == nil {
+		return nil
 	}
-	store.closed = true
-	store.closeErr = store.client.Close()
-	return store.closeErr
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.closed.Swap(true) {
+		return nil
+	}
+	return store.client.Close()
+}
+
+func redisInt64(value any) (int64, error) {
+	switch typed := value.(type) {
+	case int64:
+		return typed, nil
+	case []byte:
+		return strconv.ParseInt(string(typed), 10, 64)
+	case string:
+		return strconv.ParseInt(typed, 10, 64)
+	default:
+		return 0, fmt.Errorf("unexpected Redis integer %T", value)
+	}
+}
+
+func redisBytes(value any) ([]byte, error) {
+	switch typed := value.(type) {
+	case []byte:
+		return typed, nil
+	case string:
+		return []byte(typed), nil
+	case nil:
+		return nil, nil
+	default:
+		return nil, fmt.Errorf("unexpected Redis bytes %T", value)
+	}
 }

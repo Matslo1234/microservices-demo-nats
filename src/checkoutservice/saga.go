@@ -8,13 +8,14 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strings"
 	"time"
 
 	commandsv1 "github.com/GoogleCloudPlatform/microservices-demo/protos/commands/v1"
 	commonv1 "github.com/GoogleCloudPlatform/microservices-demo/protos/common/v1"
 	eventsv1 "github.com/GoogleCloudPlatform/microservices-demo/protos/events/v1"
+	stateless "github.com/GoogleCloudPlatform/microservices-demo/src/shared/stateless/go"
 	"google.golang.org/protobuf/proto"
-	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -59,16 +60,24 @@ type orderSaga struct {
 }
 
 func (worker *checkoutWorker) handleOrderCommand(envelope *commonv1.MessageEnvelope) error {
+	_, err := worker.processOrderCommand(envelope)
+	return err
+}
+
+func (worker *checkoutWorker) processOrderCommand(envelope *commonv1.MessageEnvelope) (transitionOutcome, error) {
 	payload, err := decodeOrderCommand(envelope)
 	if err != nil {
-		return err
+		return transitionOutcome{}, err
 	}
-	if err := worker.store.View(func(state *persistedState) error {
-		return validateOrderProjection(state, envelope, payload)
-	}); err != nil {
-		return err
+	at := envelope.GetOccurredAt().AsTime()
+	projections, err := worker.store.LoadOrderProjections(payload, at)
+	if err != nil {
+		return transitionOutcome{}, err
 	}
-	return worker.store.UpdateTracked(func(state *persistedState) error {
+	return worker.store.ApplyOrder(payload.OrderId, envelope, projections, func(state *persistedState) error {
+		if err := validateOrderProjection(state, envelope, payload); err != nil {
+			return err
+		}
 		return worker.applyOrderCommand(state, envelope, payload)
 	})
 }
@@ -105,9 +114,13 @@ func validateOrderProjection(state *persistedState, envelope *commonv1.MessageEn
 	case state.Rates.RateRevision < payload.ExpectedRateRevision:
 		return fmt.Errorf("%w: rate revision %d is below %d", errCheckoutProjectionLag,
 			state.Rates.RateRevision, payload.ExpectedRateRevision)
-	default:
-		return nil
 	}
+	for _, line := range state.Carts[payload.UserId].Items {
+		if state.Products[line.ProductId] == nil && !state.RemovedProducts[line.ProductId] {
+			return fmt.Errorf("%w: product %q is not projected", errCheckoutProjectionLag, line.ProductId)
+		}
+	}
+	return nil
 }
 
 func (worker *checkoutWorker) applyOrderCommand(state *persistedState, envelope *commonv1.MessageEnvelope,
@@ -116,7 +129,7 @@ func (worker *checkoutWorker) applyOrderCommand(state *persistedState, envelope 
 		return nil
 	}
 	if existing := state.Orders[payload.OrderId]; existing != nil {
-		state.setInbox(envelope.MessageId, time.Now().UTC())
+		state.setInbox(envelope.MessageId, state.TransitionTime)
 		return nil
 	}
 	cart := state.Carts[payload.UserId]
@@ -130,7 +143,7 @@ func (worker *checkoutWorker) applyOrderCommand(state *persistedState, envelope 
 			&eventsv1.OrderRejectedEvent{OperationId: payload.OperationId, OrderId: payload.OrderId, Failure: failure}); err != nil {
 			return err
 		}
-		state.setInbox(envelope.MessageId, time.Now().UTC())
+		state.setInbox(envelope.MessageId, state.TransitionTime)
 		return nil
 	}
 	snapshot, err := buildOrderSnapshot(state, cart, payload)
@@ -143,7 +156,7 @@ func (worker *checkoutWorker) applyOrderCommand(state *persistedState, envelope 
 		CurrencyCode: payload.CurrencyCode, PaymentToken: payload.PaymentToken,
 		CartVersion: payload.ExpectedCartVersion, CatalogRevision: payload.ExpectedCatalogRevision,
 		RateRevision: payload.ExpectedRateRevision, Version: 1, Stage: stageWaitingQuote,
-		Deadline: time.Now().UTC().Add(worker.stepTimeout), Snapshot: snapshot,
+		Deadline: state.TransitionTime.Add(worker.stepTimeout), Snapshot: snapshot,
 	}
 	state.setOrder(payload.OrderId, saga)
 	if err := queueEnvelope(state, "boutique.evt.order.submitted.v1", "boutique.order.Submitted.v1", "order",
@@ -164,12 +177,20 @@ func (worker *checkoutWorker) applyOrderCommand(state *persistedState, envelope 
 	if err := queueStage(state, saga, envelope.MessageId); err != nil {
 		return err
 	}
-	state.setInbox(envelope.MessageId, time.Now().UTC())
+	state.setInbox(envelope.MessageId, state.TransitionTime)
 	return nil
 }
 
 func (worker *checkoutWorker) handleSagaEvent(subject string, envelope *commonv1.MessageEnvelope) error {
-	return worker.store.UpdateTracked(func(state *persistedState) error {
+	_, err := worker.processSagaEvent(subject, envelope)
+	return err
+}
+
+func (worker *checkoutWorker) processSagaEvent(subject string, envelope *commonv1.MessageEnvelope) (transitionOutcome, error) {
+	if strings.TrimSpace(envelope.AggregateId) == "" {
+		return transitionOutcome{}, errors.New("saga event order ID is missing")
+	}
+	return worker.store.ApplyOrder(envelope.AggregateId, envelope, nil, func(state *persistedState) error {
 		return worker.applySagaEvent(state, subject, envelope)
 	})
 }
@@ -178,7 +199,7 @@ func (worker *checkoutWorker) applySagaEvent(state *persistedState, subject stri
 	if _, processed := state.Inbox[envelope.MessageId]; processed {
 		return nil
 	}
-	state.setInbox(envelope.MessageId, time.Now().UTC())
+	state.setInbox(envelope.MessageId, state.TransitionTime)
 	saga := state.Orders[envelope.AggregateId]
 	if saga == nil {
 		return nil
@@ -205,7 +226,7 @@ func (worker *checkoutWorker) applySagaEvent(state *persistedState, subject stri
 		saga.Snapshot.Total = addMoney(saga.Snapshot.Total, shipping)
 		saga.Version++
 		saga.Stage = stageWaitingAuthorize
-		saga.Deadline = time.Now().UTC().Add(worker.stepTimeout)
+		saga.Deadline = state.TransitionTime.Add(worker.stepTimeout)
 		command := &commandsv1.PaymentAuthorizeCommand{CommandId: stableID("authorize", saga.OrderID), OrderId: saga.OrderID,
 			Amount: saga.Snapshot.Total, PaymentToken: saga.PaymentToken, IdempotencyKey: saga.OrderID + "/authorize"}
 		if err := queueEnvelope(state, "boutique.cmd.payment.authorize.v1", "boutique.payment.Authorize.v1", "order", saga.OrderID, saga.Version, saga.OrderID, cause, command); err != nil {
@@ -233,7 +254,7 @@ func (worker *checkoutWorker) applySagaEvent(state *persistedState, subject stri
 		saga.PaymentToken = ""
 		saga.Version++
 		saga.Stage = stageWaitingShipment
-		saga.Deadline = time.Now().UTC().Add(worker.stepTimeout)
+		saga.Deadline = state.TransitionTime.Add(worker.stepTimeout)
 		command := &commandsv1.ShippingCreateShipmentCommand{CommandId: stableID("shipment", saga.OrderID), OrderId: saga.OrderID,
 			ShippingAddress: saga.Address, IdempotencyKey: saga.OrderID + "/shipment"}
 		for _, line := range saga.Snapshot.Items {
@@ -265,7 +286,7 @@ func (worker *checkoutWorker) applySagaEvent(state *persistedState, subject stri
 		saga.Snapshot.TrackingId = payload.TrackingId
 		saga.Version++
 		saga.Stage = stageWaitingCapture
-		saga.Deadline = time.Now().UTC().Add(worker.stepTimeout)
+		saga.Deadline = state.TransitionTime.Add(worker.stepTimeout)
 		command := &commandsv1.PaymentCaptureCommand{CommandId: stableID("capture", saga.OrderID), OrderId: saga.OrderID,
 			AuthorizationId: saga.AuthorizationID, Amount: saga.Snapshot.Total, IdempotencyKey: saga.OrderID + "/capture"}
 		if err := queueEnvelope(state, "boutique.cmd.payment.capture.v1", "boutique.payment.Capture.v1", "order", saga.OrderID, saga.Version, saga.OrderID, cause, command); err != nil {
@@ -403,7 +424,7 @@ func (worker *checkoutWorker) cancel(state *persistedState, saga *orderSaga, cau
 func (worker *checkoutWorker) startCompensation(state *persistedState, saga *orderSaga, cause string, failure *commonv1.Failure, release, cancelShipment bool) error {
 	saga.Version++
 	saga.Stage = stageCompensating
-	saga.Deadline = time.Now().UTC().Add(worker.stepTimeout)
+	saga.Deadline = state.TransitionTime.Add(worker.stepTimeout)
 	saga.CancelReason = failure
 	saga.NeedRelease = release
 	saga.NeedShipmentCancel = cancelShipment
@@ -460,29 +481,65 @@ func (worker *checkoutWorker) manualReview(state *persistedState, saga *orderSag
 func queueStage(state *persistedState, saga *orderSaga, cause string) error {
 	return queueEnvelope(state, "boutique.evt.order.processing-stage-changed.v1", "boutique.order.ProcessingStageChanged.v1", "order",
 		saga.OrderID, saga.Version, saga.OrderID, cause, &eventsv1.OrderProcessingStageChangedEvent{OrderId: saga.OrderID,
-			Stage: saga.Stage, ChangedAt: timestamppb.Now()})
+			Stage: saga.Stage, ChangedAt: timestamppb.New(state.TransitionTime)})
 }
 
 func queueEnvelope(state *persistedState, subject, messageType, aggregateType, aggregateID string, aggregateVersion uint64,
 	correlationID, causationID string, payload proto.Message) error {
-	wrapper, err := anypb.New(payload)
+	if state.Input == nil {
+		return errors.New("transition input envelope is missing")
+	}
+	envelope, err := stateless.NewResultEnvelope(state.Input, stateless.ResultSpec{
+		Slot: resultSlotForSubject(subject), MessageType: messageType, Producer: "checkoutservice/phase5",
+		AggregateType: aggregateType, AggregateID: aggregateID, AggregateVersion: aggregateVersion,
+		OccurredAt: state.TransitionTime, Payload: payload,
+	})
 	if err != nil {
 		return err
 	}
-	messageID := envelopeMessageID(subject, causationID, aggregateVersion)
-	envelope := &commonv1.MessageEnvelope{MessageId: messageID, MessageType: messageType, SchemaVersion: 1,
-		OccurredAt: timestamppb.Now(), Producer: "checkoutservice/phase5", AggregateType: aggregateType, AggregateId: aggregateID,
-		AggregateVersion: aggregateVersion, CorrelationId: correlationID, CausationId: causationID, Data: wrapper}
-	encoded, err := proto.Marshal(envelope)
+	encoded, err := stateless.MarshalEnvelope(envelope)
 	if err != nil {
 		return err
 	}
-	state.setOutbox(outboxMessage{MessageID: messageID, Subject: subject, Data: encoded})
+	state.addResult(resultMessage{Slot: resultSlotForSubject(subject), MessageID: envelope.MessageId, Subject: subject, Data: encoded})
 	return nil
 }
 
 func envelopeMessageID(subject, causationID string, aggregateVersion uint64) string {
-	return stableID(subject, causationID, fmt.Sprint(aggregateVersion))
+	messageID, _ := stateless.DeriveResultMessageID(causationID, resultSlotForSubject(subject))
+	return messageID
+}
+
+func resultSlotForSubject(subject string) string {
+	switch subject {
+	case "boutique.evt.order.submitted.v1",
+		"boutique.evt.order.rejected.v1",
+		"boutique.evt.order.cancelled.v1",
+		"boutique.evt.order.completed.v1":
+		return "order.decision"
+	case "boutique.evt.order.processing-stage-changed.v1":
+		return "order.stage"
+	case "boutique.cmd.shipping.calculate-order-quote.v1":
+		return "order.quote-command"
+	case "boutique.cmd.payment.authorize.v1":
+		return "order.authorize-command"
+	case "boutique.cmd.shipping.create-shipment.v1":
+		return "order.shipment-command"
+	case "boutique.cmd.payment.capture.v1":
+		return "order.capture-command"
+	case "boutique.cmd.cart.clear.v1":
+		return "order.cart-clear-command"
+	case "boutique.cmd.payment.release-authorization.v1":
+		return "order.release-command"
+	case "boutique.cmd.shipping.cancel-shipment.v1":
+		return "order.shipment-cancel-command"
+	case "boutique.evt.order.step-timed-out.v1":
+		return "order.timeout"
+	case "boutique.evt.order.manual-review-required.v1":
+		return "order.manual-review"
+	default:
+		return subject
+	}
 }
 
 func safeFailure(failure *commonv1.Failure, fallback string) *commonv1.Failure {

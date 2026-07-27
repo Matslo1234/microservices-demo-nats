@@ -6,6 +6,7 @@ toolchain go1.26.4
 
 require (
 	github.com/GoogleCloudPlatform/microservices-demo/protos v0.0.0
+	github.com/GoogleCloudPlatform/microservices-demo/src/shared/stateless/go v0.0.0
 	github.com/alicebob/miniredis/v2 v2.38.0
 	github.com/nats-io/nats.go v1.52.0
 	github.com/redis/go-redis/v9 v9.21.0
@@ -14,6 +15,8 @@ require (
 )
 
 replace github.com/GoogleCloudPlatform/microservices-demo/protos => ../../protos
+
+replace github.com/GoogleCloudPlatform/microservices-demo/src/shared/stateless/go => ../shared/stateless/go
 
 require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect

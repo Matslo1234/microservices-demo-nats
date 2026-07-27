@@ -220,9 +220,9 @@
     },
     {
       "service": "checkoutservice",
-      "current_correctness_state": "Orders, projections, inbox, deadlines, and outbox are external but serialized through one Redis revision and whole-store records.",
+      "current_correctness_state": "Each order saga, immutable accepted snapshot, applied input journal, exact result messages, and deadline metadata are committed in one order shard; handler replicas publish their stored results and deadline replicas use expiring fencing leases.",
       "target_store": "Order-keyed clustered Redis saga/result records, per-key shared projections, and leased partitioned deadline indexes.",
-      "idempotency_contract": "Input message ID or stable synthetic deadline ID is committed with all results in the order partition; provider keys are order ID plus step."
+      "idempotency_contract": "Input message ID or stable synthetic deadline ID is committed with all deterministic result slots in the order partition; duplicates republish exact bytes and provider keys are order ID plus step."
     },
     {
       "service": "currencyservice",

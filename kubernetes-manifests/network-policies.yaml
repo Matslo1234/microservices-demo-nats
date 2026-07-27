@@ -224,33 +224,11 @@ spec:
   - to:
     - podSelector:
         matchLabels:
-          app: redis-checkout
-    - podSelector:
-        matchLabels:
           app: redis-checkout-cluster
           app.kubernetes.io/component: server
     ports:
     - protocol: TCP
       port: 6379
----
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: redis-from-checkout
-spec:
-  podSelector:
-    matchLabels:
-      app: redis-checkout
-  policyTypes: ["Ingress", "Egress"]
-  ingress:
-  - from:
-    - podSelector:
-        matchLabels:
-          app: checkoutservice
-    ports:
-    - protocol: TCP
-      port: 6379
-  egress: []
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
