@@ -1,0 +1,409 @@
+# Copyright 2026 Google LLC
+# Licensed under the Apache License, Version 2.0 (the "License");
+
+# The external metrics are produced from the existing Prometheus/NATS series by
+# the cluster's custom-metrics adapter. CPU remains a usable fallback and any
+# signal may request a scale-up; failed external metrics prevent an unsafe
+# scale-down but do not disable CPU-driven scale-up.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: adservice
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: adservice
+  minReplicas: 2
+  maxReplicas: 10
+  behavior: &behavior
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+      - type: Percent
+        value: 100
+        periodSeconds: 30
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+      - type: Percent
+        value: 25
+        periodSeconds: 60
+  metrics:
+  - &cpu
+    type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - &worker-lag
+    type: External
+    external:
+      metric:
+        name: boutique_jetstream_consumer_pending
+        selector:
+          matchLabels:
+            service: adservice
+      target:
+        type: AverageValue
+        averageValue: "25"
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: benchmarkservice
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: benchmarkservice
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: External
+    external:
+      metric:
+        name: boutique_http_in_flight
+        selector:
+          matchLabels:
+            service: benchmarkservice
+      target:
+        type: AverageValue
+        averageValue: "20"
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: cartservice
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: cartservice
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: External
+    external:
+      metric:
+        name: boutique_jetstream_consumer_pending
+        selector:
+          matchLabels:
+            service: cartservice
+      target:
+        type: AverageValue
+        averageValue: "25"
+  - type: External
+    external:
+      metric:
+        name: boutique_handler_p95_latency_seconds
+        selector:
+          matchLabels:
+            service: cartservice
+      target:
+        type: AverageValue
+        averageValue: "1"
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: checkoutservice
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: checkoutservice
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: External
+    external:
+      metric:
+        name: boutique_jetstream_consumer_pending
+        selector:
+          matchLabels:
+            service: checkoutservice
+      target:
+        type: AverageValue
+        averageValue: "25"
+  - type: External
+    external:
+      metric:
+        name: boutique_handler_p95_latency_seconds
+        selector:
+          matchLabels:
+            service: checkoutservice
+      target:
+        type: AverageValue
+        averageValue: "1"
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: currencyservice
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: currencyservice
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: External
+    external:
+      metric:
+        name: boutique_jetstream_consumer_pending
+        selector:
+          matchLabels:
+            service: currencyservice
+      target:
+        type: AverageValue
+        averageValue: "25"
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: emailservice
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: emailservice
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: External
+    external:
+      metric:
+        name: boutique_jetstream_consumer_pending
+        selector:
+          matchLabels:
+            service: emailservice
+      target:
+        type: AverageValue
+        averageValue: "25"
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: frontend
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: frontend
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: External
+    external:
+      metric:
+        name: boutique_http_in_flight
+        selector:
+          matchLabels:
+            service: frontend
+      target:
+        type: AverageValue
+        averageValue: "20"
+  - type: External
+    external:
+      metric:
+        name: boutique_http_p95_latency_seconds
+        selector:
+          matchLabels:
+            service: frontend
+      target:
+        type: AverageValue
+        averageValue: "1"
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: paymentservice
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: paymentservice
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: External
+    external:
+      metric:
+        name: boutique_jetstream_consumer_pending
+        selector:
+          matchLabels:
+            service: paymentservice
+      target:
+        type: AverageValue
+        averageValue: "25"
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: productcatalogservice
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: productcatalogservice
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: External
+    external:
+      metric:
+        name: boutique_jetstream_consumer_pending
+        selector:
+          matchLabels:
+            service: productcatalogservice
+      target:
+        type: AverageValue
+        averageValue: "25"
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: recommendationservice
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: recommendationservice
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: External
+    external:
+      metric:
+        name: boutique_jetstream_consumer_pending
+        selector:
+          matchLabels:
+            service: recommendationservice
+      target:
+        type: AverageValue
+        averageValue: "25"
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: shippingservice
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: shippingservice
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: External
+    external:
+      metric:
+        name: boutique_jetstream_consumer_pending
+        selector:
+          matchLabels:
+            service: shippingservice
+      target:
+        type: AverageValue
+        averageValue: "25"
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: storefrontprojectionservice
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: storefrontprojectionservice
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: External
+    external:
+      metric:
+        name: boutique_jetstream_consumer_pending
+        selector:
+          matchLabels:
+            service: storefrontprojectionservice
+      target:
+        type: AverageValue
+        averageValue: "25"
+  - type: External
+    external:
+      metric:
+        name: boutique_http_in_flight
+        selector:
+          matchLabels:
+            service: storefrontprojectionservice
+      target:
+        type: AverageValue
+        averageValue: "20"

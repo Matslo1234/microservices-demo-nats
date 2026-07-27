@@ -22,9 +22,11 @@ WORKDIR /src
 
 # restore dependencies
 COPY src/shippingservice/go.mod src/shippingservice/go.sum ./
+COPY src/shared/stateless/go/go.mod src/shared/stateless/go/go.sum /shared/stateless/go/
 COPY protos /protos
 RUN go mod download
 COPY src/shippingservice .
+COPY src/shared/stateless/go /shared/stateless/go
 
 # Skaffold passes in debug-oriented compiler flags
 ARG SKAFFOLD_GO_GCFLAGS

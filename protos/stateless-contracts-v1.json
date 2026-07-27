@@ -208,8 +208,8 @@
     },
     {
       "service": "benchmarkservice",
-      "current_correctness_state": "Run registry, active-run lock, subprocess ownership, logs, and artifacts live in one pod and emptyDir.",
-      "target_store": "Shared run/lease store, object storage, and one Kubernetes Job per run.",
+      "current_correctness_state": "Run definitions, CAS lease, Job identity, heartbeats, terminal status, and summaries live in BENCHMARK_RUNS KV; artifacts live in BENCHMARK_ARTIFACTS Object Store; every run executes in a disposable Kubernetes Job.",
+      "target_store": "Replicated JetStream KV and Object Store plus one Kubernetes Job per run.",
       "idempotency_contract": "Run ID is the submission key; lease CAS makes create, cancel, observe, and finalize repeatable."
     },
     {
@@ -226,7 +226,7 @@
     },
     {
       "service": "currencyservice",
-      "current_correctness_state": "Configured rates and bootstrap state are held in each process.",
+      "current_correctness_state": "Configured rates have a content-derived revision; replicas coordinate snapshot publication through an expiring BOOTSTRAP_CLAIMS KV lease and publish stable event IDs.",
       "target_store": "Immutable configured snapshot with a content revision and shared NATS KV bootstrap claim.",
       "idempotency_contract": "Snapshot and rate event IDs derive from the content revision; concurrent bootstrap republishes the same logical revision."
     },
@@ -256,13 +256,13 @@
     },
     {
       "service": "productcatalogservice",
-      "current_correctness_state": "Configured catalog is loaded into memory and snapshots are published during startup.",
+      "current_correctness_state": "Configured catalog has a content-derived revision; replicas coordinate snapshot publication through an expiring BOOTSTRAP_CLAIMS KV lease and publish stable per-product event IDs.",
       "target_store": "Immutable configured snapshot with content revision and shared NATS KV bootstrap claim.",
       "idempotency_contract": "Product and snapshot event IDs derive from the catalog content revision and product identity."
     },
     {
       "service": "recommendationservice",
-      "current_correctness_state": "Each pod has an in-memory product set while a shared durable sends later catalog updates to only one replica.",
+      "current_correctness_state": "A shared durable applies versioned catalog events to RECOMMENDATION_CATALOG KV with CAS; recommendation requests read the shared revisioned catalog.",
       "target_store": "Shared JetStream KV catalog projection with optional revision-aware disposable cache.",
       "idempotency_contract": "Trigger message ID plus model/configuration revision determines the result ID and candidates."
     },
@@ -280,7 +280,7 @@
     },
     {
       "service": "storefrontprojectionservice",
-      "current_correctness_state": "JetStream KV contains views, but order, operation, and cart maps on each pod are authoritative on cache hits.",
+      "current_correctness_state": "JetStream KV is authoritative for every query; projection workers apply source event IDs and aggregate versions with bounded CAS retries and stale-event skips.",
       "target_store": "JetStream KV is authoritative; any cache is revision-aware and populated from KV.",
       "idempotency_contract": "Source event ID and aggregate version are stored in each view; stale or duplicate events are no-ops under CAS."
     }

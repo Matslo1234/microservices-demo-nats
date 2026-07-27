@@ -22,9 +22,11 @@ ARG TARGETARCH=amd64
 WORKDIR /workspace/src/productcatalogservice
 # restore dependencies
 COPY src/productcatalogservice/go.mod src/productcatalogservice/go.sum ./
+COPY src/shared/stateless/go/go.mod src/shared/stateless/go/go.sum /workspace/src/shared/stateless/go/
 COPY protos /workspace/protos
 RUN go mod download
 COPY src/productcatalogservice .
+COPY src/shared/stateless/go /workspace/src/shared/stateless/go
 
 # Skaffold passes in debug-oriented compiler flags
 ARG SKAFFOLD_GO_GCFLAGS

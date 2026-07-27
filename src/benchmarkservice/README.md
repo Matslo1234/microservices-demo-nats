@@ -1,78 +1,66 @@
 # Benchmark service
 
-`benchmarkservice` is the manually triggered Locust runner used to compare the
-original synchronous Online Boutique application (`APPLICATION_TYPE=GRPC`)
-with this repository's asynchronous application (`APPLICATION_TYPE=NATS`).
-It does not start a load test when the process or pod starts.
+`benchmarkservice` is a horizontally scalable API for manually triggered
+Locust comparisons. API replicas retain no run, lease, process, log, or
+artifact state in their pods:
 
-The controller listens on port `8080`. Its small web interface starts one run
-at a time, reports run state, and exports the summary, raw business samples,
-and complete run artifacts. Locust executes in a child process so the
-controller is effectively idle during a run.
+- run definitions, status, heartbeats, summaries, and the expiring
+  one-active-run lease are stored in the replicated `BENCHMARK_RUNS`
+  JetStream KV bucket;
+- raw JSONL/CSV/log files and complete archives are stored in the replicated
+  `BENCHMARK_ARTIFACTS` JetStream Object Store bucket; and
+- every accepted run creates one disposable Kubernetes Job. Locust is never a
+  child of an API process.
+
+Any API replica can list, inspect, download, stop, or reconcile any run. Run
+submission uses KV compare-and-set on the expiring lease, so concurrent API
+requests create one workload Job. A runner renews that lease while active and
+publishes terminal state and artifacts before exiting. If a Job fails before
+finalization, another API replica observes its Kubernetes status and records
+the failure.
 
 ## Workloads
 
-- `closed` uses the original common task mix: home, currency, product,
-  add-to-cart, cart, and checkout. A user waits for a logical checkout outcome
-  before continuing.
+- `closed` uses the original common task mix and waits for each logical
+  checkout outcome.
 - `open` schedules checkout transactions at an absolute arrival rate.
-  Submission scheduling is separate from the greenlets that track completion,
-  so slower completion does not reduce the requested arrival rate.
+  Submission scheduling is independent of completion tracking, so slow
+  outcomes do not reduce the requested arrival rate.
 
-The GRPC adapter records a successful synchronous checkout response as the
-business outcome. The NATS adapter records `202` acceptance separately, honors
-`Retry-After` while polling, and records one `BUSINESS/checkout_to_outcome`
-sample when the order becomes terminal. The NATS sample is the difference
-between the checkout request start and the order projection's immutable
-`outcome_at`; the polling interval therefore does not inflate the reported
-latency. It also records
-`BUSINESS/checkout_to_settled` when notification and the correlated cart-clear
-operation have both terminated.
-
-Warm-up samples remain in the raw artifacts but are excluded from the summary.
-After the steady submission interval the service stops creating work and
-allows the configured drain period. Accepted orders that cannot use their full
-outcome timeout before the drain deadline are classified as `INCOMPLETE`.
+Warm-up samples remain in raw artifacts but are excluded from summaries. After
+the steady interval, submission stops for the configured drain period.
 
 ## Configuration
 
-Pod-level environment:
+The Deployment supplies `APPLICATION_TYPE`, `FRONTEND_ADDR`, the standard
+`NATS_*` connection settings, and NATS credentials. Optional bucket overrides
+are `BENCHMARK_RUN_BUCKET` and `BENCHMARK_ARTIFACT_BUCKET`.
 
-| Variable | Required | Meaning |
-| --- | --- | --- |
-| `APPLICATION_TYPE` | yes | Exactly `GRPC` or `NATS`. |
-| `FRONTEND_ADDR` | yes | Frontend host/port or HTTP(S) URL. |
-| `RESULTS_DIR` | no | Artifact directory; defaults to `/var/lib/benchmarkservice`. |
-| `PORT` | no | Controller port; defaults to `8080`. |
-| `NATS_METRICS_URLS` | no | Comma-separated exporter URLs for NATS runs. |
+The API discovers its own immutable container image through the Kubernetes API
+and uses that exact image for Jobs. This keeps Job and controller code at the
+same release without a mutable image environment variable.
 
-Run-level settings are validated by the controller and saved in each run's
-`config.json`. They include workload, warm-up/steady/drain durations, closed
-user and spawn counts, open arrival rate, outcome/settlement timeouts, random
-seed, and collector interval.
+For NATS application runs, the standard fresh-cluster bootstrap creates the
+replicated stores. For original-GRPC comparison runs, apply
+`benchmark/benchmark-original-app.yaml` together with
+`benchmark/benchmark-grpc-control.yaml`; the latter provides an isolated
+JetStream control/artifact store that is excluded from measured application
+resources.
 
-The embedded collector samples kubelet summary statistics through the
-Kubernetes API. It derives CPU-seconds, memory byte-seconds, and network bytes
-for application pods while excluding the benchmark pod. NATS runs also scrape
-the three existing NATS exporter sidecars for consumer pending/ack-pending
-messages, redeliveries, and JetStream storage. No observability stack is
-required.
+Run-level settings include workload, warm-up/steady/drain durations, user or
+arrival rate, outcome/settlement timeouts, random seed, and collector interval.
 
-## Artifacts
+## Artifacts and resource collection
 
-Each run directory contains:
+Each Job uses bounded `emptyDir` volumes only as disposable staging space.
+Before it exits it uploads:
 
-- `business.jsonl` and `business.csv`: raw synthetic business samples;
-- `outstanding.jsonl`: accepted non-terminal order count changes;
-- `resources.jsonl`: low-frequency Kubernetes and NATS samples;
-- `summary.json`: steady-state latency, rates, outcomes, goodput, and resource
-  totals;
-- `locust_*.csv`: diagnostic per-HTTP-request Locust statistics;
-- `runner.log`, `config.json`, and `status.json`.
+- `business.jsonl` and `business.csv`;
+- `outstanding.jsonl` and `resources.jsonl`;
+- `summary.json`, `runner.log`, `config.json`, and `status.json`;
+- diagnostic `locust_*.csv` files; and
+- one ZIP archive containing the complete run.
 
-Aggregate HTTP request throughput is diagnostic only. Comparisons should use
-the `BUSINESS/checkout_to_outcome` samples and completed-order goodput.
-
-The supplied Kubernetes manifests mount `RESULTS_DIR` from `emptyDir` so the
-experiment does not add persistent storage activity. Export needed artifacts
-before replacing the benchmark pod.
+The embedded collector samples kubelet summary statistics and NATS exporter
+metrics. API pod restarts do not affect active Jobs, run visibility, or
+completed artifacts.

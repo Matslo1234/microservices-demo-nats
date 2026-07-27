@@ -17,6 +17,7 @@ kind: Kustomization
 resources:
  - adservice.yaml
  - benchmarkservice.yaml
+ - disruption-budgets.yaml
  - cartservice.yaml
  - checkoutservice.yaml
  - currencyservice.yaml
@@ -29,7 +30,51 @@ resources:
  - redis-clusters.yaml
  - shippingservice.yaml
  - storefrontprojectionservice.yaml
+ - autoscaling.yaml
  - network-policies.yaml
+patches:
+- target:
+    group: apps
+    version: v1
+    kind: Deployment
+    name: adservice|benchmarkservice|cartservice|checkoutservice|currencyservice|emailservice|frontend|paymentservice|productcatalogservice|recommendationservice|shippingservice|storefrontprojectionservice
+  patch: |-
+    - op: add
+      path: /spec/replicas
+      value: 2
+    - op: add
+      path: /spec/strategy
+      value:
+        type: RollingUpdate
+        rollingUpdate:
+          maxUnavailable: 0
+          maxSurge: 1
+    - op: add
+      path: /spec/template/spec/topologySpreadConstraints
+      value:
+      - maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: ScheduleAnyway
+        labelSelector:
+          matchExpressions:
+          - key: app
+            operator: Exists
+        matchLabelKeys:
+        - app
+    - op: add
+      path: /spec/template/spec/affinity
+      value:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: Exists
+              matchLabelKeys:
+              - app
 # components:
 # - ../kustomize/components/cymbal-branding
 # - ../kustomize/components/google-cloud-operations

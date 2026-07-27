@@ -23,9 +23,7 @@ ENV PYTHONUNBUFFERED=1
 
 RUN apk update \
     && apk add --no-cache libstdc++ \
-    && rm -rf /var/cache/apk/* \
-    && mkdir -p /var/lib/benchmarkservice \
-    && chown 1000:1000 /var/lib/benchmarkservice
+    && rm -rf /var/cache/apk/*
 
 WORKDIR /benchmarkservice
 COPY --from=builder /install /usr/local

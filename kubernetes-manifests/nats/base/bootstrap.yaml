@@ -68,8 +68,7 @@ data:
       fi
     }
 
-    # Benchmark APIs move to these shared stores in Phase 6. Provisioning them
-    # now makes their durability and credentials independently verifiable.
+    # Benchmark API replicas and disposable runner Jobs share these stores.
     ensure_kv BENCHMARK_RUNS 10 0s 536870912
     ensure_object BENCHMARK_ARTIFACTS
     nats ${nats_args} stream list

@@ -157,6 +157,118 @@ data:
           ],
           "title": "Oldest active claim",
           "type": "timeseries"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "fieldConfig": {"defaults": {"min": 0, "unit": "s"}, "overrides": []},
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 24},
+          "id": 7,
+          "options": {
+            "legend": {"calcs": ["lastNotNull", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true},
+            "tooltip": {"mode": "multi", "sort": "desc"}
+          },
+          "targets": [
+            {
+              "editorMode": "code",
+              "expr": "sum by (command) (rate(boutique_cart_command_duration_seconds_sum{namespace=~\"$namespace\"}[5m])) / clamp_min(sum by (command) (rate(boutique_cart_command_duration_seconds_count{namespace=~\"$namespace\"}[5m])), 0.001)",
+              "legendFormat": "cart / {{command}} mean",
+              "range": true,
+              "refId": "A"
+            }
+          ],
+          "title": "Handler publication latency",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "fieldConfig": {"defaults": {"min": 0, "unit": "short"}, "overrides": []},
+          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 24},
+          "id": 8,
+          "options": {
+            "legend": {"calcs": ["lastNotNull", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true},
+            "tooltip": {"mode": "multi", "sort": "desc"}
+          },
+          "targets": [
+            {
+              "editorMode": "code",
+              "expr": "sum(rate(boutique_cart_redis_retries_total{namespace=~\"$namespace\"}[5m]))",
+              "legendFormat": "cart Redis retries/s",
+              "range": true,
+              "refId": "A"
+            },
+            {
+              "editorMode": "code",
+              "expr": "sum(rate(boutique_checkout_transition_conflicts_total{namespace=~\"$namespace\"}[5m]))",
+              "legendFormat": "checkout conflicts/s",
+              "range": true,
+              "refId": "B"
+            },
+            {
+              "editorMode": "code",
+              "expr": "max(boutique_checkout_deadline_oldest_age_seconds{namespace=~\"$namespace\"})",
+              "legendFormat": "oldest checkout deadline (s)",
+              "range": true,
+              "refId": "C"
+            }
+          ],
+          "title": "Redis conflicts and deadline pressure",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "fieldConfig": {"defaults": {"min": 0, "unit": "ops"}, "overrides": []},
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 32},
+          "id": 9,
+          "options": {
+            "legend": {"calcs": ["lastNotNull", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true},
+            "tooltip": {"mode": "multi", "sort": "desc"}
+          },
+          "targets": [
+            {
+              "editorMode": "code",
+              "expr": "sum by (view) (rate(boutique_projection_kv_conflict_retries_total{namespace=~\"$namespace\"}[5m]))",
+              "legendFormat": "{{view}} CAS retries/s",
+              "range": true,
+              "refId": "A"
+            },
+            {
+              "editorMode": "code",
+              "expr": "sum by (view) (rate(boutique_projection_stale_events_total{namespace=~\"$namespace\"}[5m]))",
+              "legendFormat": "{{view}} stale skips/s",
+              "range": true,
+              "refId": "B"
+            }
+          ],
+          "title": "Projection CAS and stale-event handling",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "fieldConfig": {"defaults": {"min": 0, "unit": "short"}, "overrides": []},
+          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 32},
+          "id": 10,
+          "options": {
+            "legend": {"calcs": ["lastNotNull", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true},
+            "tooltip": {"mode": "multi", "sort": "desc"}
+          },
+          "targets": [
+            {
+              "editorMode": "code",
+              "expr": "max by (view) (boutique_projection_age_seconds{namespace=~\"$namespace\"})",
+              "legendFormat": "{{view}} age (s)",
+              "range": true,
+              "refId": "A"
+            },
+            {
+              "editorMode": "code",
+              "expr": "max by (view) (boutique_storefront_query_revision{namespace=~\"$namespace\"})",
+              "legendFormat": "{{view}} query revision",
+              "range": true,
+              "refId": "B"
+            }
+          ],
+          "title": "Projection age and query revision",
+          "type": "timeseries"
         }
       ],
       "refresh": "15s",

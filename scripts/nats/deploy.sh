@@ -28,6 +28,7 @@ kubectl --namespace nats rollout status deployment/nats-advisory-watcher --timeo
 # nats namespace recreation or credential rotation. Restart only deployments
 # that consume those credentials so they refresh both passwords and the CA.
 application_deployments=(
+  benchmarkservice
   frontend
   storefrontprojectionservice
   productcatalogservice

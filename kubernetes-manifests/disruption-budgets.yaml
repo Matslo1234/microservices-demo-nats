@@ -1,0 +1,122 @@
+# Copyright 2026 Google LLC
+# Licensed under the Apache License, Version 2.0 (the "License");
+
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: adservice
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: adservice
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: benchmarkservice
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: benchmarkservice
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: cartservice
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: cartservice
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: checkoutservice
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: checkoutservice
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: currencyservice
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: currencyservice
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: emailservice
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: emailservice
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: frontend
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: frontend
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: paymentservice
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: paymentservice
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: productcatalogservice
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: productcatalogservice
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: recommendationservice
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: recommendationservice
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: shippingservice
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: shippingservice
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: storefrontprojectionservice
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: storefrontprojectionservice
