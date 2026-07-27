@@ -49,7 +49,10 @@ data:
     jetstream {
       store_dir: "/data/jetstream"
       max_memory_store: 256MB
-      max_file_store: 8GB
+      # Bootstrap reserves 12.7 GB across the R3 stream, KV, and object-store
+      # replicas placed on each member. Keep capacity above that reservation
+      # while retaining filesystem headroom on the 20 Gi PVC.
+      max_file_store: 16GB
       cipher: "aes"
       key: $JETSTREAM_ENCRYPTION_KEY
     }

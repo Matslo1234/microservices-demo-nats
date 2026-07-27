@@ -81,8 +81,11 @@ data:
     nats_admin consumer next BOUTIQUE_EVENTS "${advisory_consumer}" \
       --count 1 --no-ack --raw --wait=5s >/dev/null
     sleep 2
-    if nats_admin consumer next BOUTIQUE_EVENTS "${advisory_consumer}" \
-      --count 1 --no-ack --raw --wait=2s >/dev/null 2>&1; then
+    # nats CLI 0.19 exits successfully when a pull expires without a message,
+    # so assert on the response body rather than the process exit status.
+    unexpected="$(nats_admin consumer next BOUTIQUE_EVENTS "${advisory_consumer}" \
+      --count 1 --no-ack --raw --wait=2s 2>/dev/null || true)"
+    if test -n "${unexpected}"; then
       echo "FAIL: consumer exceeded its MaxDeliver limit" >&2
       exit 1
     fi

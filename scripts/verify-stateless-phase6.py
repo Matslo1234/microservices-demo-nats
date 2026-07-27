@@ -162,6 +162,7 @@ def verify_manifests() -> str:
             "matchLabelKeys:",
             "podAntiAffinity:",
         )
+        forbid(deployment, "matchExpressions:")
         hpa = document(rendered, "HorizontalPodAutoscaler", application)
         require(
             hpa,
@@ -367,7 +368,9 @@ def verify_dashboard_and_bootstrap() -> None:
         "ensure_kv BENCHMARK_RUNS 10",
         "ensure_object BENCHMARK_ARTIFACTS",
         "--replicas=3",
+        "nats ${nats_args} object ls",
     )
+    forbid(bootstrap, "nats ${nats_args} object list")
 
 
 def main() -> int:

@@ -73,7 +73,7 @@ data:
     ensure_object BENCHMARK_ARTIFACTS
     nats ${nats_args} stream list
     nats ${nats_args} kv list
-    nats ${nats_args} object list
+    nats ${nats_args} object ls
   BOUTIQUE_COMMANDS.json: |
     {
       "name": "BOUTIQUE_COMMANDS",

@@ -138,6 +138,72 @@ def verify_benchmark_stores(rendered_nats: str, rendered_app: str) -> None:
         raise VerificationError("benchmarkservice cannot reach the NATS stores")
 
 
+def verify_nats_storage_capacity(rendered_nats: str) -> None:
+    server_config = document(
+        rendered_nats, "ConfigMap", "nats-server-config"
+    )
+    bootstrap = document(rendered_nats, "ConfigMap", "nats-bootstrap")
+    stateful_set = document(rendered_nats, "StatefulSet", "nats")
+
+    file_store = re.search(
+        r"(?m)^\s*max_file_store:\s*(\d+)([KMGT]B)\s*$",
+        server_config,
+    )
+    if not file_store:
+        raise VerificationError("NATS max_file_store capacity is missing")
+    decimal_units = {
+        "KB": 1_000,
+        "MB": 1_000_000,
+        "GB": 1_000_000_000,
+        "TB": 1_000_000_000_000,
+    }
+    file_store_bytes = int(file_store.group(1)) * decimal_units[file_store.group(2)]
+
+    stream_bytes = sum(
+        int(value)
+        for value in re.findall(r'"max_bytes":\s*(\d+)', bootstrap)
+    )
+    kv_bytes = sum(
+        int(value)
+        for value in re.findall(
+            r"(?m)^\s*ensure_kv\s+\S+\s+\S+\s+\S+\s+(\d+)\s*$",
+            bootstrap,
+        )
+    )
+    object_bytes = sum(
+        int(value)
+        for value in re.findall(
+            r"(?m)^\s*--max-bucket-size=(\d+)\s*$",
+            bootstrap,
+        )
+    )
+    reserved_bytes = stream_bytes + kv_bytes + object_bytes
+    if reserved_bytes > file_store_bytes:
+        raise VerificationError(
+            "NATS bootstrap reserves "
+            f"{reserved_bytes} bytes per member, exceeding max_file_store "
+            f"{file_store_bytes} bytes"
+        )
+
+    volume = re.search(
+        r"(?m)^\s*storage:\s*(\d+)([KMGT]i)\s*$",
+        stateful_set,
+    )
+    if not volume:
+        raise VerificationError("NATS JetStream PVC capacity is missing")
+    binary_units = {
+        "Ki": 1024,
+        "Mi": 1024**2,
+        "Gi": 1024**3,
+        "Ti": 1024**4,
+    }
+    volume_bytes = int(volume.group(1)) * binary_units[volume.group(2)]
+    if file_store_bytes > volume_bytes:
+        raise VerificationError(
+            "NATS max_file_store exceeds the JetStream PVC capacity"
+        )
+
+
 def dashboard_json() -> dict:
     path = (
         ROOT
@@ -252,6 +318,7 @@ def main() -> int:
         )
         verify_redis_clusters(rendered_app)
         verify_benchmark_stores(rendered_nats, rendered_app)
+        verify_nats_storage_capacity(rendered_nats)
         verify_dashboard(rendered_observability)
 
         if not PROGRESS.is_file():

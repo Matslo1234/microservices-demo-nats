@@ -55,10 +55,7 @@ patches:
       - maxSkew: 1
         topologyKey: kubernetes.io/hostname
         whenUnsatisfiable: ScheduleAnyway
-        labelSelector:
-          matchExpressions:
-          - key: app
-            operator: Exists
+        labelSelector: {}
         matchLabelKeys:
         - app
     - op: add
@@ -69,10 +66,7 @@ patches:
           - weight: 100
             podAffinityTerm:
               topologyKey: kubernetes.io/hostname
-              labelSelector:
-                matchExpressions:
-                - key: app
-                  operator: Exists
+              labelSelector: {}
               matchLabelKeys:
               - app
 # components:

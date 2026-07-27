@@ -37,6 +37,21 @@ SERVICES = (
     "shippingservice",
     "storefrontprojectionservice",
 )
+DEFAULT_IMAGE_DIGESTS = {
+    "adservice": "863919b5c2929e90b69888c20e54509cd6c3d09425104269df2b629aab40a643",
+    "benchmarkservice": "2c35b46248cf2184b2ea9d96d59c17abfcd04417c413049cea9eacdeb8432a24",
+    "cartservice": "c11e45917947e9e3192d5f9feb330b6b5c4b1c7f26cccfc02c1374cd11aee3e7",
+    "checkoutservice": "afae6ddf7edeff70f4ce98914a4e7a93d9e25e37594af34a70777e056ca3011b",
+    "currencyservice": "aadcaa314fcc6591d38e91720fc870fd55aeff7c6fdcb26322e6aa89b2c289ab",
+    "emailservice": "e046d889abeae53491e79af99d2810cb12e3722f71996dd6ad14e436e820555c",
+    "frontend": "797a30719dbaec5df73ee0efd8c7a9056e8308e1afb424f41caf452cb7bd48ec",
+    "loadgenerator": "c66a188ecf8bf7507bd3982a5fa50ae3e9497f3239248dd48b275fc2aee0adb3",
+    "paymentservice": "9a6c36bb850627bfd0b9ab86e9b3c05bf3ce9dcb4c25967877a4ec106c954519",
+    "productcatalogservice": "77716d929c9fe2d662c61d9865afe8fb8c0e77bf43458386e328d4e5e1bbece8",
+    "recommendationservice": "d5cff07b9b0b2616bd67a456591947498998f0e3b2b58ba3c22426126e8740ba",
+    "shippingservice": "411e3d354bdd04b93a9de61d17a2dba9b94d7ad95a2bd2079aee666b223f0250",
+    "storefrontprojectionservice": "de82680a6a02e4cdb48c4cee798ec561620981f0eb965f67099d44f87ecf35de",
+}
 
 
 def render(path: str) -> str:
@@ -54,9 +69,12 @@ def qualify_images(content: str) -> str:
     namespace = os.environ.get("DOCKERHUB_USERNAME", "matslo123")
     tag = os.environ.get("IMAGE_TAG", "v0.4.0")
     for service in SERVICES:
+        reference = f"{namespace}/{service}:{tag}"
+        if namespace == "matslo123" and tag == "v0.4.0":
+            reference += f"@sha256:{DEFAULT_IMAGE_DIGESTS[service]}"
         content = re.sub(
             rf"(?m)^(\s*image:\s*){re.escape(service)}\s*$",
-            rf"\g<1>{namespace}/{service}:{tag}",
+            rf"\g<1>{reference}",
             content,
         )
     return content
