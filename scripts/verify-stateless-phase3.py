@@ -19,7 +19,7 @@ PROVIDER_MANIFESTS = (
     ROOT / "kubernetes-manifests" / "shippingservice.yaml",
     ROOT / "release" / "kubernetes-manifests.yaml",
     ROOT / "release" / "kubernetes-manifests-no-loadgenerator.yaml",
-    ROOT / "benchmark" / "benchmark-nats.yaml",
+    ROOT / "benchmark" / "benchmark-nats-single-replica.yaml",
     ROOT / "benchmark" / "benchmark-nats-multiple-replicas.yaml",
     ROOT / "benchmark" / "benchmark-nats-hpa.yaml",
 )
@@ -212,7 +212,7 @@ def verify_manifests() -> None:
         ROOT / "kubernetes-manifests" / "paymentservice.yaml",
         ROOT / "release" / "kubernetes-manifests.yaml",
         ROOT / "release" / "kubernetes-manifests-no-loadgenerator.yaml",
-        ROOT / "benchmark" / "benchmark-nats.yaml",
+        ROOT / "benchmark" / "benchmark-nats-single-replica.yaml",
         ROOT / "benchmark" / "benchmark-nats-multiple-replicas.yaml",
         ROOT / "benchmark" / "benchmark-nats-hpa.yaml",
     )

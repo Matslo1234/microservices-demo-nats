@@ -1,0 +1,117 @@
+# Copyright 2026 Google LLC
+# Licensed under the Apache License, Version 2.0 (the "License");
+
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- ../../../kubernetes-manifests
+patches:
+- target:
+    group: apps
+    version: v1
+    kind: Deployment
+    name: adservice|benchmarkservice|cartservice|checkoutservice|currencyservice|emailservice|frontend|paymentservice|productcatalogservice|recommendationservice|shippingservice|storefrontprojectionservice
+  patch: |-
+    - op: replace
+      path: /spec/replicas
+      value: 1
+- target:
+    group: apps
+    version: v1
+    kind: Deployment
+    name: checkoutservice
+  patch: |-
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: checkoutservice
+    spec:
+      template:
+        spec:
+          containers:
+          - name: server
+            env:
+            - name: CHECKOUT_REDIS_MODE
+              value: standalone
+- target:
+    group: apps
+    version: v1
+    kind: StatefulSet
+    name: redis-cart-cluster|redis-checkout-cluster
+  patch: |-
+    - op: replace
+      path: /spec/replicas
+      value: 1
+    - op: replace
+      path: /spec/template/spec/containers/0/args/0
+      value: |-
+        exec redis-server \
+          --bind 0.0.0.0 \
+          --protected-mode no \
+          --port 6379 \
+          --appendonly yes \
+          --appendfsync always
+    - op: replace
+      path: /spec/template/spec/containers/0/readinessProbe/exec/command
+      value:
+      - redis-cli
+      - PING
+    - op: remove
+      path: /spec/template/spec/containers/0/ports/1
+    - op: remove
+      path: /spec/template/spec/initContainers/1
+    - op: remove
+      path: /spec/template/spec/volumes/0
+- target:
+    group: policy
+    version: v1
+    kind: PodDisruptionBudget
+    name: redis-cart-cluster|redis-checkout-cluster
+  patch: |-
+    - op: remove
+      path: /spec/minAvailable
+    - op: add
+      path: /spec/maxUnavailable
+      value: 1
+- target:
+    group: autoscaling
+    version: v2
+    kind: HorizontalPodAutoscaler
+  patch: |-
+    $patch: delete
+    apiVersion: autoscaling/v2
+    kind: HorizontalPodAutoscaler
+    metadata:
+      name: unused
+- target:
+    version: v1
+    kind: ConfigMap
+    name: redis-cluster-bootstrap
+  patch: |-
+    $patch: delete
+    apiVersion: v1
+    kind: ConfigMap
+    metadata:
+      name: redis-cluster-bootstrap
+- target:
+    group: batch
+    version: v1
+    kind: Job
+    name: redis-cart-cluster-bootstrap|redis-checkout-cluster-bootstrap
+  patch: |-
+    $patch: delete
+    apiVersion: batch/v1
+    kind: Job
+    metadata:
+      name: unused
+- target:
+    group: networking.k8s.io
+    version: v1
+    kind: NetworkPolicy
+    name: redis-cart-cluster-bootstrap|redis-checkout-cluster-bootstrap
+  patch: |-
+    $patch: delete
+    apiVersion: networking.k8s.io/v1
+    kind: NetworkPolicy
+    metadata:
+      name: unused

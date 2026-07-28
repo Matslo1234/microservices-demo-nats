@@ -54,9 +54,12 @@ DEFAULT_IMAGE_DIGESTS = {
 }
 
 
-def render(path: str) -> str:
+def render(path: str, *, allow_external_resources: bool = False) -> str:
+    command = ["kubectl", "kustomize", path]
+    if allow_external_resources:
+        command.extend(["--load-restrictor", "LoadRestrictionsNone"])
     result = subprocess.run(
-        ["kubectl", "kustomize", path],
+        command,
         cwd=ROOT,
         check=True,
         text=True,
@@ -84,7 +87,8 @@ def write(path: Path, content: str, header: str, footer: str = "") -> None:
     path.write_text(header + qualify_images(content) + footer)
 
 
-def benchmark_header(description: str) -> str:
+def benchmark_header(description: str, notes: tuple[str, ...]) -> str:
+    rendered_notes = "\n".join(f"# {line}" for line in notes)
     return f"""# Copyright 2026 Google LLC
 # Licensed under the Apache License, Version 2.0 (the "License");
 #
@@ -98,10 +102,7 @@ def benchmark_header(description: str) -> str:
 # Apply to a clean cluster with a default dynamic StorageClass:
 #   kubectl apply -f <this-file>
 #
-# The application Deployments start with multiple rolling replicas and are
-# governed by Phase 6 HPAs and disruption budgets. Benchmark workloads run as
-# disposable Jobs; run state and artifacts are held in replicated JetStream
-# KV/Object Store buckets.
+{rendered_notes}
 ---
 """
 
@@ -124,24 +125,55 @@ def main() -> None:
         FOOTER,
     )
     nats = render("kubernetes-manifests/nats/fresh-cluster")
+    single_replica_application = render(
+        "benchmark/manifests/single-replica",
+        allow_external_resources=True,
+    )
+    single_replica_benchmark = nats + "---\n" + single_replica_application
     benchmark = nats + "---\n" + application
     benchmark_variants = {
-        "benchmark-nats.yaml": (
-            "Self-contained stateless NATS benchmark environment."
+        "benchmark-nats-single-replica.yaml": (
+            "Self-contained stateless NATS single-replica benchmark "
+            "environment.",
+            (
+                "Every application and Redis store runs as one fixed replica.",
+                "NATS retains its replicated topology. Benchmark workloads run",
+                "as disposable Jobs; run state and artifacts are held in",
+                "replicated JetStream KV/Object Store buckets.",
+            ),
+            single_replica_benchmark,
         ),
         "benchmark-nats-hpa.yaml": (
-            "Self-contained stateless NATS autoscaling benchmark environment."
+            "Self-contained stateless NATS autoscaling benchmark environment.",
+            (
+                "The application Deployments start with multiple rolling replicas and are",
+                "governed by Phase 6 HPAs and disruption budgets. Benchmark workloads run as",
+                "disposable Jobs; run state and artifacts are held in replicated JetStream",
+                "KV/Object Store buckets.",
+            ),
+            benchmark,
         ),
         "benchmark-nats-multiple-replicas.yaml": (
             "Self-contained stateless NATS replica-scaling benchmark "
-            "environment."
+            "environment.",
+            (
+                "The application Deployments start with multiple rolling replicas and are",
+                "governed by Phase 6 HPAs and disruption budgets. Benchmark workloads run as",
+                "disposable Jobs; run state and artifacts are held in replicated JetStream",
+                "KV/Object Store buckets.",
+            ),
+            benchmark,
         ),
     }
-    for filename, description in benchmark_variants.items():
+    for filename, (
+        description,
+        notes,
+        content,
+    ) in benchmark_variants.items():
         write(
             ROOT / "benchmark" / filename,
-            benchmark,
-            benchmark_header(description),
+            content,
+            benchmark_header(description, notes),
         )
     print(
         "Generated release manifests with and without loadgenerator and "
