@@ -189,6 +189,62 @@ data:
       sleep 2
     done
     redis-cli -h "${seed}" -p 6379 CLUSTER INFO
+  repair-topology.sh: |
+    #!/bin/sh
+    set -eu
+
+    topology=/data/nodes.conf
+    if [ ! -s "${topology}" ]; then
+      echo "no persisted Redis Cluster topology to repair"
+      exit 0
+    fi
+
+    repaired="${topology}.repaired"
+    : >"${repaired}"
+    while IFS= read -r line || [ -n "${line}" ]; do
+      case "${line}" in
+        vars\ *)
+          printf '%s\n' "${line}" >>"${repaired}"
+          continue
+          ;;
+      esac
+
+      set -- ${line}
+      endpoint="${2:-}"
+      metadata="${endpoint#*,}"
+      if [ -z "${endpoint}" ] || [ "${metadata}" = "${endpoint}" ]; then
+        printf '%s\n' "${line}" >>"${repaired}"
+        continue
+      fi
+
+      hostname="${metadata%%,*}"
+      attempts=0
+      address=""
+      until [ -n "${address}" ]; do
+        address="$(
+          getent hosts "${hostname}" 2>/dev/null |
+            awk 'NR == 1 { print $1 }'
+        )"
+        attempts=$((attempts + 1))
+        if [ -z "${address}" ]; then
+          if [ "${attempts}" -ge 60 ]; then
+            echo "could not resolve Redis Cluster peer ${hostname}" >&2
+            exit 1
+          fi
+          sleep 1
+        fi
+      done
+
+      suffix=",${metadata}"
+      replacement="${address}:6379@16379${suffix}"
+      printf '%s\n' "${line}" |
+        awk -v endpoint="${replacement}" '{$2 = endpoint; print}' \
+          >>"${repaired}"
+    done <"${topology}"
+
+    chmod 600 "${repaired}"
+    mv "${repaired}" "${topology}"
+    echo "refreshed persisted Redis Cluster peer addresses from stable DNS names"
 kind: ConfigMap
 metadata:
   labels:
@@ -462,7 +518,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-benchmarkservice
-        image: matslo123/benchmarkservice:v0.4.0@sha256:2c35b46248cf2184b2ea9d96d59c17abfcd04417c413049cea9eacdeb8432a24
+        image: matslo123/benchmarkservice:v0.4.0@sha256:f2286c7525c12997ceb678a65845f5883afa1099dac2bf4cbed4637edd03ea54
         livenessProbe:
           httpGet:
             path: /healthz
@@ -1762,6 +1818,30 @@ spec:
         volumeMounts:
         - mountPath: /data
           name: data
+      - command:
+        - sh
+        - /config/repair-topology.sh
+        image: redis:8.2-alpine
+        name: repair-topology
+        resources:
+          limits:
+            cpu: 50m
+            memory: 64Mi
+          requests:
+            cpu: 5m
+            memory: 8Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+        volumeMounts:
+        - mountPath: /data
+          name: data
+        - mountPath: /config
+          name: redis-cluster-bootstrap
+          readOnly: true
       securityContext:
         fsGroup: 1000
         runAsGroup: 1000
@@ -1778,6 +1858,10 @@ spec:
         maxSkew: 1
         topologyKey: kubernetes.io/hostname
         whenUnsatisfiable: ScheduleAnyway
+      volumes:
+      - configMap:
+          name: redis-cluster-bootstrap
+        name: redis-cluster-bootstrap
   volumeClaimTemplates:
   - metadata:
       labels:
@@ -1911,6 +1995,30 @@ spec:
         volumeMounts:
         - mountPath: /data
           name: data
+      - command:
+        - sh
+        - /config/repair-topology.sh
+        image: redis:8.2-alpine
+        name: repair-topology
+        resources:
+          limits:
+            cpu: 50m
+            memory: 64Mi
+          requests:
+            cpu: 5m
+            memory: 8Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+        volumeMounts:
+        - mountPath: /data
+          name: data
+        - mountPath: /config
+          name: redis-cluster-bootstrap
+          readOnly: true
       securityContext:
         fsGroup: 1000
         runAsGroup: 1000
@@ -1927,6 +2035,10 @@ spec:
         maxSkew: 1
         topologyKey: kubernetes.io/hostname
         whenUnsatisfiable: ScheduleAnyway
+      volumes:
+      - configMap:
+          name: redis-cluster-bootstrap
+        name: redis-cluster-bootstrap
   volumeClaimTemplates:
   - metadata:
       labels:

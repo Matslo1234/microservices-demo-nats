@@ -207,6 +207,26 @@ def verify_manifests() -> None:
 
     cluster = document(rendered, "StatefulSet", "redis-cart-cluster")
     for required in (
+        "name: repair-topology",
+        "- /config/repair-topology.sh",
+        "name: redis-cluster-bootstrap",
+    ):
+        if required not in cluster:
+            raise VerificationError(
+                f"StatefulSet/redis-cart-cluster is missing {required!r}"
+            )
+    bootstrap = document(rendered, "ConfigMap", "redis-cluster-bootstrap")
+    for required in (
+        "repair-topology.sh",
+        'getent hosts "${hostname}"',
+        'chmod 600 "${repaired}"',
+        'mv "${repaired}" "${topology}"',
+    ):
+        if required not in bootstrap:
+            raise VerificationError(
+                f"ConfigMap/redis-cluster-bootstrap is missing {required!r}"
+            )
+    for required in (
         "replicas: 6",
         "--cluster-enabled yes",
         "--cluster-preferred-endpoint-type hostname",

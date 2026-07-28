@@ -26,6 +26,7 @@ from runtime import (
     start_clock,
     submission_deadline,
 )
+from session_cookie import SESSION_COOKIE_NAME, issued_session_cookie
 from timing import outcome_latency_ms
 
 
@@ -149,7 +150,7 @@ class StorefrontAdapter:
         self.user = user
         self.client = user.client
         self.random = random.Random(seed)
-        self.session_id = session_id
+        self.session_cookie = session_id
 
     def headers(
         self,
@@ -159,8 +160,10 @@ class StorefrontAdapter:
         headers: dict[str, str] = {}
         if accept:
             headers["Accept"] = accept
-        if self.session_id:
-            headers["Cookie"] = f"shop_session-id={self.session_id}"
+        if self.session_cookie:
+            headers["Cookie"] = (
+                f"{SESSION_COOKIE_NAME}={self.session_cookie}"
+            )
         if idempotency_key:
             headers["Idempotency-Key"] = str(uuid.uuid4())
         return headers
@@ -194,11 +197,16 @@ class StorefrontAdapter:
 
     def add_item(self) -> bool:
         product = self.random.choice(PRODUCTS)
-        self.client.get(
+        response = self.client.get(
             "/product/" + product,
             headers=self.headers(),
             name="/product/[id]",
         )
+        issued = issued_session_cookie(response)
+        if issued is not None:
+            self.session_cookie = issued
+        if response.status_code != 200:
+            return False
         return self._submit_cart_add(
             {
                 "product_id": product,

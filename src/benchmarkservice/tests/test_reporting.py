@@ -71,10 +71,22 @@ class ReportingTest(unittest.TestCase):
             "phase": "steady",
             "nats_metrics": [
                 self._nats_metric(
-                    "jetstream_consumer_num_pending", 3, "orders", "checkout"
+                    "jetstream_consumer_num_pending",
+                    3,
+                    "BOUTIQUE_EVENTS",
+                    "checkout",
                 ),
                 self._nats_metric(
-                    "jetstream_consumer_num_pending", 3, "orders", "checkout"
+                    "jetstream_consumer_num_pending",
+                    3,
+                    "BOUTIQUE_EVENTS",
+                    "checkout",
+                ),
+                self._nats_metric(
+                    "jetstream_consumer_num_pending",
+                    100,
+                    "KV_BENCHMARK_RUNS",
+                    "controller",
                 ),
                 self._nats_metric(
                     "gnatsd_varz_jetstream_stats_storage", 10
@@ -88,10 +100,22 @@ class ReportingTest(unittest.TestCase):
             "phase": "steady",
             "nats_metrics": [
                 self._nats_metric(
-                    "jetstream_consumer_num_pending", 1, "orders", "checkout"
+                    "jetstream_consumer_num_pending",
+                    1,
+                    "BOUTIQUE_EVENTS",
+                    "checkout",
                 ),
                 self._nats_metric(
-                    "jetstream_consumer_num_pending", 1, "orders", "checkout"
+                    "jetstream_consumer_num_pending",
+                    1,
+                    "BOUTIQUE_EVENTS",
+                    "checkout",
+                ),
+                self._nats_metric(
+                    "jetstream_consumer_num_pending",
+                    200,
+                    "KV_BENCHMARK_RUNS",
+                    "controller",
                 ),
                 self._nats_metric(
                     "gnatsd_varz_jetstream_stats_storage", 15

@@ -198,6 +198,24 @@ def verify_manifests() -> str:
     require(runner, "name: benchmark-runner")
     policy = document(rendered, "NetworkPolicy", "benchmark-runner-egress")
     require(policy, "app: benchmark-runner", "port: 4222", "port: 7777")
+    nats_policy = document(
+        run(
+            [
+                kubectl,
+                "kustomize",
+                "kubernetes-manifests/nats/fresh-cluster",
+            ]
+        ),
+        "NetworkPolicy",
+        "nats-clients-and-cluster",
+    )
+    require(
+        nats_policy,
+        "- benchmark-runner",
+        "- benchmarkservice",
+        "port: 4222",
+        "port: 7777",
+    )
 
     for legacy in (
         "email-data",

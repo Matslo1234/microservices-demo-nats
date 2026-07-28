@@ -14,6 +14,9 @@ from typing import Any, Iterable
 from config import BenchmarkConfig
 
 
+APPLICATION_STREAMS = {"BOUTIQUE_COMMANDS", "BOUTIQUE_EVENTS"}
+
+
 def read_json_lines(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
         return []
@@ -309,6 +312,8 @@ def nats_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
             consumer = labels.get("consumer_name") or labels.get("consumer")
             stream = labels.get("stream_name") or labels.get("stream")
             if consumer:
+                if stream not in APPLICATION_STREAMS:
+                    continue
                 key = f"{stream or 'unknown'}/{consumer}"
                 record_consumers[key][alias] = max(
                     value, record_consumers[key].get(alias, 0.0)

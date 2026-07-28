@@ -28,6 +28,7 @@ spec:
           operator: In
           values:
           - adservice
+          - benchmark-runner
           - benchmarkservice
           - cartservice
           - checkoutservice
@@ -68,8 +69,12 @@ spec:
         matchLabels:
           kubernetes.io/metadata.name: default
       podSelector:
-        matchLabels:
-          app: benchmarkservice
+        matchExpressions:
+        - key: app
+          operator: In
+          values:
+          - benchmark-runner
+          - benchmarkservice
     ports:
     - protocol: TCP
       port: 7777

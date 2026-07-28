@@ -12,6 +12,62 @@ metadata:
     app.kubernetes.io/component: backing-store
     app.kubernetes.io/part-of: online-boutique
 data:
+  repair-topology.sh: |
+    #!/bin/sh
+    set -eu
+
+    topology=/data/nodes.conf
+    if [ ! -s "${topology}" ]; then
+      echo "no persisted Redis Cluster topology to repair"
+      exit 0
+    fi
+
+    repaired="${topology}.repaired"
+    : >"${repaired}"
+    while IFS= read -r line || [ -n "${line}" ]; do
+      case "${line}" in
+        vars\ *)
+          printf '%s\n' "${line}" >>"${repaired}"
+          continue
+          ;;
+      esac
+
+      set -- ${line}
+      endpoint="${2:-}"
+      metadata="${endpoint#*,}"
+      if [ -z "${endpoint}" ] || [ "${metadata}" = "${endpoint}" ]; then
+        printf '%s\n' "${line}" >>"${repaired}"
+        continue
+      fi
+
+      hostname="${metadata%%,*}"
+      attempts=0
+      address=""
+      until [ -n "${address}" ]; do
+        address="$(
+          getent hosts "${hostname}" 2>/dev/null |
+            awk 'NR == 1 { print $1 }'
+        )"
+        attempts=$((attempts + 1))
+        if [ -z "${address}" ]; then
+          if [ "${attempts}" -ge 60 ]; then
+            echo "could not resolve Redis Cluster peer ${hostname}" >&2
+            exit 1
+          fi
+          sleep 1
+        fi
+      done
+
+      suffix=",${metadata}"
+      replacement="${address}:6379@16379${suffix}"
+      printf '%s\n' "${line}" |
+        awk -v endpoint="${replacement}" '{$2 = endpoint; print}' \
+          >>"${repaired}"
+    done <"${topology}"
+
+    chmod 600 "${repaired}"
+    mv "${repaired}" "${topology}"
+    echo "refreshed persisted Redis Cluster peer addresses from stable DNS names"
   bootstrap.sh: |
     #!/bin/sh
     set -eu
@@ -157,6 +213,27 @@ spec:
           limits:
             cpu: 50m
             memory: 64Mi
+      - name: repair-topology
+        image: redis:8.2-alpine
+        command: ["sh", "/config/repair-topology.sh"]
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+          readOnlyRootFilesystem: true
+        volumeMounts:
+        - name: data
+          mountPath: /data
+        - name: redis-cluster-bootstrap
+          mountPath: /config
+          readOnly: true
+        resources:
+          requests:
+            cpu: 5m
+            memory: 8Mi
+          limits:
+            cpu: 50m
+            memory: 64Mi
       containers:
       - name: redis
         image: redis:8.2-alpine
@@ -218,6 +295,10 @@ spec:
           limits:
             cpu: 500m
             memory: 512Mi
+      volumes:
+      - name: redis-cluster-bootstrap
+        configMap:
+          name: redis-cluster-bootstrap
   volumeClaimTemplates:
   - metadata:
       name: data
@@ -394,6 +475,27 @@ spec:
           limits:
             cpu: 50m
             memory: 64Mi
+      - name: repair-topology
+        image: redis:8.2-alpine
+        command: ["sh", "/config/repair-topology.sh"]
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+          readOnlyRootFilesystem: true
+        volumeMounts:
+        - name: data
+          mountPath: /data
+        - name: redis-cluster-bootstrap
+          mountPath: /config
+          readOnly: true
+        resources:
+          requests:
+            cpu: 5m
+            memory: 8Mi
+          limits:
+            cpu: 50m
+            memory: 64Mi
       containers:
       - name: redis
         image: redis:8.2-alpine
@@ -455,6 +557,10 @@ spec:
           limits:
             cpu: 500m
             memory: 512Mi
+      volumes:
+      - name: redis-cluster-bootstrap
+        configMap:
+          name: redis-cluster-bootstrap
   volumeClaimTemplates:
   - metadata:
       name: data

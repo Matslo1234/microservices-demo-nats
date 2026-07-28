@@ -179,6 +179,21 @@ def verify_manifests() -> None:
     cluster = document(rendered, "StatefulSet", "redis-checkout-cluster")
     require(
         cluster,
+        "name: repair-topology",
+        "command:",
+        "- /config/repair-topology.sh",
+        "name: redis-cluster-bootstrap",
+    )
+    bootstrap = document(rendered, "ConfigMap", "redis-cluster-bootstrap")
+    require(
+        bootstrap,
+        "repair-topology.sh",
+        'getent hosts "${hostname}"',
+        'chmod 600 "${repaired}"',
+        'mv "${repaired}" "${topology}"',
+    )
+    require(
+        cluster,
         "replicas: 6",
         "--cluster-enabled yes",
         "--cluster-preferred-endpoint-type hostname",

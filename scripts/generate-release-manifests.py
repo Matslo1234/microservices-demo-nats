@@ -39,7 +39,7 @@ SERVICES = (
 )
 DEFAULT_IMAGE_DIGESTS = {
     "adservice": "863919b5c2929e90b69888c20e54509cd6c3d09425104269df2b629aab40a643",
-    "benchmarkservice": "2c35b46248cf2184b2ea9d96d59c17abfcd04417c413049cea9eacdeb8432a24",
+    "benchmarkservice": "f2286c7525c12997ceb678a65845f5883afa1099dac2bf4cbed4637edd03ea54",
     "cartservice": "c11e45917947e9e3192d5f9feb330b6b5c4b1c7f26cccfc02c1374cd11aee3e7",
     "checkoutservice": "afae6ddf7edeff70f4ce98914a4e7a93d9e25e37594af34a70777e056ca3011b",
     "currencyservice": "aadcaa314fcc6591d38e91720fc870fd55aeff7c6fdcb26322e6aa89b2c289ab",
