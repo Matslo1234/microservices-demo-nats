@@ -5,8 +5,9 @@
 """Shared, versioned recommendation catalog operations.
 
 The runtime adapter is intentionally tiny so the CAS state machine can be
-tested without a NATS server. A store implements async get/create/update/keys;
-get returns ``(record, revision)`` and raises CatalogNotFound when absent.
+tested without a NATS server. A store implements async get/create/update; get
+returns ``(record, revision)`` and raises CatalogNotFound when absent. Existing
+deployments also use keys once at startup to seed the product index.
 """
 
 import asyncio
@@ -26,10 +27,46 @@ class CatalogNotReady(Exception):
   pass
 
 
+CATALOG_INDEX_KEY = "catalog-products"
+
+
 def product_key(product_id):
   if not product_id or any(character in product_id for character in ".*> /\\"):
     raise ValueError("product ID cannot be represented as a KV key")
   return f"product.{product_id}"
+
+
+async def ensure_catalog_index(store):
+  """Seed the shared index once when upgrading an existing catalog bucket."""
+  try:
+    await store.get(CATALOG_INDEX_KEY)
+    return "existing"
+  except CatalogNotFound:
+    pass
+
+  product_ids = []
+  for key in await store.keys():
+    if not key.startswith("product."):
+      continue
+    try:
+      record, _ = await store.get(key)
+    except CatalogNotFound:
+      continue
+    product_id = str(record.get("product_id", ""))
+    if product_id and not record.get("removed", False):
+      product_ids.append(product_id)
+
+  encoded = json.dumps(
+      {"product_ids": sorted(set(product_ids))},
+      sort_keys=True,
+      separators=(",", ":"),
+  ).encode()
+  try:
+    await store.create(CATALOG_INDEX_KEY, encoded)
+    return "created"
+  except CatalogConflict:
+    # Another replica completed the same startup migration.
+    return "existing"
 
 
 async def apply_product(store, record, max_attempts=20):
@@ -38,26 +75,87 @@ async def apply_product(store, record, max_attempts=20):
   if incoming_version <= 0 or not record.get("source_event_id"):
     raise ValueError("catalog record is missing version or source event identity")
   encoded = json.dumps(record, sort_keys=True, separators=(",", ":")).encode()
+  outcome = None
   for attempt in range(max_attempts):
     try:
       current, revision = await store.get(key)
     except CatalogNotFound:
       try:
         await store.create(key, encoded)
-        return "created"
+        outcome = "created"
+        break
       except CatalogConflict:
         await _backoff(attempt)
         continue
     if current.get("source_event_id") == record["source_event_id"]:
-      return "duplicate"
+      outcome = "duplicate"
+      break
     if incoming_version <= int(current.get("product_version", 0)):
-      return "stale"
+      outcome = "stale"
+      break
     try:
       await store.update(key, encoded, revision)
-      return "updated"
+      outcome = "updated"
+      break
     except CatalogConflict:
       await _backoff(attempt)
-  raise CatalogConflict(f"catalog CAS retry limit reached for {key}")
+  if outcome is None:
+    raise CatalogConflict(f"catalog CAS retry limit reached for {key}")
+  await _reconcile_catalog_index(store, key, max_attempts)
+  return outcome
+
+
+async def _reconcile_catalog_index(store, key, max_attempts):
+  """Make the shared active-product index agree with the winning product."""
+  try:
+    product_record, _ = await store.get(key)
+  except CatalogNotFound:
+    return
+  product_id = str(product_record.get("product_id", ""))
+  if not product_id:
+    raise ValueError("stored catalog product has no identity")
+  removed = bool(product_record.get("removed", False))
+
+  for attempt in range(max_attempts):
+    try:
+      current, revision = await store.get(CATALOG_INDEX_KEY)
+    except CatalogNotFound:
+      product_ids = [] if removed else [product_id]
+      encoded = json.dumps(
+          {"product_ids": product_ids},
+          sort_keys=True,
+          separators=(",", ":"),
+      ).encode()
+      try:
+        await store.create(CATALOG_INDEX_KEY, encoded)
+        return
+      except CatalogConflict:
+        await _backoff(attempt)
+        continue
+
+    product_ids = {
+        str(candidate)
+        for candidate in current.get("product_ids", [])
+        if str(candidate)
+    }
+    before = set(product_ids)
+    if removed:
+      product_ids.discard(product_id)
+    else:
+      product_ids.add(product_id)
+    if product_ids == before:
+      return
+    encoded = json.dumps(
+        {"product_ids": sorted(product_ids)},
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    try:
+      await store.update(CATALOG_INDEX_KEY, encoded, revision)
+      return
+    except CatalogConflict:
+      await _backoff(attempt)
+  raise CatalogConflict("catalog product-index CAS retry limit reached")
 
 
 async def apply_snapshot(store, record, max_attempts=20):
@@ -96,15 +194,24 @@ async def catalog_candidates(store, excluded, seed, model_revision, limit=5):
   if catalog_revision <= 0:
     raise CatalogNotReady("catalog snapshot revision is invalid")
 
+  try:
+    index, _ = await store.get(CATALOG_INDEX_KEY)
+  except CatalogNotFound as error:
+    raise CatalogNotReady("catalog product index is unavailable") from error
+  product_ids = sorted({
+      str(product_id)
+      for product_id in index.get("product_ids", [])
+      if str(product_id)
+  })
+  if len(product_ids) < int(snapshot.get("product_count", 0)):
+    raise CatalogNotReady("catalog product index is incomplete")
+
   available = []
-  for key in await store.keys():
-    if not key.startswith("product."):
-      continue
+  for product_id in product_ids:
     try:
-      record, _ = await store.get(key)
+      record, _ = await store.get(product_key(product_id))
     except CatalogNotFound:
       continue
-    product_id = record.get("product_id", "")
     if product_id and product_id not in excluded and not record.get("removed", False):
       available.append(product_id)
   available.sort()

@@ -25,7 +25,44 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-const checkoutFetchBatchSize = 32
+const (
+	checkoutProjectionFetchBatchSize = 32
+	checkoutWorkflowFetchBatchSize   = 256
+	checkoutProjectionMaxPending     = 256
+	checkoutWorkflowMaxPending       = 1024
+	checkoutWorkflowParallelism      = 32
+)
+
+var checkoutShippingSagaSubjects = []string{
+	// Cart quote events share the shipping namespace but never advance an
+	// order. Keeping them out of this durable prevents cart activity from
+	// head-of-line blocking checkout sagas.
+	"boutique.evt.shipping.order-quote-calculated.v1",
+	"boutique.evt.shipping.order-quote-failed.v1",
+	"boutique.evt.shipping.shipment-created.v1",
+	"boutique.evt.shipping.shipment-creation-failed.v1",
+	"boutique.evt.shipping.shipment-cancelled.v1",
+	"boutique.evt.shipping.shipment-cancellation-failed.v1",
+}
+
+var checkoutPaymentSagaSubjects = []string{
+	"boutique.evt.payment.authorized.v1",
+	"boutique.evt.payment.authorization-declined.v1",
+	"boutique.evt.payment.captured.v1",
+	"boutique.evt.payment.capture-failed.v1",
+	"boutique.evt.payment.authorization-released.v1",
+	"boutique.evt.payment.authorization-release-failed.v1",
+}
+
+type checkoutConsumerDefinition struct {
+	filters     []string
+	durable     string
+	stream      string
+	handler     func(*nats.Msg) error
+	fetchSize   int
+	maxPending  int
+	parallelism int
+}
 
 type checkoutMetrics struct {
 	transitions             atomic.Uint64
@@ -131,34 +168,48 @@ func startCheckoutWorker(store *stateStore) (*checkoutWorker, error) {
 		return nil, err
 	}
 
-	type consumerDefinition struct {
-		subject string
-		durable string
-		stream  string
-		handler func(*nats.Msg) error
+	projections := []checkoutConsumerDefinition{
+		{[]string{"boutique.evt.catalog.>"}, "checkout-catalog-v1", "BOUTIQUE_EVENTS",
+			worker.handleProjectionMessage, checkoutProjectionFetchBatchSize, checkoutProjectionMaxPending, 1},
+		{[]string{"boutique.evt.currency.>"}, "checkout-currency-v1", "BOUTIQUE_EVENTS",
+			worker.handleProjectionMessage, checkoutProjectionFetchBatchSize, checkoutProjectionMaxPending, 1},
+		{[]string{"boutique.evt.cart.>"}, "checkout-cart-v1", "BOUTIQUE_EVENTS",
+			worker.handleProjectionMessage, checkoutProjectionFetchBatchSize, checkoutProjectionMaxPending, 1},
 	}
-	projections := []consumerDefinition{
-		{"boutique.evt.catalog.>", "checkout-catalog-v1", "BOUTIQUE_EVENTS", worker.handleProjectionMessage},
-		{"boutique.evt.currency.>", "checkout-currency-v1", "BOUTIQUE_EVENTS", worker.handleProjectionMessage},
-		{"boutique.evt.cart.>", "checkout-cart-v1", "BOUTIQUE_EVENTS", worker.handleProjectionMessage},
+	workflows := []checkoutConsumerDefinition{
+		{[]string{"boutique.cmd.order.submit.v1"}, "checkout-order-commands-v1", "BOUTIQUE_COMMANDS",
+			worker.handleCommandMessage, checkoutWorkflowFetchBatchSize, checkoutWorkflowMaxPending, checkoutWorkflowParallelism},
+		{checkoutShippingSagaSubjects, "checkout-saga-shipping-v1", "BOUTIQUE_EVENTS",
+			worker.handleEventMessage, checkoutWorkflowFetchBatchSize, checkoutWorkflowMaxPending, checkoutWorkflowParallelism},
+		{checkoutPaymentSagaSubjects, "checkout-saga-payment-v1", "BOUTIQUE_EVENTS",
+			worker.handleEventMessage, checkoutWorkflowFetchBatchSize, checkoutWorkflowMaxPending, checkoutWorkflowParallelism},
 	}
-	workflows := []consumerDefinition{
-		{"boutique.cmd.order.submit.v1", "checkout-order-commands-v1", "BOUTIQUE_COMMANDS", worker.handleCommandMessage},
-		{"boutique.evt.shipping.>", "checkout-saga-shipping-v1", "BOUTIQUE_EVENTS", worker.handleEventMessage},
-		{"boutique.evt.payment.>", "checkout-saga-payment-v1", "BOUTIQUE_EVENTS", worker.handleEventMessage},
-	}
-	add := func(definition consumerDefinition) error {
-		subscription, subscribeErr := worker.js.PullSubscribe(definition.subject, definition.durable,
-			nats.BindStream(definition.stream), nats.ManualAck(), nats.AckExplicit(), nats.DeliverAll(),
-			nats.AckWait(30*time.Second), nats.MaxDeliver(10), nats.MaxAckPending(256))
+	add := func(definition checkoutConsumerDefinition) error {
+		if ensureErr := worker.ensureConsumer(definition); ensureErr != nil {
+			return ensureErr
+		}
+		subject := ""
+		if len(definition.filters) == 1 {
+			subject = definition.filters[0]
+		}
+		subscription, subscribeErr := worker.js.PullSubscribe(
+			subject,
+			definition.durable,
+			nats.Bind(definition.stream, definition.durable),
+		)
 		if subscribeErr != nil {
-			return fmt.Errorf("create %s: %w", definition.durable, subscribeErr)
+			return fmt.Errorf("bind %s: %w", definition.durable, subscribeErr)
 		}
 		worker.subscriptions = append(worker.subscriptions, subscription)
 		worker.wg.Add(1)
 		go func() {
 			defer worker.wg.Done()
-			worker.consume(subscription, definition.handler)
+			worker.consume(
+				subscription,
+				definition.handler,
+				definition.fetchSize,
+				definition.parallelism,
+			)
 		}()
 		return nil
 	}
@@ -201,14 +252,115 @@ func startCheckoutWorker(store *stateStore) (*checkoutWorker, error) {
 	return worker, nil
 }
 
-func (worker *checkoutWorker) consume(subscription *nats.Subscription, handler func(*nats.Msg) error) {
+func (worker *checkoutWorker) ensureConsumer(definition checkoutConsumerDefinition) error {
+	config := &nats.ConsumerConfig{
+		Durable:       definition.durable,
+		DeliverPolicy: nats.DeliverAllPolicy,
+		AckPolicy:     nats.AckExplicitPolicy,
+		AckWait:       30 * time.Second,
+		MaxDeliver:    10,
+		MaxAckPending: definition.maxPending,
+	}
+	if len(definition.filters) == 1 {
+		config.FilterSubject = definition.filters[0]
+	} else {
+		config.FilterSubjects = append([]string(nil), definition.filters...)
+	}
+	for attempt := 0; attempt < 20; attempt++ {
+		info, err := worker.js.ConsumerInfo(definition.stream, definition.durable)
+		if errors.Is(err, nats.ErrConsumerNotFound) {
+			if _, addErr := worker.js.AddConsumer(definition.stream, config); addErr == nil {
+				return nil
+			} else if checkoutConsumerSetupRace(addErr) {
+				time.Sleep(time.Duration(attempt+1) * 10 * time.Millisecond)
+				continue
+			} else {
+				return fmt.Errorf("create %s: %w", definition.durable, addErr)
+			}
+		}
+		if err != nil {
+			return fmt.Errorf("inspect %s: %w", definition.durable, err)
+		}
+		if checkoutConsumerFiltersMatch(
+			info.Config.FilterSubject,
+			info.Config.FilterSubjects,
+			definition.filters,
+		) &&
+			info.Config.MaxAckPending == definition.maxPending &&
+			info.Config.AckPolicy == nats.AckExplicitPolicy &&
+			info.Config.AckWait == 30*time.Second &&
+			info.Config.MaxDeliver == 10 &&
+			info.Config.DeliverPolicy == nats.DeliverAllPolicy {
+			return nil
+		}
+		next := info.Config
+		next.FilterSubject = ""
+		next.FilterSubjects = nil
+		if len(definition.filters) == 1 {
+			next.FilterSubject = definition.filters[0]
+		} else {
+			next.FilterSubjects = append([]string(nil), definition.filters...)
+		}
+		next.MaxAckPending = definition.maxPending
+		next.AckPolicy = nats.AckExplicitPolicy
+		next.AckWait = 30 * time.Second
+		next.MaxDeliver = 10
+		if _, updateErr := worker.js.UpdateConsumer(definition.stream, &next); updateErr == nil {
+			return nil
+		} else if checkoutConsumerSetupRace(updateErr) {
+			time.Sleep(time.Duration(attempt+1) * 10 * time.Millisecond)
+			continue
+		} else {
+			return fmt.Errorf("update %s: %w", definition.durable, updateErr)
+		}
+	}
+	return fmt.Errorf("consumer %s setup conflicted too many times", definition.durable)
+}
+
+func checkoutConsumerSetupRace(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return errors.Is(err, nats.ErrConsumerNotFound) ||
+		strings.Contains(message, "consumer already exists") ||
+		strings.Contains(message, "consumer name already in use") ||
+		strings.Contains(message, "stream sequence")
+}
+
+func checkoutConsumerFiltersMatch(single string, multiple, wanted []string) bool {
+	configured := append([]string(nil), multiple...)
+	if single != "" {
+		configured = append(configured, single)
+	}
+	if len(configured) != len(wanted) {
+		return false
+	}
+	expected := make(map[string]struct{}, len(wanted))
+	for _, subject := range wanted {
+		expected[subject] = struct{}{}
+	}
+	for _, subject := range configured {
+		if _, ok := expected[subject]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func (worker *checkoutWorker) consume(
+	subscription *nats.Subscription,
+	handler func(*nats.Msg) error,
+	fetchSize int,
+	parallelism int,
+) {
 	for {
 		select {
 		case <-worker.stop:
 			return
 		default:
 		}
-		messages, err := subscription.Fetch(checkoutFetchBatchSize, nats.MaxWait(time.Second))
+		messages, err := subscription.Fetch(fetchSize, nats.MaxWait(time.Second))
 		if err != nil {
 			if !errors.Is(err, nats.ErrTimeout) && !errors.Is(err, nats.ErrConnectionClosed) {
 				log.WithError(err).Error("checkout consumer fetch failed")
@@ -216,25 +368,63 @@ func (worker *checkoutWorker) consume(subscription *nats.Subscription, handler f
 			}
 			continue
 		}
+		worker.processBatch(messages, handler, parallelism)
+	}
+}
+
+func (worker *checkoutWorker) processBatch(
+	messages []*nats.Msg,
+	handler func(*nats.Msg) error,
+	parallelism int,
+) {
+	if parallelism <= 1 || len(messages) <= 1 {
 		for _, message := range messages {
-			correlationID, messageID := checkoutMessageContext(message.Data)
-			entry := log.WithFields(logrus.Fields{
-				"topic": message.Subject, "message_kind": checkoutMessageKind(message.Subject),
-				"message_id": messageID, "correlation_id": correlationID,
-			})
-			if err := handler(message); err != nil {
-				if errors.Is(err, errCheckoutProjectionLag) {
-					entry.WithError(err).Debug("checkout command is waiting for its projections")
-				} else {
-					entry.WithError(err).Error("checkout message processing failed")
-				}
-				_ = message.NakWithDelay(time.Second)
-				continue
-			}
-			if err := message.Ack(); err != nil {
-				entry.WithError(err).Error("checkout message acknowledgement failed")
-			}
+			worker.processMessage(message, handler)
 		}
+		return
+	}
+	groups := make(map[string][]*nats.Msg, len(messages))
+	for _, message := range messages {
+		group := checkoutMessageGroup(message.Data)
+		groups[group] = append(groups[group], message)
+	}
+	// Replicated Redis and JetStream commits spend most of their time waiting
+	// for I/O. Run independent aggregates concurrently while retaining stream
+	// order for every individual aggregate.
+	parallel := make(chan struct{}, parallelism)
+	var running sync.WaitGroup
+	for _, group := range groups {
+		group := group
+		running.Add(1)
+		go func() {
+			defer running.Done()
+			parallel <- struct{}{}
+			defer func() { <-parallel }()
+			for _, message := range group {
+				worker.processMessage(message, handler)
+			}
+		}()
+	}
+	running.Wait()
+}
+
+func (worker *checkoutWorker) processMessage(message *nats.Msg, handler func(*nats.Msg) error) {
+	correlationID, messageID := checkoutMessageContext(message.Data)
+	entry := log.WithFields(logrus.Fields{
+		"topic": message.Subject, "message_kind": checkoutMessageKind(message.Subject),
+		"message_id": messageID, "correlation_id": correlationID,
+	})
+	if err := handler(message); err != nil {
+		if errors.Is(err, errCheckoutProjectionLag) {
+			entry.WithError(err).Debug("checkout command is waiting for its projections")
+		} else {
+			entry.WithError(err).Error("checkout message processing failed")
+		}
+		_ = message.NakWithDelay(time.Second)
+		return
+	}
+	if err := message.Ack(); err != nil {
+		entry.WithError(err).Error("checkout message acknowledgement failed")
 	}
 }
 
@@ -368,6 +558,23 @@ func checkoutMessageContext(data []byte) (string, string) {
 		messageID = "unknown"
 	}
 	return correlationID, messageID
+}
+
+func checkoutMessageGroup(data []byte) string {
+	envelope := &commonv1.MessageEnvelope{}
+	if err := proto.Unmarshal(data, envelope); err != nil {
+		return "unknown"
+	}
+	if envelope.AggregateId != "" {
+		return envelope.AggregateType + "\x00" + envelope.AggregateId
+	}
+	if envelope.CorrelationId != "" {
+		return "correlation\x00" + envelope.CorrelationId
+	}
+	if envelope.MessageId != "" {
+		return "message\x00" + envelope.MessageId
+	}
+	return "unknown"
 }
 
 func (worker *checkoutWorker) scanDeadlines() {

@@ -518,7 +518,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-benchmarkservice
-        image: matslo123/benchmarkservice:v0.4.0@sha256:f2286c7525c12997ceb678a65845f5883afa1099dac2bf4cbed4637edd03ea54
+        image: matslo123/benchmarkservice:v0.4.0@sha256:5fedc37831b9891643f129a415223ad8fe76526f055432862a213de559286bd9
         livenessProbe:
           httpGet:
             path: /healthz
@@ -739,7 +739,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-checkoutservice
-        image: matslo123/checkoutservice:v0.4.0@sha256:afae6ddf7edeff70f4ce98914a4e7a93d9e25e37594af34a70777e056ca3011b
+        image: matslo123/checkoutservice:v0.4.0@sha256:a731c618cb17ce69c2bfa460f0ce461f915ba7c4a97e776d8a67a8d43fb82396
         livenessProbe:
           httpGet:
             path: /healthz
@@ -1438,7 +1438,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-recommendationservice
-        image: matslo123/recommendationservice:v0.4.0@sha256:d5cff07b9b0b2616bd67a456591947498998f0e3b2b58ba3c22426126e8740ba
+        image: matslo123/recommendationservice:v0.4.0@sha256:71ec7c4a3f83ac01986030b7c6b571dd29ba4bfa2da06faaa607073ac6b7797f
         livenessProbe:
           failureThreshold: 6
           httpGet:
@@ -1644,7 +1644,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-storefrontprojectionservice
-        image: matslo123/storefrontprojectionservice:v0.4.0@sha256:de82680a6a02e4cdb48c4cee798ec561620981f0eb965f67099d44f87ecf35de
+        image: matslo123/storefrontprojectionservice:v0.4.0@sha256:68df57b58766042061552326a6e9a3f91754f2bb7d062f45c8eaf83df07b781a
         livenessProbe:
           failureThreshold: 6
           httpGet:
@@ -1948,7 +1948,7 @@ spec:
         resources:
           limits:
             cpu: 500m
-            memory: 512Mi
+            memory: 2Gi
           requests:
             cpu: 50m
             memory: 96Mi

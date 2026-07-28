@@ -12,6 +12,7 @@ from catalog_kv import (
     apply_product,
     apply_snapshot,
     catalog_candidates,
+    ensure_catalog_index,
 )
 
 
@@ -21,6 +22,7 @@ class MemoryCatalog:
     self._values = {}
     self._revision = 0
     self._lock = asyncio.Lock()
+    self.keys_calls = 0
 
   async def get(self, key):
     async with self._lock:
@@ -43,6 +45,7 @@ class MemoryCatalog:
 
   async def keys(self):
     async with self._lock:
+      self.keys_calls += 1
       return sorted(self._values)
 
   def _store(self, key, value):
@@ -63,6 +66,25 @@ def product(product_id, version, event_id, removed=False):
 
 
 class SharedCatalogTests(unittest.IsolatedAsyncioTestCase):
+
+  async def test_startup_migration_seeds_index_with_one_key_scan(self):
+    store = MemoryCatalog()
+    await store.create(
+        "product.a",
+        json.dumps(product("a", 1, "event-a")).encode(),
+    )
+    await store.create(
+        "product.b",
+        json.dumps(product("b", 2, "event-b", removed=True)).encode(),
+    )
+
+    self.assertEqual("created", await ensure_catalog_index(store))
+    index, _ = await store.get("catalog-products")
+    self.assertEqual(["a"], index["product_ids"])
+    self.assertEqual(1, store.keys_calls)
+
+    self.assertEqual("existing", await ensure_catalog_index(store))
+    self.assertEqual(1, store.keys_calls)
 
   async def test_concurrent_workers_converge_and_stale_event_is_noop(self):
     store = MemoryCatalog()
@@ -102,6 +124,26 @@ class SharedCatalogTests(unittest.IsolatedAsyncioTestCase):
     self.assertEqual(results[1], results[2])
     self.assertEqual(42, results[0][1])
     self.assertNotIn("a", results[0][0])
+    self.assertEqual(0, store.keys_calls)
+
+  async def test_removed_product_is_removed_from_shared_index(self):
+    store = MemoryCatalog()
+    await apply_product(store, product("sku", 1, "event-1"))
+    await apply_product(store, product("sku", 2, "event-2", removed=True))
+    await apply_snapshot(store, {
+        "catalog_revision": 42,
+        "product_count": 0,
+        "checksum": "checksum",
+        "source_event_id": "snapshot-42",
+        "source_version": 42,
+    })
+
+    candidates, _ = await catalog_candidates(
+        store, set(), "page-view-1", "model-v1"
+    )
+
+    self.assertEqual([], candidates)
+    self.assertEqual(0, store.keys_calls)
 
 
 if __name__ == "__main__":

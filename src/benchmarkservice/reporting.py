@@ -107,6 +107,7 @@ def business_summary(
         "MANUAL_REVIEW",
         "TIMEOUT",
         "INCOMPLETE",
+        "GENERATOR_SATURATED",
     ):
         outcome_counts.setdefault(required_outcome, 0)
     submitted = len(outcomes)
@@ -404,6 +405,13 @@ def capacity_assessment(
         }
 
     reasons: list[str] = []
+    saturated = int(
+        business.get("outcomes", {}).get("GENERATOR_SATURATED", 0)
+    )
+    if saturated:
+        reasons.append(
+            f"load generator concurrency limit was reached {saturated} times"
+        )
     if business["completed"] != business["submitted"]:
         reasons.append("not every submitted transaction completed")
     if outstanding.get("final", 0) > 0:

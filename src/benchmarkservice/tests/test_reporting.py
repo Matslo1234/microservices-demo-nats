@@ -7,7 +7,13 @@ import unittest
 from pathlib import Path
 
 from config import BenchmarkConfig
-from reporting import build_report, nats_summary, percentile
+from reporting import (
+    build_report,
+    business_summary,
+    capacity_assessment,
+    nats_summary,
+    percentile,
+)
 
 
 class ReportingTest(unittest.TestCase):
@@ -132,6 +138,31 @@ class ReportingTest(unittest.TestCase):
         self.assertEqual(-2, summary["consumer_pending"]["change"])
         self.assertEqual(30, summary["storage_bytes"]["first"])
         self.assertEqual(40, summary["storage_bytes"]["last"])
+
+    def test_generator_saturation_is_reported_as_unsustainable(self) -> None:
+        saturated = self._business(
+            "steady", "GENERATOR_SATURATED", 0, False, False
+        )
+        saturated["context"]["scheduled_at"] = 1
+        business = business_summary([saturated], 10)
+        config = BenchmarkConfig.from_request(
+            {"workload": "open"}, "GRPC", "frontend:80"
+        )
+
+        assessment = capacity_assessment(
+            config,
+            business,
+            {"final": 0},
+            {"available": False},
+        )
+
+        self.assertEqual(1, business["scheduled_open_loop"])
+        self.assertEqual(1, business["outcomes"]["GENERATOR_SATURATED"])
+        self.assertFalse(assessment["sustainable"])
+        self.assertIn(
+            "load generator concurrency limit was reached 1 times",
+            assessment["reasons"],
+        )
 
     @staticmethod
     def _business(

@@ -556,7 +556,9 @@ spec:
             memory: 96Mi
           limits:
             cpu: 500m
-            memory: 512Mi
+            # Checkout retains idempotency and saga records for 33 days. Keep
+            # enough reload headroom for deliberate open-loop overload runs.
+            memory: 2Gi
       volumes:
       - name: redis-cluster-bootstrap
         configMap:

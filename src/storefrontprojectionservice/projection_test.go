@@ -11,8 +11,13 @@ import (
 	"testing"
 	"time"
 
+	commonv1 "github.com/GoogleCloudPlatform/microservices-demo/protos/common/v1"
+	eventsv1 "github.com/GoogleCloudPlatform/microservices-demo/protos/events/v1"
 	"github.com/GoogleCloudPlatform/microservices-demo/src/storefrontprojectionservice/internal/storefront"
 	"github.com/nats-io/nats.go"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/anypb"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 type memoryKVEntry struct {
@@ -132,6 +137,52 @@ func TestProjectionSubjectFiltering(t *testing.T) {
 	}
 	if projectionFiltersMatch("boutique.evt.>", nil) {
 		t.Fatal("legacy catch-all filter unexpectedly matches")
+	}
+}
+
+func TestTerminalOrderOutcomeUsesImmutableJetStreamPublishTime(t *testing.T) {
+	orders := newMemoryKV()
+	worker := &projector{orders: orders}
+	occurredAt := time.Unix(1_700_000_000, 0).UTC()
+	publishedAt := occurredAt.Add(24 * time.Second)
+	payload, err := anypb.New(&eventsv1.OrderCompletedEvent{
+		Order: &commonv1.SanitizedOrderSnapshot{
+			OrderId: "order-1",
+			UserId:  "user-1",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := proto.Marshal(&commonv1.MessageEnvelope{
+		MessageId:        "completed-1",
+		SchemaVersion:    1,
+		OccurredAt:       timestamppb.New(occurredAt),
+		AggregateType:    "order",
+		AggregateId:      "order-1",
+		AggregateVersion: 7,
+		CorrelationId:    "order-1",
+		Data:             payload,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.apply(
+		"boutique.evt.order.completed.v1",
+		encoded,
+		publishedAt,
+	); err != nil {
+		t.Fatal(err)
+	}
+	view, err := getJSON[storefront.OrderView](orders, storefront.OrderKey("order-1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.OutcomeAt == nil || !view.OutcomeAt.Equal(publishedAt) {
+		t.Fatalf("outcome time = %v, want publish time %v", view.OutcomeAt, publishedAt)
+	}
+	if !view.UpdatedAt.Equal(occurredAt) {
+		t.Fatalf("event update time = %v, want occurrence time %v", view.UpdatedAt, occurredAt)
 	}
 }
 

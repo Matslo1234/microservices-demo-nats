@@ -270,10 +270,26 @@ class StorefrontAdapter:
                 "PRECONDITION_FAILED", "could not prepare cart"
             )
 
+    def record_generator_saturation(
+        self,
+        scheduled_at: float,
+        schedule_delay_ms: float,
+    ) -> None:
+        context = self.base_context(scheduled_at, schedule_delay_ms)
+        context["outcome"] = "GENERATOR_SATURATED"
+        with self.user.environment.events.request.measure(
+            "BUSINESS", "checkout_to_outcome", context=context
+        ) as measurement:
+            measurement["exception"] = failure_message(
+                "GENERATOR_SATURATED",
+                "open-loop concurrency limit reached",
+            )
+
     def checkout(
         self,
         scheduled_at: float | None = None,
         schedule_delay_ms: float | None = None,
+        track_settlement_inline: bool = False,
     ) -> None:
         raise NotImplementedError
 
@@ -298,6 +314,7 @@ class GrpcAdapter(StorefrontAdapter):
         self,
         scheduled_at: float | None = None,
         schedule_delay_ms: float | None = None,
+        track_settlement_inline: bool = False,
     ) -> None:
         context = self.base_context(scheduled_at, schedule_delay_ms)
         data = self.checkout_data()
@@ -387,6 +404,7 @@ class NatsAdapter(StorefrontAdapter):
         self,
         scheduled_at: float | None = None,
         schedule_delay_ms: float | None = None,
+        track_settlement_inline: bool = False,
     ) -> None:
         base_context = self.base_context(scheduled_at, schedule_delay_ms)
         settled_context = dict(base_context)
@@ -421,14 +439,17 @@ class NatsAdapter(StorefrontAdapter):
             )
             return
 
-        tracker = gevent.spawn(
-            self._track_settlement,
+        arguments = (
             location,
             order,
             checkout_started,
             checkout_started_epoch,
             settled_context,
         )
+        if track_settlement_inline:
+            self._track_settlement(*arguments)
+            return
+        tracker = gevent.spawn(self._track_settlement, *arguments)
         SETTLEMENT_TRACKERS.add(tracker)
         tracker.link(lambda completed: SETTLEMENT_TRACKERS.discard(completed))
 
@@ -816,6 +837,15 @@ class OpenLoopDriver(FastHttpUser):
             schedule_delay_ms = max(
                 0.0, (time.monotonic() - scheduled_monotonic) * 1000
             )
+            if len(active) >= self.concurrency:
+                adapter_for(
+                    self,
+                    CONFIG.seed + index + 1,
+                ).record_generator_saturation(
+                    scheduled_at, schedule_delay_ms
+                )
+                index += 1
+                continue
             greenlet = gevent.spawn(
                 self._transaction,
                 index,
@@ -848,4 +878,8 @@ class OpenLoopDriver(FastHttpUser):
                 scheduled_at, schedule_delay_ms
             )
             return
-        adapter.checkout(scheduled_at, schedule_delay_ms)
+        adapter.checkout(
+            scheduled_at,
+            schedule_delay_ms,
+            track_settlement_inline=True,
+        )

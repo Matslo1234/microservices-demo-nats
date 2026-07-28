@@ -24,6 +24,7 @@ from catalog_kv import (
     apply_product,
     apply_snapshot,
     catalog_candidates,
+    ensure_catalog_index,
 )
 from logger import getJSONLogger
 from protos.common.v1 import message_pb2
@@ -180,13 +181,7 @@ class _NATSCatalogStore:
             raise
 
     async def keys(self):
-        try:
-            return await self._bucket.keys()
-        except Exception as error:
-            if _kv_not_found(error) or type(error).__name__ == "NoKeysError":
-                return []
-            raise
-
+        return await self._bucket.keys()
 
 def _kv_not_found(error):
     return type(error).__name__ in {
@@ -363,6 +358,7 @@ async def _run():
     catalog_store = _NATSCatalogStore(
         await js.key_value(CATALOG_BUCKET)
     )
+    await ensure_catalog_index(catalog_store)
     catalog = await _durable(js, CATALOG_SUBJECT, "recommendation-catalog-v1")
     cart = await _durable(js, CART_SUBJECT, "recommendation-cart-v1")
     page = await _durable(js, PAGE_VIEW_SUBJECT, "recommendation-page-views-v1")

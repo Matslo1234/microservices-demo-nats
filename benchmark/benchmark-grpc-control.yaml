@@ -71,7 +71,9 @@ spec:
             memory: 64Mi
           limits:
             cpu: 250m
-            memory: 256Mi
+            # Raw exports and archives are retained in the local Object Store.
+            # Leave enough cache/recovery headroom across repeated runs.
+            memory: 2Gi
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:
@@ -256,7 +258,7 @@ spec:
             app: benchmarkservice
       containers:
       - name: server
-        image: matslo123/benchmarkservice:v0.4.0@sha256:2c35b46248cf2184b2ea9d96d59c17abfcd04417c413049cea9eacdeb8432a24
+        image: matslo123/benchmarkservice:v0.4.0@sha256:5fedc37831b9891643f129a415223ad8fe76526f055432862a213de559286bd9
         env:
         - name: PORT
           value: "8080"

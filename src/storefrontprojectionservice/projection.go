@@ -194,6 +194,7 @@ type projectionMessage struct {
 	message       *nats.Msg
 	correlationID string
 	messageID     string
+	publishedAt   time.Time
 }
 
 func (p *projector) applyBatch(messages []*nats.Msg) {
@@ -206,8 +207,15 @@ func (p *projector) applyBatch(messages []*nats.Msg) {
 			continue
 		}
 		correlationID, messageID := projectionMessageContext(message.Data)
+		// Stateless handlers intentionally retain a causal occurrence time in
+		// result envelopes. JetStream's stored timestamp is immutable too, and
+		// unlike the causal time includes time spent waiting in upstream queues.
+		publishedAt := time.Now().UTC()
+		if metadata, err := message.Metadata(); err == nil && !metadata.Timestamp.IsZero() {
+			publishedAt = metadata.Timestamp.UTC()
+		}
 		groups[correlationID] = append(groups[correlationID], projectionMessage{
-			message: message, correlationID: correlationID, messageID: messageID,
+			message: message, correlationID: correlationID, messageID: messageID, publishedAt: publishedAt,
 		})
 	}
 	if len(messages) != 0 {
@@ -225,7 +233,7 @@ func (p *projector) applyBatch(messages []*nats.Msg) {
 			parallel <- struct{}{}
 			defer func() { <-parallel }()
 			for _, item := range group {
-				if err := p.apply(item.message.Subject, item.message.Data); err != nil {
+				if err := p.apply(item.message.Subject, item.message.Data, item.publishedAt); err != nil {
 					log.Printf("projection event processing failed topic=%q message_id=%q correlation_id=%q error=%v",
 						item.message.Subject, item.messageID, item.correlationID, err)
 					if nakErr := item.message.NakWithDelay(time.Second); nakErr != nil {
@@ -293,7 +301,7 @@ func projectionMessageContext(data []byte) (string, string) {
 	return correlationID, messageID
 }
 
-func (p *projector) apply(subject string, data []byte) error {
+func (p *projector) apply(subject string, data []byte, publishedAt time.Time) error {
 	envelope := &commonv1.MessageEnvelope{}
 	if err := proto.Unmarshal(data, envelope); err != nil {
 		return fmt.Errorf("decode envelope: %w", err)
@@ -307,6 +315,9 @@ func (p *projector) apply(subject string, data []byte) error {
 	updatedAt := time.Now().UTC()
 	if envelope.OccurredAt != nil && envelope.OccurredAt.IsValid() {
 		updatedAt = envelope.OccurredAt.AsTime()
+	}
+	if publishedAt.IsZero() {
+		publishedAt = time.Now().UTC()
 	}
 	switch subject {
 	case "boutique.evt.catalog.product-upserted.v1":
@@ -545,10 +556,6 @@ func (p *projector) apply(subject string, data []byte) error {
 		if err := envelope.Data.UnmarshalTo(payload); err != nil {
 			return err
 		}
-		changedAt := updatedAt
-		if payload.ChangedAt != nil && payload.ChangedAt.IsValid() {
-			changedAt = payload.ChangedAt.AsTime()
-		}
 		status := "PROCESSING"
 		if payload.Stage == "COMPLETED" {
 			status = "COMPLETED"
@@ -559,7 +566,7 @@ func (p *projector) apply(subject string, data []byte) error {
 		}
 		return p.updateOrder(storefront.OrderView{ProjectionMetadata: projectionMetadata(envelope, envelope.AggregateVersion),
 			OrderID: payload.OrderId, Status: status, Stage: payload.Stage,
-			AggregateVersion: envelope.AggregateVersion, OutcomeAt: terminalOrderOutcomeAt(status, changedAt), UpdatedAt: updatedAt})
+			AggregateVersion: envelope.AggregateVersion, OutcomeAt: terminalOrderOutcomeAt(status, publishedAt), UpdatedAt: updatedAt})
 	case "boutique.evt.order.rejected.v1":
 		payload := &eventsv1.OrderRejectedEvent{}
 		if err := envelope.Data.UnmarshalTo(payload); err != nil {
@@ -567,7 +574,7 @@ func (p *projector) apply(subject string, data []byte) error {
 		}
 		view := storefront.OrderView{ProjectionMetadata: projectionMetadata(envelope, envelope.AggregateVersion),
 			OrderID: payload.OrderId, UserID: p.operationUser(payload.OperationId), Status: "REJECTED", Stage: "REJECTED",
-			AggregateVersion: envelope.AggregateVersion, OutcomeAt: terminalOrderOutcomeAt("REJECTED", updatedAt), UpdatedAt: updatedAt}
+			AggregateVersion: envelope.AggregateVersion, OutcomeAt: terminalOrderOutcomeAt("REJECTED", publishedAt), UpdatedAt: updatedAt}
 		applyOrderFailure(&view, payload.Failure)
 		return p.updateOrder(view)
 	case "boutique.evt.order.completed.v1":
@@ -580,7 +587,7 @@ func (p *projector) apply(subject string, data []byte) error {
 		}
 		return p.updateOrder(storefront.OrderView{ProjectionMetadata: projectionMetadata(envelope, envelope.AggregateVersion),
 			OrderID: payload.Order.OrderId, UserID: payload.Order.UserId, Status: "COMPLETED", Stage: "COMPLETED",
-			Snapshot: payload.Order, AggregateVersion: envelope.AggregateVersion, OutcomeAt: terminalOrderOutcomeAt("COMPLETED", updatedAt), UpdatedAt: updatedAt})
+			Snapshot: payload.Order, AggregateVersion: envelope.AggregateVersion, OutcomeAt: terminalOrderOutcomeAt("COMPLETED", publishedAt), UpdatedAt: updatedAt})
 	case "boutique.evt.order.cancelled.v1":
 		payload := &eventsv1.OrderCancelledEvent{}
 		if err := envelope.Data.UnmarshalTo(payload); err != nil {
@@ -588,7 +595,7 @@ func (p *projector) apply(subject string, data []byte) error {
 		}
 		view := storefront.OrderView{ProjectionMetadata: projectionMetadata(envelope, envelope.AggregateVersion),
 			OrderID: payload.OrderId, Status: "CANCELLED", Stage: "CANCELLED", AggregateVersion: envelope.AggregateVersion,
-			OutcomeAt: terminalOrderOutcomeAt("CANCELLED", updatedAt), UpdatedAt: updatedAt}
+			OutcomeAt: terminalOrderOutcomeAt("CANCELLED", publishedAt), UpdatedAt: updatedAt}
 		applyOrderFailure(&view, payload.Failure)
 		return p.updateOrder(view)
 	case "boutique.evt.order.manual-review-required.v1":
@@ -599,7 +606,7 @@ func (p *projector) apply(subject string, data []byte) error {
 		return p.updateOrder(storefront.OrderView{ProjectionMetadata: projectionMetadata(envelope, envelope.AggregateVersion),
 			OrderID: payload.OrderId, Status: "MANUAL_REVIEW", Stage: "MANUAL_REVIEW", FailureCode: payload.FailedCompensation,
 			SafeMessage: "The order requires manual review.", AggregateVersion: envelope.AggregateVersion,
-			OutcomeAt: terminalOrderOutcomeAt("MANUAL_REVIEW", updatedAt), UpdatedAt: updatedAt})
+			OutcomeAt: terminalOrderOutcomeAt("MANUAL_REVIEW", publishedAt), UpdatedAt: updatedAt})
 	case "boutique.evt.order.step-timed-out.v1":
 		payload := &eventsv1.OrderStepTimedOutEvent{}
 		if err := envelope.Data.UnmarshalTo(payload); err != nil {
