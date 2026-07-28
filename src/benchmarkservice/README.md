@@ -41,11 +41,9 @@ and uses that exact image for Jobs. This keeps Job and controller code at the
 same release without a mutable image environment variable.
 
 For NATS application runs, the standard fresh-cluster bootstrap creates the
-replicated stores. For original-GRPC comparison runs, apply
-`benchmark/benchmark-original-app.yaml` together with
-`benchmark/benchmark-grpc-control.yaml`; the latter provides an isolated
-JetStream control/artifact store that is excluded from measured application
-resources.
+replicated stores. For original-GRPC comparison runs,
+`benchmark/benchmark-original-app.yaml` includes an isolated JetStream
+control/artifact store that is excluded from measured application resources.
 
 Run-level settings include workload, warm-up/steady/drain durations, user or
 arrival rate, outcome/settlement timeouts, random seed, and collector interval.

@@ -347,41 +347,39 @@ def verify_release_manifests() -> None:
             "RESULTS_DIR",
             "/var/lib/benchmarkservice",
         )
-    grpc = (ROOT / "benchmark" / "benchmark-grpc-control.yaml").read_text()
     original = (ROOT / "benchmark" / "benchmark-original-app.yaml").read_text()
-    grpc_controller = document(grpc, "Deployment", "benchmarkservice")
+    grpc_controller = document(original, "Deployment", "benchmarkservice")
     require(
-        grpc,
+        original,
         "name: benchmark-state-bootstrap",
         "kv add BENCHMARK_RUNS",
         "object add BENCHMARK_ARTIFACTS",
         "name: benchmark-runner",
-        "kind: HorizontalPodAutoscaler",
         "kind: PodDisruptionBudget",
     )
     require(
         grpc_controller,
         'value: "GRPC"',
-        "replicas: 2",
+        "replicas: 1",
         "type: RollingUpdate",
         "maxUnavailable: 0",
         "name: nats-client-config",
         "nats-credentials-benchmarkservice",
     )
-    forbid(
-        grpc_controller + original,
-        "RESULTS_DIR",
-        "/var/lib/benchmarkservice",
-        "type: Recreate",
-    )
     try:
-        document(original, "Deployment", "benchmarkservice")
+        document(original, "HorizontalPodAutoscaler", "benchmarkservice")
     except VerificationError:
         pass
     else:
         raise VerificationError(
-            "original application baseline embeds a stale benchmark controller"
+            "original application benchmarkservice must not autoscale"
         )
+    forbid(
+        original,
+        "RESULTS_DIR",
+        "/var/lib/benchmarkservice",
+        "type: Recreate",
+    )
 
 
 def verify_dashboard_and_bootstrap() -> None:

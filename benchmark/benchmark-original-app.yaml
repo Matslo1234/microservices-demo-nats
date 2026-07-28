@@ -12,9 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# Apply this application baseline together with benchmark-grpc-control.yaml.
-# The separate Phase 6 control plane keeps benchmark run state and artifacts
-# shared while runner workloads execute as disposable Kubernetes Jobs.
+# Self-contained GRPC application benchmark environment.
+#
+# Benchmark run state and artifacts are shared through the isolated NATS
+# control store while runner workloads execute as disposable Kubernetes Jobs.
 
 ---
 apiVersion: apps/v1
@@ -889,3 +890,337 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: productcatalogservice
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: benchmark-system
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: benchmark-state
+  namespace: benchmark-system
+spec:
+  selector:
+    app: benchmark-state
+  ports:
+  - name: nats
+    port: 4222
+    targetPort: nats
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: benchmark-state
+  namespace: benchmark-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: benchmark-state
+  strategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app: benchmark-state
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsGroup: 1000
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: nats
+        image: nats:2.14.3-alpine
+        args:
+        - --jetstream
+        - --store_dir=/data
+        ports:
+        - name: nats
+          containerPort: 4222
+        readinessProbe:
+          tcpSocket:
+            port: nats
+          periodSeconds: 2
+        livenessProbe:
+          tcpSocket:
+            port: nats
+          periodSeconds: 10
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 250m
+            # Raw exports and archives are retained in the local Object Store.
+            # Leave enough cache/recovery headroom across repeated runs.
+            memory: 2Gi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+          readOnlyRootFilesystem: true
+        volumeMounts:
+        - name: state
+          mountPath: /data
+      volumes:
+      - name: state
+        emptyDir:
+          sizeLimit: 5Gi
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: benchmark-state-bootstrap
+  namespace: benchmark-system
+spec:
+  backoffLimit: 12
+  template:
+    spec:
+      automountServiceAccountToken: false
+      restartPolicy: OnFailure
+      containers:
+      - name: bootstrap
+        image: natsio/nats-box:0.19.7-nonroot
+        command:
+        - /bin/sh
+        - -ec
+        - |
+          server=nats://benchmark-state:4222
+          until nats --server="${server}" account info >/dev/null 2>&1; do
+            sleep 1
+          done
+          if ! nats --server="${server}" kv info BENCHMARK_RUNS >/dev/null 2>&1; then
+            nats --server="${server}" kv add BENCHMARK_RUNS \
+              --history=10 --replicas=1 --storage=file \
+              --max-bucket-size=536870912
+          fi
+          if ! nats --server="${server}" object info BENCHMARK_ARTIFACTS >/dev/null 2>&1; then
+            nats --server="${server}" object add BENCHMARK_ARTIFACTS \
+              --replicas=1 --storage=file \
+              --max-bucket-size=4294967296
+          fi
+        resources:
+          requests:
+            cpu: 10m
+            memory: 32Mi
+          limits:
+            cpu: 100m
+            memory: 128Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+          readOnlyRootFilesystem: true
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nats-client-config
+data:
+  NATS_URL: nats://benchmark-state.benchmark-system.svc:4222
+  NATS_CA_FILE: ""
+  NATS_CONNECT_TIMEOUT: 2s
+  NATS_RECONNECT_WAIT: 2s
+  NATS_MAX_RECONNECTS: "-1"
+  NATS_PING_INTERVAL: 20s
+  NATS_MAX_PINGS_OUT: "2"
+  NATS_PUBLISH_TIMEOUT: 5s
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nats-ca
+data: {}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: nats-credentials-benchmarkservice
+type: Opaque
+stringData:
+  NATS_USER: ""
+  NATS_PASSWORD: ""
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: benchmarkservice
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: benchmark-runner
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: benchmarkservice-jobs
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get"]
+- apiGroups: ["batch"]
+  resources: ["jobs"]
+  verbs: ["get", "list", "create", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: benchmarkservice-jobs
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: benchmarkservice-jobs
+subjects:
+- kind: ServiceAccount
+  name: benchmarkservice
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: online-boutique-benchmark-runner
+rules:
+- apiGroups: [""]
+  resources: ["nodes"]
+  verbs: ["get", "list"]
+- apiGroups: [""]
+  resources: ["nodes/proxy"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: online-boutique-benchmark-runner
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: online-boutique-benchmark-runner
+subjects:
+- kind: ServiceAccount
+  name: benchmark-runner
+  namespace: default
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: benchmarkservice
+  labels:
+    app: benchmarkservice
+spec:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: benchmarkservice
+  template:
+    metadata:
+      labels:
+        app: benchmarkservice
+    spec:
+      serviceAccountName: benchmarkservice
+      terminationGracePeriodSeconds: 10
+      securityContext:
+        runAsGroup: 1000
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: ScheduleAnyway
+        labelSelector:
+          matchLabels:
+            app: benchmarkservice
+      containers:
+      - name: server
+        image: matslo123/benchmarkservice:v0.4.0@sha256:5fedc37831b9891643f129a415223ad8fe76526f055432862a213de559286bd9
+        env:
+        - name: PORT
+          value: "8080"
+        - name: APPLICATION_TYPE
+          value: "GRPC"
+        - name: FRONTEND_ADDR
+          value: "frontend:80"
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        envFrom:
+        - configMapRef:
+            name: nats-client-config
+        - secretRef:
+            name: nats-credentials-benchmarkservice
+        ports:
+        - name: http
+          containerPort: 8080
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: http
+          initialDelaySeconds: 2
+          periodSeconds: 5
+          failureThreshold: 12
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: http
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        resources:
+          requests:
+            cpu: 100m
+            memory: 96Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+          readOnlyRootFilesystem: true
+        volumeMounts:
+        - name: nats-ca
+          mountPath: /etc/nats-ca
+          readOnly: true
+      volumes:
+      - name: nats-ca
+        configMap:
+          name: nats-ca
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: benchmarkservice
+  labels:
+    app: benchmarkservice
+spec:
+  selector:
+    app: benchmarkservice
+  ports:
+  - name: http
+    port: 8080
+    targetPort: http
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: benchmarkservice
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: benchmarkservice
