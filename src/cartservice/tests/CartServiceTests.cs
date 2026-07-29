@@ -69,6 +69,23 @@ public sealed class CartServiceTests
     }
 
     [Fact]
+    public async Task NewCommandUsesOneAggregateLoadAndOneAtomicCommit()
+    {
+        var backend = new FakeAtomicAggregateStore();
+        var worker = Worker(backend);
+        var command = AddCommand("command-round-trips", "user-round-trips", 0, 1);
+
+        await worker.Processor.HandleAddItemAsync(
+            command,
+            Envelope(command, "boutique.cart.AddItem.v1", 0),
+            (_, _) => Task.CompletedTask);
+
+        Assert.Equal(1, backend.LoadCalls);
+        Assert.Equal(0, backend.LoadResultCalls);
+        Assert.Equal(1, backend.CommitCalls);
+    }
+
+    [Fact]
     public async Task ConcurrentExpectedVersionConflictCommitsOneMutationAndOneRejection()
     {
         var backend = new FakeAtomicAggregateStore();
@@ -382,6 +399,9 @@ public sealed class CartServiceTests
         private readonly Dictionary<(string AggregateId, string InputId), byte[]> _journals = new();
 
         public bool FailAfterCommitOnce { get; init; }
+        public int LoadCalls { get; private set; }
+        public int LoadResultCalls { get; private set; }
+        public int CommitCalls { get; private set; }
         private bool _failedAfterCommit;
 
         public Task<AtomicAggregateSnapshot> LoadAsync(
@@ -391,6 +411,7 @@ public sealed class CartServiceTests
             cancellationToken.ThrowIfCancellationRequested();
             lock (_gate)
             {
+                LoadCalls++;
                 var aggregate = Current(aggregateId);
                 return Task.FromResult(new AtomicAggregateSnapshot(
                     aggregate.Version,
@@ -406,6 +427,7 @@ public sealed class CartServiceTests
             cancellationToken.ThrowIfCancellationRequested();
             lock (_gate)
             {
+                LoadResultCalls++;
                 if (_journals.TryGetValue(
                     (aggregateId, inputMessageId),
                     out var journal))
@@ -423,6 +445,7 @@ public sealed class CartServiceTests
             cancellationToken.ThrowIfCancellationRequested();
             lock (_gate)
             {
+                CommitCalls++;
                 var key = (request.AggregateId, request.InputMessageId);
                 var current = Current(request.AggregateId);
                 if (_journals.TryGetValue(key, out var existing))

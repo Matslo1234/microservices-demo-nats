@@ -34,6 +34,9 @@ public interface ICartMessagingHealth
 public sealed class NatsCartCommandWorker : BackgroundService, ICartMessagingHealth
 {
     private static readonly TimeSpan InitializationRetryDelay = TimeSpan.FromSeconds(1);
+    private const int DefaultCommandConcurrency = 8;
+    private const int MaximumCommandConcurrency = 32;
+    private const int QueueCapacityPerPartition = 4;
 
     private readonly IConfiguration _configuration;
     private readonly CartCommandProcessor _processor;
@@ -141,7 +144,15 @@ public sealed class NatsCartCommandWorker : BackgroundService, ICartMessagingHea
                 stoppingToken);
             _consumerEstablished = true;
             _ready = true;
-            await ConsumeCommandsAsync(jetStream, consumer, stoppingToken);
+            await ConsumeCommandsAsync(
+                jetStream,
+                consumer,
+                BoundedInteger(
+                    "CART_COMMAND_CONCURRENCY",
+                    DefaultCommandConcurrency,
+                    1,
+                    MaximumCommandConcurrency),
+                stoppingToken);
         }
         finally
         {
@@ -153,73 +164,176 @@ public sealed class NatsCartCommandWorker : BackgroundService, ICartMessagingHea
     private async Task ConsumeCommandsAsync(
         INatsJSContext jetStream,
         INatsJSConsumer consumer,
+        int concurrency,
         CancellationToken stoppingToken)
     {
-        await foreach (var message in consumer.ConsumeAsync<byte[]>(
-            cancellationToken: stoppingToken))
+        var dispatcher = new AggregatePartitionedDispatcher<QueuedCartCommand>(
+            concurrency,
+            QueueCapacityPerPartition,
+            (command, cancellationToken) =>
+                ProcessCommandAsync(jetStream, command, cancellationToken),
+            stoppingToken);
+        var consumeOptions = new NatsJSConsumeOpts
         {
-            var (correlationId, messageId) = MessageContext(message.Data);
+            MaxMsgs = concurrency * 2,
+            ThresholdMsgs = concurrency
+        };
+        _logger.LogInformation(
+            "Cart command consumer started (concurrency={Concurrency}, prefetch={Prefetch})",
+            concurrency,
+            consumeOptions.MaxMsgs);
+
+        try
+        {
+            await foreach (var message in consumer.ConsumeAsync<byte[]>(
+                opts: consumeOptions,
+                cancellationToken: stoppingToken))
+            {
+                try
+                {
+                    if (message.Data == null)
+                    {
+                        throw new InvalidOperationException("Cart command is empty.");
+                    }
+                    var envelope = MessageEnvelope.Parser.ParseFrom(message.Data);
+                    var aggregateId = string.IsNullOrWhiteSpace(envelope.AggregateId)
+                        ? envelope.MessageId
+                        : envelope.AggregateId;
+                    if (string.IsNullOrWhiteSpace(aggregateId))
+                    {
+                        throw new InvalidOperationException(
+                            "Cart command aggregate identity is missing.");
+                    }
+                    await dispatcher.DispatchAsync(
+                        aggregateId,
+                        new QueuedCartCommand(
+                            message.Subject,
+                            envelope,
+                            async cancellationToken =>
+                                await message.AckAsync(
+                                    cancellationToken: cancellationToken),
+                            async cancellationToken =>
+                                await message.NakAsync(
+                                    cancellationToken: cancellationToken)),
+                        stoppingToken);
+                }
+                catch (OperationCanceledException) when (
+                    stoppingToken.IsCancellationRequested)
+                {
+                    return;
+                }
+                catch (Exception exception)
+                {
+                    _logger.LogError(
+                        exception,
+                        "Cart command could not be queued (topic={Topic}); requesting redelivery",
+                        message.Subject);
+                    await message.NakAsync(cancellationToken: stoppingToken);
+                }
+            }
+        }
+        finally
+        {
+            await dispatcher.CompleteAsync();
+        }
+    }
+
+    private async Task ProcessCommandAsync(
+        INatsJSContext jetStream,
+        QueuedCartCommand command,
+        CancellationToken stoppingToken)
+    {
+        var envelope = command.Envelope;
+        var correlationId = string.IsNullOrWhiteSpace(envelope.CorrelationId)
+            ? "unknown"
+            : envelope.CorrelationId;
+        var messageId = string.IsNullOrWhiteSpace(envelope.MessageId)
+            ? "unknown"
+            : envelope.MessageId;
+        if (_logger.IsEnabled(LogLevel.Debug))
+        {
             _logger.LogDebug(
                 "NATS command received (topic={Topic}, message_id={MessageId}, correlation_id={CorrelationId})",
-                message.Subject,
+                command.Subject,
+                messageId,
+                correlationId);
+        }
+
+        try
+        {
+            switch (command.Subject)
+            {
+                case "boutique.cmd.cart.add-item.v1":
+                    if (envelope.Data == null ||
+                        !envelope.Data.TryUnpack<CartAddItemCommand>(out var add))
+                    {
+                        throw new InvalidOperationException(
+                            "Cart add-item payload type is invalid.");
+                    }
+                    await _processor.HandleAddItemAsync(
+                        add,
+                        envelope,
+                        (result, cancellationToken) =>
+                            PublishResultAsync(
+                                jetStream,
+                                result,
+                                correlationId,
+                                cancellationToken),
+                        stoppingToken);
+                    break;
+                case "boutique.cmd.cart.clear.v1":
+                    if (envelope.Data == null ||
+                        !envelope.Data.TryUnpack<CartClearCommand>(out var clear))
+                    {
+                        throw new InvalidOperationException(
+                            "Cart clear payload type is invalid.");
+                    }
+                    await _processor.HandleClearAsync(
+                        clear,
+                        envelope,
+                        (result, cancellationToken) =>
+                            PublishResultAsync(
+                                jetStream,
+                                result,
+                                correlationId,
+                                cancellationToken),
+                        stoppingToken);
+                    break;
+                default:
+                    throw new InvalidOperationException(
+                        $"Unsupported cart command subject {command.Subject}.");
+            }
+            await command.Ack(stoppingToken);
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+            return;
+        }
+        catch (Exception exception)
+        {
+            _logger.LogError(
+                exception,
+                "Cart command processing failed for {Topic} ({MessageId}, correlation_id={CorrelationId}); requesting redelivery",
+                command.Subject,
                 messageId,
                 correlationId);
             try
             {
-                if (message.Data == null)
-                {
-                    throw new InvalidOperationException("Cart command is empty.");
-                }
-                var envelope = MessageEnvelope.Parser.ParseFrom(message.Data);
-                switch (message.Subject)
-                {
-                    case "boutique.cmd.cart.add-item.v1":
-                        if (envelope.Data == null ||
-                            !envelope.Data.TryUnpack<CartAddItemCommand>(out var add))
-                        {
-                            throw new InvalidOperationException(
-                                "Cart add-item payload type is invalid.");
-                        }
-                        await _processor.HandleAddItemAsync(
-                            add,
-                            envelope,
-                            (result, cancellationToken) =>
-                                PublishResultAsync(jetStream, result, cancellationToken),
-                            stoppingToken);
-                        break;
-                    case "boutique.cmd.cart.clear.v1":
-                        if (envelope.Data == null ||
-                            !envelope.Data.TryUnpack<CartClearCommand>(out var clear))
-                        {
-                            throw new InvalidOperationException(
-                                "Cart clear payload type is invalid.");
-                        }
-                        await _processor.HandleClearAsync(
-                            clear,
-                            envelope,
-                            (result, cancellationToken) =>
-                                PublishResultAsync(jetStream, result, cancellationToken),
-                            stoppingToken);
-                        break;
-                    default:
-                        throw new InvalidOperationException(
-                            $"Unsupported cart command subject {message.Subject}.");
-                }
-                await message.AckAsync(cancellationToken: stoppingToken);
+                await command.Nak(stoppingToken);
             }
-            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            catch (OperationCanceledException) when (
+                stoppingToken.IsCancellationRequested)
             {
                 return;
             }
-            catch (Exception exception)
+            catch (Exception nakException)
             {
                 _logger.LogError(
-                    exception,
-                    "Cart command processing failed for {Topic} ({MessageId}, correlation_id={CorrelationId}); requesting redelivery",
-                    message.Subject,
+                    nakException,
+                    "Cart command redelivery request failed for {Topic} ({MessageId}, correlation_id={CorrelationId})",
+                    command.Subject,
                     messageId,
                     correlationId);
-                await message.NakAsync(cancellationToken: stoppingToken);
             }
         }
     }
@@ -227,44 +341,25 @@ public sealed class NatsCartCommandWorker : BackgroundService, ICartMessagingHea
     private async Task PublishResultAsync(
         INatsJSContext jetStream,
         CartStoredResult result,
+        string correlationId,
         CancellationToken stoppingToken)
     {
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
         timeout.CancelAfter(Duration("NATS_PUBLISH_TIMEOUT", TimeSpan.FromSeconds(5)));
+        var data = result.Data.ToArray();
         var acknowledgement = await jetStream.PublishAsync(
             subject: result.Subject,
-            data: result.Data.ToArray(),
+            data: data,
             opts: new NatsJSPubOpts { MsgId = result.MessageId },
             cancellationToken: timeout.Token);
         acknowledgement.EnsureSuccess();
-        var (correlationId, _) = MessageContext(result.Data.ToArray());
-        _logger.LogDebug(
-            "NATS event sent (topic={Topic}, message_id={MessageId}, correlation_id={CorrelationId})",
-            result.Subject,
-            result.MessageId,
-            correlationId);
-    }
-
-    private static (string CorrelationId, string MessageId) MessageContext(byte[]? data)
-    {
-        try
+        if (_logger.IsEnabled(LogLevel.Debug))
         {
-            if (data == null)
-            {
-                return ("unknown", "unknown");
-            }
-            var envelope = MessageEnvelope.Parser.ParseFrom(data);
-            return (
-                string.IsNullOrWhiteSpace(envelope.CorrelationId)
-                    ? "unknown"
-                    : envelope.CorrelationId,
-                string.IsNullOrWhiteSpace(envelope.MessageId)
-                    ? "unknown"
-                    : envelope.MessageId);
-        }
-        catch
-        {
-            return ("unknown", "unknown");
+            _logger.LogDebug(
+                "NATS event sent (topic={Topic}, message_id={MessageId}, correlation_id={CorrelationId})",
+                result.Subject,
+                result.MessageId,
+                correlationId);
         }
     }
 
@@ -300,4 +395,25 @@ public sealed class NatsCartCommandWorker : BackgroundService, ICartMessagingHea
 
     private int Integer(string name, int fallback) =>
         int.TryParse(_configuration[name], out var value) ? value : fallback;
+
+    private int BoundedInteger(
+        string name,
+        int fallback,
+        int minimum,
+        int maximum)
+    {
+        var value = Integer(name, fallback);
+        if (value < minimum || value > maximum)
+        {
+            throw new InvalidOperationException(
+                $"{name} must be between {minimum} and {maximum}.");
+        }
+        return value;
+    }
+
+    private sealed record QueuedCartCommand(
+        string Subject,
+        MessageEnvelope Envelope,
+        Func<CancellationToken, Task> Ack,
+        Func<CancellationToken, Task> Nak);
 }

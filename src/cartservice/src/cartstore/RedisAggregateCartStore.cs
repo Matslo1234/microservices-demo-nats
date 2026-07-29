@@ -220,19 +220,6 @@ public sealed class RedisAggregateCartStore : ICartStore, ICartCommandStore
             cancellationToken.ThrowIfCancellationRequested();
             try
             {
-                var stored = await _aggregates.LoadResultAsync(
-                    userId,
-                    envelope.MessageId,
-                    cancellationToken);
-                if (stored.HasValue)
-                {
-                    return new CartCommandCommit(
-                        CartResultJournal.Parse(stored.Value.Span),
-                        true,
-                        conflicts,
-                        dependencies);
-                }
-
                 var current = await _aggregates.LoadAsync(userId, cancellationToken);
                 var cart = ReadCart(userId, current.State);
                 var selected = transition(cart, current.Version);

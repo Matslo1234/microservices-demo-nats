@@ -620,7 +620,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-cartservice
-        image: matslo123/cartservice:v0.4.0@sha256:c11e45917947e9e3192d5f9feb330b6b5c4b1c7f26cccfc02c1374cd11aee3e7
+        image: matslo123/cartservice:v0.4.0@sha256:1b972fde4595139f9d77b1d1c09ff8154e359e86ead9b46d874f8703de61b33e
         livenessProbe:
           failureThreshold: 6
           httpGet:
