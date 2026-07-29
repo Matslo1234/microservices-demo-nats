@@ -4,6 +4,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"sort"
 	"strconv"
@@ -38,6 +39,7 @@ type memoryKV struct {
 	mu       sync.Mutex
 	entries  map[string]memoryKVEntry
 	revision uint64
+	gets     int
 }
 
 func newMemoryKV() *memoryKV {
@@ -47,11 +49,57 @@ func newMemoryKV() *memoryKV {
 func (bucket *memoryKV) Get(key string) (nats.KeyValueEntry, error) {
 	bucket.mu.Lock()
 	defer bucket.mu.Unlock()
+	bucket.gets++
 	entry, ok := bucket.entries[key]
 	if !ok {
 		return nil, nats.ErrKeyNotFound
 	}
 	return entry, nil
+}
+
+type memoryKeyWatcher struct {
+	updates chan nats.KeyValueEntry
+	errors  chan error
+	once    sync.Once
+}
+
+func (watcher *memoryKeyWatcher) Context() context.Context {
+	return context.Background()
+}
+
+func (watcher *memoryKeyWatcher) Updates() <-chan nats.KeyValueEntry {
+	return watcher.updates
+}
+
+func (watcher *memoryKeyWatcher) Error() <-chan error {
+	return watcher.errors
+}
+
+func (watcher *memoryKeyWatcher) Stop() error {
+	watcher.once.Do(func() {
+		close(watcher.updates)
+		close(watcher.errors)
+	})
+	return nil
+}
+
+func (bucket *memoryKV) WatchAll(...nats.WatchOpt) (nats.KeyWatcher, error) {
+	bucket.mu.Lock()
+	entries := make([]memoryKVEntry, 0, len(bucket.entries))
+	for _, entry := range bucket.entries {
+		entries = append(entries, entry)
+	}
+	bucket.mu.Unlock()
+	sort.Slice(entries, func(i, j int) bool { return entries[i].key < entries[j].key })
+	watcher := &memoryKeyWatcher{
+		updates: make(chan nats.KeyValueEntry, len(entries)+1),
+		errors:  make(chan error),
+	}
+	for _, entry := range entries {
+		watcher.updates <- entry
+	}
+	watcher.updates <- nil
+	return watcher, nil
 }
 
 func (bucket *memoryKV) Create(key string, value []byte) (uint64, error) {
@@ -93,6 +141,18 @@ func (bucket *memoryKV) store(key string, value []byte) uint64 {
 		key: key, value: append([]byte(nil), value...), revision: bucket.revision,
 	}
 	return bucket.revision
+}
+
+func (bucket *memoryKV) resetGetCount() {
+	bucket.mu.Lock()
+	defer bucket.mu.Unlock()
+	bucket.gets = 0
+}
+
+func (bucket *memoryKV) getCount() int {
+	bucket.mu.Lock()
+	defer bucket.mu.Unlock()
+	return bucket.gets
 }
 
 func storeJSON(t *testing.T, bucket *memoryKV, key string, value any) uint64 {
@@ -137,6 +197,93 @@ func TestProjectionSubjectFiltering(t *testing.T) {
 	}
 	if projectionFiltersMatch("boutique.evt.>", nil) {
 		t.Fatal("legacy catch-all filter unexpectedly matches")
+	}
+}
+
+func TestProductQueryCacheServesSynchronizedEntriesWithoutRemoteReads(t *testing.T) {
+	products := newMemoryKV()
+	currencyRevision := storeJSON(t, products, storefront.CurrencyKey, storefront.CurrencyView{
+		BaseCurrencyCode: "USD",
+		Rates:            []storefront.Rate{{CurrencyCode: "USD", UnitsPerBase: 1}},
+		RateRevision:     7,
+	})
+	productRevision := storeJSON(t, products, storefront.ProductKey("sku"), storefront.ProductView{
+		Product: &commonv1.ProductSnapshot{
+			ProductId: "sku",
+			PriceUsd:  &commonv1.Money{CurrencyCode: "USD", Units: 10},
+		},
+		CatalogRevision: 9,
+	})
+	cache, err := newProjectionReadCache(products)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(cache.Close)
+	products.resetGetCount()
+
+	currency, gotCurrencyRevision, err := getJSONWithRevision[storefront.CurrencyView](
+		cache,
+		storefront.CurrencyKey,
+	)
+	if err != nil || currency.RateRevision != 7 || gotCurrencyRevision != currencyRevision {
+		t.Fatalf("unexpected cached currency: value=%#v revision=%d error=%v",
+			currency, gotCurrencyRevision, err)
+	}
+	product, gotProductRevision, err := getJSONWithRevision[storefront.ProductView](
+		cache,
+		storefront.ProductKey("sku"),
+	)
+	if err != nil || product.Product.GetProductId() != "sku" || gotProductRevision != productRevision {
+		t.Fatalf("unexpected cached product: value=%#v revision=%d error=%v",
+			product, gotProductRevision, err)
+	}
+	if gets := products.getCount(); gets != 0 {
+		t.Fatalf("cache hits performed %d authoritative KV reads", gets)
+	}
+	if cache.hits.Load() != 2 || cache.misses.Load() != 0 {
+		t.Fatalf("unexpected cache counters: hits=%d misses=%d",
+			cache.hits.Load(), cache.misses.Load())
+	}
+}
+
+func TestProductQueryCacheFallsBackForAJustCreatedKey(t *testing.T) {
+	products := newMemoryKV()
+	cache, err := newProjectionReadCache(products)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(cache.Close)
+	products.resetGetCount()
+	revision := storeJSON(t, products, storefront.ProductKey("new-sku"), storefront.ProductView{
+		Product: &commonv1.ProductSnapshot{
+			ProductId: "new-sku",
+			PriceUsd:  &commonv1.Money{CurrencyCode: "USD", Units: 5},
+		},
+	})
+
+	product, gotRevision, err := getJSONWithRevision[storefront.ProductView](
+		cache,
+		storefront.ProductKey("new-sku"),
+	)
+	if err != nil || product.Product.GetProductId() != "new-sku" || gotRevision != revision {
+		t.Fatalf("unexpected fallback product: value=%#v revision=%d error=%v",
+			product, gotRevision, err)
+	}
+	if gets := products.getCount(); gets != 1 {
+		t.Fatalf("cache miss performed %d authoritative KV reads, want 1", gets)
+	}
+	if _, _, err := getJSONWithRevision[storefront.ProductView](
+		cache,
+		storefront.ProductKey("new-sku"),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if gets := products.getCount(); gets != 1 {
+		t.Fatalf("populated cache performed another authoritative read: %d", gets)
+	}
+	if cache.hits.Load() != 1 || cache.misses.Load() != 1 {
+		t.Fatalf("unexpected cache counters: hits=%d misses=%d",
+			cache.hits.Load(), cache.misses.Load())
 	}
 }
 

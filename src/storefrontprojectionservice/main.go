@@ -54,6 +54,10 @@ func main() {
 			_, _ = fmt.Fprintf(response, "boutique_projection_stale_events_total %d\n", current.staleEventSkips.Load())
 			_, _ = fmt.Fprintf(response, "boutique_storefront_query_revision %d\n", current.queryRevision.Load())
 			_, _ = fmt.Fprintf(response, "boutique_projection_age_seconds %.6f\n", current.projectionAgeSeconds(time.Now()))
+			if current.catalog != nil {
+				_, _ = fmt.Fprintf(response, "boutique_storefront_catalog_cache_hits_total %d\n", current.catalog.hits.Load())
+				_, _ = fmt.Fprintf(response, "boutique_storefront_catalog_cache_misses_total %d\n", current.catalog.misses.Load())
+			}
 		}
 		_, _ = fmt.Fprintf(response, "boutique_dependency_ready{service=\"storefrontprojectionservice\",dependency=\"kv\"} %d\n", kvReady)
 	})
@@ -107,6 +111,7 @@ func main() {
 	if err := runtime.queryService.Stop(); err != nil {
 		log.Printf("NATS query service drain failed: %v", err)
 	}
+	runtime.projector.close()
 	if err := runtime.nc.Drain(); err != nil {
 		log.Printf("NATS drain failed: %v", err)
 	}
@@ -134,12 +139,14 @@ func initializeProjectionRuntime(ready *atomic.Bool) (*projectionRuntime, error)
 	}
 	subscription, rebuilding, err := projector.subscribe()
 	if err != nil {
+		projector.close()
 		nc.Close()
 		return nil, err
 	}
 	queryService, queryEndpointCount, err := projector.registerQueries(nc)
 	if err != nil {
 		_ = subscription.Unsubscribe()
+		projector.close()
 		nc.Close()
 		return nil, err
 	}

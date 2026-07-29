@@ -163,12 +163,19 @@ func (view CurrencyView) SupportedCurrencies() []string {
 }
 
 func (view CurrencyView) Convert(from *commonv1.Money, toCode string) *commonv1.Money {
-	rates := make(map[string]float64, len(view.Rates))
+	var fromRate, toRate float64
+	var fromOK, toOK bool
 	for _, rate := range view.Rates {
-		rates[rate.CurrencyCode] = rate.UnitsPerBase
+		if rate.CurrencyCode == from.CurrencyCode {
+			fromRate, fromOK = rate.UnitsPerBase, true
+		}
+		if rate.CurrencyCode == toCode {
+			toRate, toOK = rate.UnitsPerBase, true
+		}
+		if fromOK && toOK {
+			break
+		}
 	}
-	fromRate, fromOK := rates[from.CurrencyCode]
-	toRate, toOK := rates[toCode]
 	if !fromOK || !toOK || fromRate == 0 {
 		return nil
 	}

@@ -4,6 +4,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -47,6 +48,7 @@ var projectionFilterSubjects = []string{
 type projector struct {
 	js         nats.JetStreamContext
 	products   projectionKV
+	catalog    *projectionReadCache
 	carts      projectionKV
 	context    projectionKV
 	operations projectionKV
@@ -58,13 +60,18 @@ type projector struct {
 	lastProjectedUnix atomic.Int64
 }
 
-// projectionKV keeps the authoritative query surface deliberately small and
-// makes CAS behavior independently testable without an in-process cache.
-type projectionKV interface {
+// projectionReader keeps read-model queries independently testable.
+type projectionReader interface {
 	Get(string) (nats.KeyValueEntry, error)
+	Keys(...nats.WatchOpt) ([]string, error)
+}
+
+// projectionKV adds the authoritative CAS operations used by event handlers.
+// The shared catalog query cache deliberately does not implement these writes.
+type projectionKV interface {
+	projectionReader
 	Create(string, []byte) (uint64, error)
 	Update(string, []byte, uint64) (uint64, error)
-	Keys(...nats.WatchOpt) ([]string, error)
 }
 
 func newProjector(js nats.JetStreamContext) (*projector, error) {
@@ -72,23 +79,47 @@ func newProjector(js nats.JetStreamContext) (*projector, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open product KV: %w", err)
 	}
+	catalog, err := newProjectionReadCache(products)
+	if err != nil {
+		return nil, fmt.Errorf("initialize product query cache: %w", err)
+	}
 	carts, err := js.KeyValue("STOREFRONT_CARTS")
 	if err != nil {
+		catalog.Close()
 		return nil, fmt.Errorf("open cart KV: %w", err)
 	}
 	context, err := js.KeyValue("STOREFRONT_CONTEXT")
 	if err != nil {
+		catalog.Close()
 		return nil, fmt.Errorf("open context KV: %w", err)
 	}
 	operations, err := js.KeyValue("STOREFRONT_OPERATIONS")
 	if err != nil {
+		catalog.Close()
 		return nil, fmt.Errorf("open operations KV: %w", err)
 	}
 	orders, err := js.KeyValue("STOREFRONT_ORDERS")
 	if err != nil {
+		catalog.Close()
 		return nil, fmt.Errorf("open orders KV: %w", err)
 	}
-	return &projector{js: js, products: products, carts: carts, context: context, operations: operations, orders: orders}, nil
+	return &projector{
+		js: js, products: products, catalog: catalog, carts: carts,
+		context: context, operations: operations, orders: orders,
+	}, nil
+}
+
+func (p *projector) catalogReader() projectionReader {
+	if p.catalog != nil {
+		return p.catalog
+	}
+	return p.products
+}
+
+func (p *projector) close() {
+	if p.catalog != nil {
+		p.catalog.Close()
+	}
 }
 
 func (p *projector) subscribe() (*nats.Subscription, bool, error) {
@@ -200,10 +231,10 @@ func (p *projector) run(subscription *nats.Subscription, stop <-chan struct{}) {
 }
 
 type projectionMessage struct {
-	message       *nats.Msg
-	correlationID string
-	messageID     string
-	publishedAt   time.Time
+	message     *nats.Msg
+	envelope    *commonv1.MessageEnvelope
+	decodeErr   error
+	publishedAt time.Time
 }
 
 func (p *projector) applyStream(messages <-chan *nats.Msg) {
@@ -222,8 +253,12 @@ func (p *projector) applyStream(messages <-chan *nats.Msg) {
 		}(lane)
 	}
 
+	debug := slog.Default().Enabled(context.Background(), slog.LevelDebug)
 	received := 0
-	groups := make(map[string]struct{})
+	var groups map[string]struct{}
+	if debug {
+		groups = make(map[string]struct{})
+	}
 	for message := range messages {
 		if !projectionHandlesSubject(message.Subject) {
 			if err := message.Ack(); err != nil {
@@ -231,44 +266,58 @@ func (p *projector) applyStream(messages <-chan *nats.Msg) {
 			}
 			continue
 		}
-		correlationID, messageID := projectionMessageContext(message.Data)
-		// Stateless handlers intentionally retain a causal occurrence time in
-		// result envelopes. JetStream's stored timestamp is immutable too, and
-		// unlike the causal time includes time spent waiting in upstream queues.
-		publishedAt := time.Now().UTC()
-		if metadata, err := message.Metadata(); err == nil && !metadata.Timestamp.IsZero() {
-			publishedAt = metadata.Timestamp.UTC()
-		}
-		item := projectionMessage{
-			message: message, correlationID: correlationID, messageID: messageID, publishedAt: publishedAt,
-		}
+		item := decodeProjectionMessage(message)
+		group := projectionMessageGroup(item.envelope)
 		received++
-		groups[correlationID] = struct{}{}
-		lanes[projectionMessageLane(correlationID, len(lanes))] <- item
+		if debug {
+			groups[group] = struct{}{}
+		}
+		lanes[projectionMessageLane(group, len(lanes))] <- item
 	}
 	for _, lane := range lanes {
 		close(lane)
 	}
 	running.Wait()
-	if received != 0 {
+	if debug && received != 0 {
 		slog.Debug("NATS projection batch received", "message_kind", "event",
 			"messages", received, "correlation_groups", len(groups))
 	}
 }
 
+func decodeProjectionMessage(message *nats.Msg) projectionMessage {
+	envelope := &commonv1.MessageEnvelope{}
+	decodeErr := proto.Unmarshal(message.Data, envelope)
+	// Stateless handlers intentionally retain a causal occurrence time in
+	// result envelopes. JetStream's stored timestamp is immutable too, and
+	// unlike the causal time includes time spent waiting in upstream queues.
+	publishedAt := time.Now().UTC()
+	if metadata, err := message.Metadata(); err == nil && !metadata.Timestamp.IsZero() {
+		publishedAt = metadata.Timestamp.UTC()
+	}
+	return projectionMessage{
+		message: message, envelope: envelope, decodeErr: decodeErr, publishedAt: publishedAt,
+	}
+}
+
 func (p *projector) applyMessage(item projectionMessage) {
-	if err := p.apply(item.message.Subject, item.message.Data, item.publishedAt); err != nil {
+	err := item.decodeErr
+	if err == nil {
+		err = p.applyEnvelope(item.message.Subject, item.envelope, item.publishedAt)
+	}
+	if err != nil {
+		correlationID, messageID := projectionMessageContext(item.envelope)
 		log.Printf("projection event processing failed topic=%q message_id=%q correlation_id=%q error=%v",
-			item.message.Subject, item.messageID, item.correlationID, err)
+			item.message.Subject, messageID, correlationID, err)
 		if nakErr := item.message.NakWithDelay(time.Second); nakErr != nil {
 			log.Printf("projection event NAK failed topic=%q message_id=%q correlation_id=%q error=%v",
-				item.message.Subject, item.messageID, item.correlationID, nakErr)
+				item.message.Subject, messageID, correlationID, nakErr)
 		}
 		return
 	}
 	if err := item.message.Ack(); err != nil {
+		correlationID, messageID := projectionMessageContext(item.envelope)
 		log.Printf("projection event acknowledgement failed topic=%q message_id=%q correlation_id=%q error=%v",
-			item.message.Subject, item.messageID, item.correlationID, err)
+			item.message.Subject, messageID, correlationID, err)
 	}
 }
 
@@ -321,9 +370,15 @@ func projectionHandlesSubject(subject string) bool {
 		strings.HasPrefix(subject, "boutique.evt.order.")
 }
 
-func projectionMessageContext(data []byte) (string, string) {
-	envelope := &commonv1.MessageEnvelope{}
-	if err := proto.Unmarshal(data, envelope); err != nil {
+func projectionMessageGroup(envelope *commonv1.MessageEnvelope) string {
+	if envelope == nil || envelope.CorrelationId == "" {
+		return "unknown"
+	}
+	return envelope.CorrelationId
+}
+
+func projectionMessageContext(envelope *commonv1.MessageEnvelope) (string, string) {
+	if envelope == nil {
 		return "unknown", "unknown"
 	}
 	correlationID := envelope.CorrelationId
@@ -341,6 +396,17 @@ func (p *projector) apply(subject string, data []byte, publishedAt time.Time) er
 	envelope := &commonv1.MessageEnvelope{}
 	if err := proto.Unmarshal(data, envelope); err != nil {
 		return fmt.Errorf("decode envelope: %w", err)
+	}
+	return p.applyEnvelope(subject, envelope, publishedAt)
+}
+
+func (p *projector) applyEnvelope(
+	subject string,
+	envelope *commonv1.MessageEnvelope,
+	publishedAt time.Time,
+) error {
+	if envelope == nil {
+		return fmt.Errorf("decode envelope: empty envelope")
 	}
 	if envelope.SchemaVersion != 1 || envelope.Data == nil {
 		return fmt.Errorf("unsupported or empty envelope")

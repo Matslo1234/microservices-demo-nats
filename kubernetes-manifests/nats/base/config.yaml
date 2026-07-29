@@ -97,7 +97,7 @@ data:
             user: "storefrontprojectionservice", password: $STOREFRONTPROJECTIONSERVICE_PASSWORD,
             permissions: {
               publish: [
-                "$JS.API.>", "$JS.ACK.>", "_INBOX.>",
+                "$JS.API.>", "$JS.ACK.>", "$JS.FC.>", "_INBOX.>",
                 "$KV.STOREFRONT_PRODUCTS.>", "$KV.STOREFRONT_CARTS.>",
                 "$KV.STOREFRONT_CONTEXT.>", "$KV.STOREFRONT_ORDERS.>",
                 "$KV.STOREFRONT_OPERATIONS.>", "$KV.STOREFRONT_ASSISTANT.>"

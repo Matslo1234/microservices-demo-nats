@@ -4,6 +4,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -77,6 +78,7 @@ func (p *projector) registerQueries(nc *nats.Conn) (micro.Service, int, error) {
 	if err != nil {
 		return nil, 0, fmt.Errorf("register NATS service: %w", err)
 	}
+	debugQueries := slog.Default().Enabled(context.Background(), slog.LevelDebug)
 
 	handlers := map[string]queryHandler{
 		"home":         p.homeQuery,
@@ -100,10 +102,12 @@ func (p *projector) registerQueries(nc *nats.Conn) (micro.Service, int, error) {
 			if correlationID == "" {
 				correlationID = "unknown"
 			}
-			slog.Debug("NATS query received",
-				"topic", subject,
-				"message_kind", "query",
-				"correlation_id", correlationID)
+			if debugQueries {
+				slog.Debug("NATS query received",
+					"topic", subject,
+					"message_kind", "query",
+					"correlation_id", correlationID)
+			}
 			if decodeErr != nil {
 				respondErr := request.RespondJSON(queryResponse{Error: "INVALID_QUERY"})
 				log.Printf("storefront query processing failed topic=%q correlation_id=%q error_code=%q error=%v response_error=%v",
@@ -183,7 +187,7 @@ func (p *projector) homeQuery(request queryRequest) (queryResponse, error) {
 	}
 	response := queryResponse{
 		Currencies: rates.SupportedCurrencies(), RateRevision: rates.RateRevision,
-		UpdatedAt: rates.UpdatedAt,
+		UpdatedAt: rates.UpdatedAt, Products: make([]localizedProduct, 0, len(products)),
 	}
 	for _, product := range products {
 		localized, err := localizeProduct(product.Product, rates, request.CurrencyCode)
@@ -205,7 +209,7 @@ func (p *projector) homeQuery(request queryRequest) (queryResponse, error) {
 }
 
 func (p *projector) productQuery(request queryRequest) (queryResponse, error) {
-	product, productRevision, err := getJSONWithRevision[storefront.ProductView](p.products, storefront.ProductKey(request.ProductID))
+	product, productRevision, err := getJSONWithRevision[storefront.ProductView](p.catalogReader(), storefront.ProductKey(request.ProductID))
 	if err != nil || product.Removed {
 		if err == nil {
 			err = nats.ErrKeyNotFound
@@ -248,9 +252,10 @@ func (p *projector) cartQuery(request queryRequest) (queryResponse, error) {
 	response := queryResponse{
 		Currencies: rates.SupportedCurrencies(), CartVersion: cart.Cart.GetCartVersion(),
 		RateRevision: rates.RateRevision, UpdatedAt: latest(rates.UpdatedAt, cart.UpdatedAt),
+		Items: make([]cartItemView, 0, len(cart.Cart.GetItems())),
 	}
 	for _, line := range cart.Cart.GetItems() {
-		product, productRevision, err := getJSONWithRevision[storefront.ProductView](p.products, storefront.ProductKey(line.ProductId))
+		product, productRevision, err := getJSONWithRevision[storefront.ProductView](p.catalogReader(), storefront.ProductKey(line.ProductId))
 		if err != nil {
 			return queryResponse{}, fmt.Errorf("cart product %s is unavailable: %w", line.ProductId, err)
 		}
@@ -307,7 +312,7 @@ func (p *projector) productMetaQuery(request queryRequest) (queryResponse, error
 	if len(products) == 0 {
 		return queryResponse{}, nats.ErrKeyNotFound
 	}
-	response := queryResponse{}
+	response := queryResponse{ProductMeta: make([]*hipstershop.Product, 0, len(products))}
 	for _, product := range products {
 		response.ProductMeta = append(response.ProductMeta, legacyProduct(product.Product))
 		response.CatalogRevision = max(response.CatalogRevision, product.CatalogRevision)
@@ -317,7 +322,7 @@ func (p *projector) productMetaQuery(request queryRequest) (queryResponse, error
 }
 
 func (p *projector) currencyView(currencyCode string) (*storefront.CurrencyView, error) {
-	rates, revision, err := getJSONWithRevision[storefront.CurrencyView](p.products, storefront.CurrencyKey)
+	rates, revision, err := getJSONWithRevision[storefront.CurrencyView](p.catalogReader(), storefront.CurrencyKey)
 	if err != nil {
 		return nil, err
 	}
@@ -355,12 +360,12 @@ func (p *projector) currentRecommendations(sessionID, excludedProductID string, 
 		return nil
 	}
 	p.observeQueryRevision(revision)
-	var products []*hipstershop.Product
+	products := make([]*hipstershop.Product, 0, min(4, len(view.ProductIDs)))
 	for _, id := range view.ProductIDs {
 		if id == excludedProductID {
 			continue
 		}
-		product, revision, err := getJSONWithRevision[storefront.ProductView](p.products, storefront.ProductKey(id))
+		product, revision, err := getJSONWithRevision[storefront.ProductView](p.catalogReader(), storefront.ProductKey(id))
 		if err == nil && !product.Removed {
 			p.observeQueryRevision(revision)
 			products = append(products, legacyProduct(product.Product))
@@ -451,14 +456,15 @@ func (p *projector) allProducts(only []string) ([]storefront.ProductView, error)
 	for _, id := range only {
 		wanted[id] = true
 	}
-	keys, err := p.products.Keys()
+	reader := p.catalogReader()
+	keys, err := reader.Keys()
 	if errors.Is(err, nats.ErrNoKeysFound) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	var products []storefront.ProductView
+	products := make([]storefront.ProductView, 0, len(keys))
 	for _, key := range keys {
 		if !strings.HasPrefix(key, "product.") {
 			continue
@@ -467,7 +473,7 @@ func (p *projector) allProducts(only []string) ([]storefront.ProductView, error)
 		if len(wanted) > 0 && !wanted[id] {
 			continue
 		}
-		product, revision, err := getJSONWithRevision[storefront.ProductView](p.products, key)
+		product, revision, err := getJSONWithRevision[storefront.ProductView](reader, key)
 		if errors.Is(err, nats.ErrKeyNotFound) {
 			continue
 		}
@@ -483,12 +489,12 @@ func (p *projector) allProducts(only []string) ([]storefront.ProductView, error)
 	return products, nil
 }
 
-func getJSON[T any](bucket projectionKV, key string) (*T, error) {
+func getJSON[T any](bucket projectionReader, key string) (*T, error) {
 	value, _, err := getJSONWithRevision[T](bucket, key)
 	return value, err
 }
 
-func getJSONWithRevision[T any](bucket projectionKV, key string) (*T, uint64, error) {
+func getJSONWithRevision[T any](bucket projectionReader, key string) (*T, uint64, error) {
 	entry, err := bucket.Get(key)
 	if err != nil {
 		return nil, 0, err

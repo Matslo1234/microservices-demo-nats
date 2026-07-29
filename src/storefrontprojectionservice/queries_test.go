@@ -154,3 +154,56 @@ func TestCartQueryReadsLatestAuthoritativeKVView(t *testing.T) {
 		t.Fatalf("cart query did not read latest authoritative KV: cart=%#v error=%v", cart, err)
 	}
 }
+
+func TestCartQueryUsesSynchronizedCatalogCache(t *testing.T) {
+	products := newMemoryKV()
+	storeJSON(t, products, storefront.CurrencyKey, storefront.CurrencyView{
+		BaseCurrencyCode: "USD",
+		Rates:            []storefront.Rate{{CurrencyCode: "USD", UnitsPerBase: 1}},
+		RateRevision:     1,
+	})
+	storeJSON(t, products, storefront.ProductKey("sku"), storefront.ProductView{
+		Product: &commonv1.ProductSnapshot{
+			ProductId: "sku",
+			Name:      "cached product",
+			PriceUsd:  &commonv1.Money{CurrencyCode: "USD", Units: 10},
+		},
+		CatalogRevision: 1,
+	})
+	cache, err := newProjectionReadCache(products)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(cache.Close)
+
+	carts, context := newMemoryKV(), newMemoryKV()
+	storeJSON(t, carts, "user-1", storefront.CartView{
+		Cart: &commonv1.CartSnapshot{
+			UserId:      "user-1",
+			CartVersion: 1,
+			Items: []*commonv1.CartLine{
+				{ProductId: "sku", Quantity: 1},
+			},
+		},
+	})
+	projector := &projector{
+		products: products,
+		catalog:  cache,
+		carts:    carts,
+		context:  context,
+	}
+	products.resetGetCount()
+
+	response, err := projector.cartQuery(queryRequest{
+		UserID: "user-1", CurrencyCode: "USD",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Items) != 1 || response.Items[0].Item.Name != "cached product" {
+		t.Fatalf("unexpected cart response: %#v", response)
+	}
+	if gets := products.getCount(); gets != 0 {
+		t.Fatalf("cart query performed %d authoritative product KV reads", gets)
+	}
+}
