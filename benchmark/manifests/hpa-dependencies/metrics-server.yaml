@@ -139,6 +139,10 @@ spec:
         - --secure-port=10250
         - --kubelet-preferred-address-types=InternalIP,ExternalIP,Hostname
         - --kubelet-use-node-status-port
+        # Benchmark clusters commonly use kubelet serving certificates without
+        # address SANs. This bundle is intentionally self-contained, so accept
+        # those certificates instead of requiring host-specific PKI changes.
+        - --kubelet-insecure-tls
         - --metric-resolution=15s
         image: registry.k8s.io/metrics-server/metrics-server:v0.9.0
         imagePullPolicy: IfNotPresent

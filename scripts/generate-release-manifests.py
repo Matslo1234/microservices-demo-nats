@@ -125,14 +125,21 @@ def main() -> None:
         FOOTER,
     )
     nats = render("kubernetes-manifests/nats/fresh-cluster")
-    metrics_server = render("benchmark/manifests/metrics-server")
+    hpa_application = render("benchmark/manifests/hpa-application")
+    hpa_dependencies = render("benchmark/manifests/hpa-dependencies")
     single_replica_application = render(
         "benchmark/manifests/single-replica",
         allow_external_resources=True,
     )
     single_replica_benchmark = nats + "---\n" + single_replica_application
     benchmark = nats + "---\n" + application
-    hpa_benchmark = benchmark + "---\n" + metrics_server
+    hpa_benchmark = (
+        nats
+        + "---\n"
+        + hpa_application
+        + "---\n"
+        + hpa_dependencies
+    )
     benchmark_variants = {
         "benchmark-nats-single-replica.yaml": (
             "Self-contained stateless NATS single-replica benchmark "
@@ -149,9 +156,11 @@ def main() -> None:
             "Self-contained stateless NATS autoscaling benchmark environment.",
             (
                 "The application Deployments start with multiple rolling replicas and are",
-                "governed by Phase 6 HPAs and disruption budgets. Benchmark workloads run as",
-                "disposable Jobs; run state and artifacts are held in replicated JetStream",
-                "KV/Object Store buckets.",
+                "governed by CPU and JetStream-lag HPAs. The bundle includes metrics-server,",
+                "a benchmark Prometheus, recording rules, and Prometheus Adapter, so no",
+                "cluster monitoring stack is required. Benchmark workloads run as disposable",
+                "Jobs; run state and artifacts are held in replicated JetStream KV/Object Store",
+                "buckets.",
             ),
             hpa_benchmark,
         ),

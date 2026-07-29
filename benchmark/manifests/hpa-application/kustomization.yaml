@@ -1,0 +1,225 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- ../../../kubernetes-manifests
+
+# The general release HPAs may use metrics supplied by a cluster-wide adapter.
+# This self-contained benchmark overlay keeps only signals produced by the
+# dependencies bundled in benchmark-nats-hpa.yaml: resource CPU for every
+# workload and JetStream consumer lag for services that own durable consumers.
+patches:
+- target:
+    group: autoscaling
+    version: v2
+    kind: HorizontalPodAutoscaler
+    name: benchmarkservice|currencyservice|frontend|productcatalogservice
+  patch: |-
+    - op: replace
+      path: /spec/metrics
+      value:
+      - type: Resource
+        resource:
+          name: cpu
+          target:
+            type: Utilization
+            averageUtilization: 70
+- target:
+    group: autoscaling
+    version: v2
+    kind: HorizontalPodAutoscaler
+    name: adservice
+  patch: |-
+    - op: replace
+      path: /spec/metrics
+      value:
+      - type: Resource
+        resource:
+          name: cpu
+          target:
+            type: Utilization
+            averageUtilization: 70
+      - type: External
+        external:
+          metric:
+            name: boutique_jetstream_consumer_pending
+            selector:
+              matchLabels:
+                service: adservice
+          target:
+            type: AverageValue
+            averageValue: "25"
+- target:
+    group: autoscaling
+    version: v2
+    kind: HorizontalPodAutoscaler
+    name: cartservice
+  patch: |-
+    - op: replace
+      path: /spec/metrics
+      value:
+      - type: Resource
+        resource:
+          name: cpu
+          target:
+            type: Utilization
+            averageUtilization: 70
+      - type: External
+        external:
+          metric:
+            name: boutique_jetstream_consumer_pending
+            selector:
+              matchLabels:
+                service: cartservice
+          target:
+            type: AverageValue
+            averageValue: "25"
+- target:
+    group: autoscaling
+    version: v2
+    kind: HorizontalPodAutoscaler
+    name: checkoutservice
+  patch: |-
+    - op: replace
+      path: /spec/metrics
+      value:
+      - type: Resource
+        resource:
+          name: cpu
+          target:
+            type: Utilization
+            averageUtilization: 70
+      - type: External
+        external:
+          metric:
+            name: boutique_jetstream_consumer_pending
+            selector:
+              matchLabels:
+                service: checkoutservice
+          target:
+            type: AverageValue
+            averageValue: "25"
+- target:
+    group: autoscaling
+    version: v2
+    kind: HorizontalPodAutoscaler
+    name: emailservice
+  patch: |-
+    - op: replace
+      path: /spec/metrics
+      value:
+      - type: Resource
+        resource:
+          name: cpu
+          target:
+            type: Utilization
+            averageUtilization: 70
+      - type: External
+        external:
+          metric:
+            name: boutique_jetstream_consumer_pending
+            selector:
+              matchLabels:
+                service: emailservice
+          target:
+            type: AverageValue
+            averageValue: "25"
+- target:
+    group: autoscaling
+    version: v2
+    kind: HorizontalPodAutoscaler
+    name: paymentservice
+  patch: |-
+    - op: replace
+      path: /spec/metrics
+      value:
+      - type: Resource
+        resource:
+          name: cpu
+          target:
+            type: Utilization
+            averageUtilization: 70
+      - type: External
+        external:
+          metric:
+            name: boutique_jetstream_consumer_pending
+            selector:
+              matchLabels:
+                service: paymentservice
+          target:
+            type: AverageValue
+            averageValue: "25"
+- target:
+    group: autoscaling
+    version: v2
+    kind: HorizontalPodAutoscaler
+    name: recommendationservice
+  patch: |-
+    - op: replace
+      path: /spec/metrics
+      value:
+      - type: Resource
+        resource:
+          name: cpu
+          target:
+            type: Utilization
+            averageUtilization: 70
+      - type: External
+        external:
+          metric:
+            name: boutique_jetstream_consumer_pending
+            selector:
+              matchLabels:
+                service: recommendationservice
+          target:
+            type: AverageValue
+            averageValue: "25"
+- target:
+    group: autoscaling
+    version: v2
+    kind: HorizontalPodAutoscaler
+    name: shippingservice
+  patch: |-
+    - op: replace
+      path: /spec/metrics
+      value:
+      - type: Resource
+        resource:
+          name: cpu
+          target:
+            type: Utilization
+            averageUtilization: 70
+      - type: External
+        external:
+          metric:
+            name: boutique_jetstream_consumer_pending
+            selector:
+              matchLabels:
+                service: shippingservice
+          target:
+            type: AverageValue
+            averageValue: "25"
+- target:
+    group: autoscaling
+    version: v2
+    kind: HorizontalPodAutoscaler
+    name: storefrontprojectionservice
+  patch: |-
+    - op: replace
+      path: /spec/metrics
+      value:
+      - type: Resource
+        resource:
+          name: cpu
+          target:
+            type: Utilization
+            averageUtilization: 70
+      - type: External
+        external:
+          metric:
+            name: boutique_jetstream_consumer_pending
+            selector:
+              matchLabels:
+                service: storefrontprojectionservice
+          target:
+            type: AverageValue
+            averageValue: "25"

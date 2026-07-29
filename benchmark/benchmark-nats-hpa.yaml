@@ -12,9 +12,11 @@
 #   kubectl apply -f <this-file>
 #
 # The application Deployments start with multiple rolling replicas and are
-# governed by Phase 6 HPAs and disruption budgets. Benchmark workloads run as
-# disposable Jobs; run state and artifacts are held in replicated JetStream
-# KV/Object Store buckets.
+# governed by CPU and JetStream-lag HPAs. The bundle includes metrics-server,
+# a benchmark Prometheus, recording rules, and Prometheus Adapter, so no
+# cluster monitoring stack is required. Benchmark workloads run as disposable
+# Jobs; run state and artifacts are held in replicated JetStream KV/Object Store
+# buckets.
 ---
 apiVersion: v1
 kind: Namespace
@@ -4003,16 +4005,6 @@ spec:
         averageUtilization: 70
         type: Utilization
     type: Resource
-  - external:
-      metric:
-        name: boutique_http_in_flight
-        selector:
-          matchLabels:
-            service: benchmarkservice
-      target:
-        averageValue: "20"
-        type: AverageValue
-    type: External
   minReplicas: 2
   scaleTargetRef:
     apiVersion: apps/v1
@@ -4040,16 +4032,6 @@ spec:
             service: cartservice
       target:
         averageValue: "25"
-        type: AverageValue
-    type: External
-  - external:
-      metric:
-        name: boutique_handler_p95_latency_seconds
-        selector:
-          matchLabels:
-            service: cartservice
-      target:
-        averageValue: "1"
         type: AverageValue
     type: External
   minReplicas: 2
@@ -4081,16 +4063,6 @@ spec:
         averageValue: "25"
         type: AverageValue
     type: External
-  - external:
-      metric:
-        name: boutique_handler_p95_latency_seconds
-        selector:
-          matchLabels:
-            service: checkoutservice
-      target:
-        averageValue: "1"
-        type: AverageValue
-    type: External
   minReplicas: 2
   scaleTargetRef:
     apiVersion: apps/v1
@@ -4110,16 +4082,6 @@ spec:
         averageUtilization: 70
         type: Utilization
     type: Resource
-  - external:
-      metric:
-        name: boutique_jetstream_consumer_pending
-        selector:
-          matchLabels:
-            service: currencyservice
-      target:
-        averageValue: "25"
-        type: AverageValue
-    type: External
   minReplicas: 2
   scaleTargetRef:
     apiVersion: apps/v1
@@ -4168,26 +4130,6 @@ spec:
         averageUtilization: 70
         type: Utilization
     type: Resource
-  - external:
-      metric:
-        name: boutique_http_in_flight
-        selector:
-          matchLabels:
-            service: frontend
-      target:
-        averageValue: "20"
-        type: AverageValue
-    type: External
-  - external:
-      metric:
-        name: boutique_http_p95_latency_seconds
-        selector:
-          matchLabels:
-            service: frontend
-      target:
-        averageValue: "1"
-        type: AverageValue
-    type: External
   minReplicas: 2
   scaleTargetRef:
     apiVersion: apps/v1
@@ -4236,16 +4178,6 @@ spec:
         averageUtilization: 70
         type: Utilization
     type: Resource
-  - external:
-      metric:
-        name: boutique_jetstream_consumer_pending
-        selector:
-          matchLabels:
-            service: productcatalogservice
-      target:
-        averageValue: "25"
-        type: AverageValue
-    type: External
   minReplicas: 2
   scaleTargetRef:
     apiVersion: apps/v1
@@ -4331,16 +4263,6 @@ spec:
             service: storefrontprojectionservice
       target:
         averageValue: "25"
-        type: AverageValue
-    type: External
-  - external:
-      metric:
-        name: boutique_http_in_flight
-        selector:
-          matchLabels:
-            service: storefrontprojectionservice
-      target:
-        averageValue: "20"
         type: AverageValue
     type: External
   minReplicas: 2
@@ -4930,12 +4852,87 @@ spec:
   - Egress
 ---
 apiVersion: v1
+kind: Namespace
+metadata:
+  labels:
+    app.kubernetes.io/name: observability
+    app.kubernetes.io/part-of: online-boutique
+    observability.online-boutique.io/enabled: "true"
+  name: observability
+---
+apiVersion: v1
 kind: ServiceAccount
 metadata:
   labels:
     k8s-app: metrics-server
   name: metrics-server
   namespace: kube-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  labels:
+    app.kubernetes.io/component: autoscaling-metrics
+    app.kubernetes.io/name: benchmark-prometheus
+    app.kubernetes.io/part-of: online-boutique
+  name: benchmark-prometheus
+  namespace: observability
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  labels:
+    app.kubernetes.io/component: autoscaling-metrics
+    app.kubernetes.io/name: benchmark-prometheus-adapter
+    app.kubernetes.io/part-of: online-boutique
+  name: benchmark-prometheus-adapter
+  namespace: observability
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/component: autoscaling-metrics
+    app.kubernetes.io/name: benchmark-prometheus
+    app.kubernetes.io/part-of: online-boutique
+  name: online-boutique-benchmark-prometheus
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  - services
+  - endpoints
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - discovery.k8s.io
+  resources:
+  - endpointslices
+  verbs:
+  - get
+  - list
+  - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/component: autoscaling-metrics
+    app.kubernetes.io/name: benchmark-prometheus-adapter
+    app.kubernetes.io/part-of: online-boutique
+  name: online-boutique-benchmark-prometheus-adapter
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - namespaces
+  verbs:
+  - get
+  - list
+  - watch
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -4997,6 +4994,24 @@ subjects:
   namespace: kube-system
 ---
 apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/component: autoscaling-metrics
+    app.kubernetes.io/name: benchmark-prometheus-adapter
+    app.kubernetes.io/part-of: online-boutique
+  name: online-boutique-benchmark-prometheus-adapter-auth-reader
+  namespace: kube-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: extension-apiserver-authentication-reader
+subjects:
+- kind: ServiceAccount
+  name: benchmark-prometheus-adapter
+  namespace: observability
+---
+apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
   labels:
@@ -5015,6 +5030,57 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
   labels:
+    app.kubernetes.io/component: autoscaling-metrics
+    app.kubernetes.io/name: benchmark-prometheus
+    app.kubernetes.io/part-of: online-boutique
+  name: online-boutique-benchmark-prometheus
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: online-boutique-benchmark-prometheus
+subjects:
+- kind: ServiceAccount
+  name: benchmark-prometheus
+  namespace: observability
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/component: autoscaling-metrics
+    app.kubernetes.io/name: benchmark-prometheus-adapter
+    app.kubernetes.io/part-of: online-boutique
+  name: online-boutique-benchmark-prometheus-adapter
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: online-boutique-benchmark-prometheus-adapter
+subjects:
+- kind: ServiceAccount
+  name: benchmark-prometheus-adapter
+  namespace: observability
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/component: autoscaling-metrics
+    app.kubernetes.io/name: benchmark-prometheus-adapter
+    app.kubernetes.io/part-of: online-boutique
+  name: online-boutique-benchmark-prometheus-adapter-auth-delegator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:auth-delegator
+subjects:
+- kind: ServiceAccount
+  name: benchmark-prometheus-adapter
+  namespace: observability
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  labels:
     k8s-app: metrics-server
   name: system:metrics-server
 roleRef:
@@ -5025,6 +5091,168 @@ subjects:
 - kind: ServiceAccount
   name: metrics-server
   namespace: kube-system
+---
+apiVersion: v1
+data:
+  config.yaml: |
+    rules: []
+    externalRules:
+    - seriesQuery: 'boutique_jetstream_consumer_pending{namespace!="",service!=""}'
+      resources:
+        overrides:
+          namespace:
+            resource: namespace
+      name:
+        matches: "^boutique_jetstream_consumer_pending$"
+        as: "boutique_jetstream_consumer_pending"
+      metricsQuery: 'max(<<.Series>>{<<.LabelMatchers>>}) by (namespace, service)'
+kind: ConfigMap
+metadata:
+  labels:
+    app.kubernetes.io/component: autoscaling-metrics
+    app.kubernetes.io/name: benchmark-prometheus-adapter
+    app.kubernetes.io/part-of: online-boutique
+  name: benchmark-prometheus-adapter
+  namespace: observability
+---
+apiVersion: v1
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 5s
+      evaluation_interval: 5s
+      external_labels:
+        cluster: online-boutique-benchmark
+
+    rule_files:
+    - /etc/prometheus/rules/*.yaml
+
+    scrape_configs:
+    - job_name: kubernetes-pods
+      kubernetes_sd_configs:
+      - role: pod
+      relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+        action: keep
+        regex: "true"
+      - source_labels: [__meta_kubernetes_pod_phase]
+        action: drop
+        regex: Succeeded|Failed
+      - source_labels: [__meta_kubernetes_namespace]
+        action: drop
+        regex: nats
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+        action: replace
+        target_label: __metrics_path__
+        regex: (.+)
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scheme]
+        action: replace
+        target_label: __scheme__
+        regex: (https?)
+      - source_labels:
+        - __address__
+        - __meta_kubernetes_pod_annotation_prometheus_io_port
+        action: replace
+        target_label: __address__
+        regex: ([^:]+)(?::\d+)?;(\d+)
+        replacement: $1:$2
+      - source_labels: [__meta_kubernetes_namespace]
+        action: replace
+        target_label: namespace
+      - source_labels: [__meta_kubernetes_pod_name]
+        action: replace
+        target_label: pod
+      - source_labels: [__meta_kubernetes_pod_label_app]
+        action: replace
+        target_label: service
+        regex: (.+)
+
+    - job_name: nats
+      kubernetes_sd_configs:
+      - role: endpoints
+      relabel_configs:
+      - source_labels: [__meta_kubernetes_namespace]
+        action: keep
+        regex: nats
+      - source_labels: [__meta_kubernetes_service_name]
+        action: keep
+        regex: nats-metrics
+      - source_labels: [__meta_kubernetes_endpoint_port_name]
+        action: keep
+        regex: metrics
+      - source_labels: [__meta_kubernetes_namespace]
+        action: replace
+        target_label: exporter_namespace
+      - source_labels: [__meta_kubernetes_pod_name]
+        action: replace
+        target_label: exporter_pod
+kind: ConfigMap
+metadata:
+  labels:
+    app.kubernetes.io/component: autoscaling-metrics
+    app.kubernetes.io/name: benchmark-prometheus
+    app.kubernetes.io/part-of: online-boutique
+  name: benchmark-prometheus-config
+  namespace: observability
+---
+apiVersion: v1
+data:
+  autoscaling.rules.yaml: |
+    groups:
+    - name: online-boutique-autoscaling
+      interval: 5s
+      rules:
+      # Each expression keeps only the authoritative JetStream consumer leader
+      # sample. Static service/namespace labels make the resulting metric
+      # directly selectable by autoscaling/v2 external metric selectors.
+      - record: boutique_jetstream_consumer_pending
+        expr: max(jetstream_consumer_num_pending{account="BOUTIQUE",consumer_name="ad-page-views-v1",is_consumer_leader="true"})
+        labels:
+          namespace: default
+          service: adservice
+      - record: boutique_jetstream_consumer_pending
+        expr: max(jetstream_consumer_num_pending{account="BOUTIQUE",consumer_name="cart-commands-v1",is_consumer_leader="true"})
+        labels:
+          namespace: default
+          service: cartservice
+      - record: boutique_jetstream_consumer_pending
+        expr: sum(max by (consumer_name) (jetstream_consumer_num_pending{account="BOUTIQUE",consumer_name=~"checkout-(cart|catalog|currency|order-commands|saga-payment|saga-shipping)-v1",is_consumer_leader="true"}))
+        labels:
+          namespace: default
+          service: checkoutservice
+      - record: boutique_jetstream_consumer_pending
+        expr: max(jetstream_consumer_num_pending{account="BOUTIQUE",consumer_name="email-order-completed-v1",is_consumer_leader="true"})
+        labels:
+          namespace: default
+          service: emailservice
+      - record: boutique_jetstream_consumer_pending
+        expr: max(jetstream_consumer_num_pending{account="BOUTIQUE",consumer_name="payment-commands-v1",is_consumer_leader="true"})
+        labels:
+          namespace: default
+          service: paymentservice
+      - record: boutique_jetstream_consumer_pending
+        expr: sum(max by (consumer_name) (jetstream_consumer_num_pending{account="BOUTIQUE",consumer_name=~"recommendation-(catalog|cart|page-views)-v1",is_consumer_leader="true"}))
+        labels:
+          namespace: default
+          service: recommendationservice
+      - record: boutique_jetstream_consumer_pending
+        expr: sum(max by (consumer_name) (jetstream_consumer_num_pending{account="BOUTIQUE",consumer_name=~"shipping-(cart-quotes|commands)-v1",is_consumer_leader="true"}))
+        labels:
+          namespace: default
+          service: shippingservice
+      - record: boutique_jetstream_consumer_pending
+        expr: max(jetstream_consumer_num_pending{account="BOUTIQUE",consumer_name="storefront-projection-v1",is_consumer_leader="true"})
+        labels:
+          namespace: default
+          service: storefrontprojectionservice
+kind: ConfigMap
+metadata:
+  labels:
+    app.kubernetes.io/component: autoscaling-metrics
+    app.kubernetes.io/name: benchmark-prometheus
+    app.kubernetes.io/part-of: online-boutique
+  name: benchmark-prometheus-rules
+  namespace: observability
 ---
 apiVersion: v1
 kind: Service
@@ -5042,6 +5270,40 @@ spec:
     targetPort: https
   selector:
     k8s-app: metrics-server
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app.kubernetes.io/component: autoscaling-metrics
+    app.kubernetes.io/name: benchmark-prometheus
+    app.kubernetes.io/part-of: online-boutique
+  name: benchmark-prometheus
+  namespace: observability
+spec:
+  ports:
+  - name: http
+    port: 9090
+    targetPort: http
+  selector:
+    app.kubernetes.io/name: benchmark-prometheus
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app.kubernetes.io/component: autoscaling-metrics
+    app.kubernetes.io/name: benchmark-prometheus-adapter
+    app.kubernetes.io/part-of: online-boutique
+  name: benchmark-prometheus-adapter
+  namespace: observability
+spec:
+  ports:
+  - name: https
+    port: 443
+    targetPort: https
+  selector:
+    app.kubernetes.io/name: benchmark-prometheus-adapter
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -5068,6 +5330,7 @@ spec:
         - --secure-port=10250
         - --kubelet-preferred-address-types=InternalIP,ExternalIP,Hostname
         - --kubelet-use-node-status-port
+        - --kubelet-insecure-tls
         - --metric-resolution=15s
         image: registry.k8s.io/metrics-server/metrics-server:v0.9.0
         imagePullPolicy: IfNotPresent
@@ -5116,6 +5379,202 @@ spec:
       - emptyDir: {}
         name: tmp-dir
 ---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/component: autoscaling-metrics
+    app.kubernetes.io/name: benchmark-prometheus
+    app.kubernetes.io/part-of: online-boutique
+  name: benchmark-prometheus
+  namespace: observability
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: benchmark-prometheus
+  strategy:
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: autoscaling-metrics
+        app.kubernetes.io/name: benchmark-prometheus
+        app.kubernetes.io/part-of: online-boutique
+    spec:
+      containers:
+      - args:
+        - --config.file=/etc/prometheus/prometheus.yml
+        - --storage.tsdb.path=/prometheus
+        - --storage.tsdb.retention.time=2h
+        - --storage.tsdb.retention.size=1GB
+        image: prom/prometheus:v3.10.0-distroless
+        imagePullPolicy: IfNotPresent
+        livenessProbe:
+          httpGet:
+            path: /-/healthy
+            port: http
+          initialDelaySeconds: 15
+          periodSeconds: 15
+        name: prometheus
+        ports:
+        - containerPort: 9090
+          name: http
+        readinessProbe:
+          httpGet:
+            path: /-/ready
+            port: http
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        resources:
+          limits:
+            cpu: "1"
+            memory: 1Gi
+          requests:
+            cpu: 100m
+            memory: 256Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+        volumeMounts:
+        - mountPath: /etc/prometheus
+          name: config
+          readOnly: true
+        - mountPath: /etc/prometheus/rules
+          name: rules
+          readOnly: true
+        - mountPath: /prometheus
+          name: data
+      securityContext:
+        fsGroup: 65532
+        runAsGroup: 65532
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      serviceAccountName: benchmark-prometheus
+      volumes:
+      - configMap:
+          name: benchmark-prometheus-config
+        name: config
+      - configMap:
+          name: benchmark-prometheus-rules
+        name: rules
+      - emptyDir:
+          sizeLimit: 2Gi
+        name: data
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/component: autoscaling-metrics
+    app.kubernetes.io/name: benchmark-prometheus-adapter
+    app.kubernetes.io/part-of: online-boutique
+  name: benchmark-prometheus-adapter
+  namespace: observability
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: benchmark-prometheus-adapter
+  strategy:
+    rollingUpdate:
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: autoscaling-metrics
+        app.kubernetes.io/name: benchmark-prometheus-adapter
+        app.kubernetes.io/part-of: online-boutique
+    spec:
+      containers:
+      - args:
+        - --secure-port=6443
+        - --cert-dir=/var/run/serving-cert
+        - --prometheus-url=http://benchmark-prometheus.observability.svc:9090
+        - --metrics-relist-interval=15s
+        - --metrics-max-age=1m
+        - --config=/etc/adapter/config.yaml
+        - --v=4
+        image: registry.k8s.io/prometheus-adapter/prometheus-adapter:v0.12.0
+        imagePullPolicy: IfNotPresent
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: https
+            scheme: HTTPS
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        name: adapter
+        ports:
+        - containerPort: 6443
+          name: https
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: https
+            scheme: HTTPS
+          initialDelaySeconds: 10
+          periodSeconds: 5
+        resources:
+          limits:
+            cpu: 250m
+            memory: 256Mi
+          requests:
+            cpu: 50m
+            memory: 64Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 10001
+        volumeMounts:
+        - mountPath: /etc/adapter
+          name: config
+          readOnly: true
+        - mountPath: /var/run/serving-cert
+          name: serving-cert
+      securityContext:
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      serviceAccountName: benchmark-prometheus-adapter
+      volumes:
+      - configMap:
+          name: benchmark-prometheus-adapter
+        name: config
+      - emptyDir: {}
+        name: serving-cert
+---
+apiVersion: apiregistration.k8s.io/v1
+kind: APIService
+metadata:
+  labels:
+    app.kubernetes.io/component: autoscaling-metrics
+    app.kubernetes.io/name: benchmark-prometheus-adapter
+    app.kubernetes.io/part-of: online-boutique
+  name: v1beta1.external.metrics.k8s.io
+spec:
+  group: external.metrics.k8s.io
+  groupPriorityMinimum: 100
+  insecureSkipTLSVerify: true
+  service:
+    name: benchmark-prometheus-adapter
+    namespace: observability
+    port: 443
+  version: v1beta1
+  versionPriority: 100
+---
 apiVersion: apiregistration.k8s.io/v1
 kind: APIService
 metadata:
@@ -5131,3 +5590,113 @@ spec:
     namespace: kube-system
   version: v1beta1
   versionPriority: 100
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: autoscaling-metrics-dns-and-api
+  namespace: observability
+spec:
+  egress:
+  - ports:
+    - port: 53
+      protocol: UDP
+    - port: 53
+      protocol: TCP
+    to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+  - ports:
+    - port: 443
+      protocol: TCP
+    - port: 6443
+      protocol: TCP
+    to:
+    - ipBlock:
+        cidr: 0.0.0.0/0
+  podSelector: {}
+  policyTypes:
+  - Egress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: benchmark-prometheus-adapter
+  namespace: observability
+spec:
+  egress:
+  - ports:
+    - port: 9090
+      protocol: TCP
+    to:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/name: benchmark-prometheus
+  ingress:
+  - ports:
+    - port: 6443
+      protocol: TCP
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: benchmark-prometheus-adapter
+  policyTypes:
+  - Ingress
+  - Egress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: benchmark-prometheus-scrape
+  namespace: observability
+spec:
+  egress:
+  - ports:
+    - port: 8080
+      protocol: TCP
+    to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: default
+      podSelector:
+        matchExpressions:
+        - key: app
+          operator: Exists
+  - ports:
+    - port: 7777
+      protocol: TCP
+    to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: nats
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: nats
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/name: benchmark-prometheus-adapter
+    ports:
+    - port: 9090
+      protocol: TCP
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: benchmark-prometheus
+  policyTypes:
+  - Ingress
+  - Egress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: observability
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+  - Egress

@@ -341,21 +341,119 @@ def verify_release_manifests() -> None:
         else:
             require(content, "kind: HorizontalPodAutoscaler")
         if path.name == "benchmark-nats-hpa.yaml":
+            lag_scaled = {
+                "adservice",
+                "cartservice",
+                "checkoutservice",
+                "emailservice",
+                "paymentservice",
+                "recommendationservice",
+                "shippingservice",
+                "storefrontprojectionservice",
+            }
+            for application in APPLICATIONS:
+                hpa = document(
+                    content, "HorizontalPodAutoscaler", application
+                )
+                require(
+                    hpa,
+                    "type: Resource",
+                    "name: cpu",
+                    "averageUtilization: 70",
+                )
+                if application in lag_scaled:
+                    require(
+                        hpa,
+                        "type: External",
+                        "name: boutique_jetstream_consumer_pending",
+                        f"service: {application}",
+                    )
+                else:
+                    forbid(hpa, "type: External")
+            forbid(
+                content,
+                "boutique_http_in_flight",
+                "boutique_http_p95_latency_seconds",
+                "boutique_handler_p95_latency_seconds",
+            )
             metrics_server = document(content, "Deployment", "metrics-server")
             require(
                 metrics_server,
                 "image: registry.k8s.io/metrics-server/metrics-server:v0.9.0",
                 "namespace: kube-system",
+                "--kubelet-insecure-tls",
             )
             metrics_api = document(
                 content, "APIService", "v1beta1.metrics.k8s.io"
             )
             require(metrics_api, "group: metrics.k8s.io")
+            prometheus = document(
+                content, "Deployment", "benchmark-prometheus"
+            )
+            require(
+                prometheus,
+                "namespace: observability",
+                "image: prom/prometheus:v3.10.0-distroless",
+                "--storage.tsdb.retention.time=2h",
+            )
+            adapter = document(
+                content, "Deployment", "benchmark-prometheus-adapter"
+            )
+            require(
+                adapter,
+                "namespace: observability",
+                (
+                    "image: registry.k8s.io/prometheus-adapter/"
+                    "prometheus-adapter:v0.12.0"
+                ),
+                (
+                    "--prometheus-url=http://benchmark-prometheus."
+                    "observability.svc:9090"
+                ),
+            )
+            external_api = document(
+                content, "APIService", "v1beta1.external.metrics.k8s.io"
+            )
+            require(
+                external_api,
+                "group: external.metrics.k8s.io",
+                "name: benchmark-prometheus-adapter",
+                "namespace: observability",
+            )
+            adapter_config = document(
+                content, "ConfigMap", "benchmark-prometheus-adapter"
+            )
+            require(
+                adapter_config,
+                "externalRules:",
+                (
+                    "seriesQuery: "
+                    "'boutique_jetstream_consumer_pending"
+                ),
+                (
+                    "metricsQuery: 'max(<<.Series>>"
+                    "{<<.LabelMatchers>>}) by (namespace, service)'"
+                ),
+            )
+            recording_rules = document(
+                content, "ConfigMap", "benchmark-prometheus-rules"
+            )
+            require(
+                recording_rules,
+                "record: boutique_jetstream_consumer_pending",
+                'consumer_name="cart-commands-v1"',
+                "service: cartservice",
+                "service: checkoutservice",
+                "service: recommendationservice",
+            )
         else:
             forbid(
                 content,
                 "image: registry.k8s.io/metrics-server/metrics-server:",
                 "name: v1beta1.metrics.k8s.io",
+                "name: benchmark-prometheus",
+                "name: benchmark-prometheus-adapter",
+                "name: v1beta1.external.metrics.k8s.io",
             )
         forbid(
             content,
