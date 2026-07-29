@@ -170,11 +170,13 @@ func (fe *frontendServer) storefrontQuery(ctx context.Context, view string, requ
 	}
 	queryContext, cancel := context.WithTimeout(ctx, fe.natsRequestTimeout)
 	defer cancel()
-	fe.log.WithFields(logrus.Fields{
-		"topic":          topic,
-		"message_kind":   "query",
-		"correlation_id": request.CorrelationID,
-	}).Debug("NATS query sent")
+	if fe.log.IsLevelEnabled(logrus.DebugLevel) {
+		fe.log.WithFields(logrus.Fields{
+			"topic":          topic,
+			"message_kind":   "query",
+			"correlation_id": request.CorrelationID,
+		}).Debug("NATS query sent")
+	}
 	message, err := fe.natsConn.RequestWithContext(queryContext, topic, encoded)
 	if err != nil {
 		if errors.Is(err, nats.ErrNoResponders) || errors.Is(err, nats.ErrTimeout) || errors.Is(err, context.DeadlineExceeded) {
@@ -226,10 +228,12 @@ func (fe *frontendServer) publishPageView(ctx context.Context, session, pageType
 		AggregateType: "storefront-session", AggregateId: session, AggregateVersion: version,
 		CorrelationId: requestID(ctx), Data: wrapped,
 	}
-	headers := nats.Header{}
-	otel.GetTextMapPropagator().Inject(ctx, natsHeaderCarrier(headers))
-	envelope.Traceparent = headers.Get("traceparent")
-	envelope.Tracestate = headers.Get("tracestate")
+	if fe.tracingEnabled {
+		headers := nats.Header{}
+		otel.GetTextMapPropagator().Inject(ctx, natsHeaderCarrier(headers))
+		envelope.Traceparent = headers.Get("traceparent")
+		envelope.Tracestate = headers.Get("tracestate")
+	}
 	encoded, err := proto.Marshal(envelope)
 	if err != nil {
 		return err
@@ -243,11 +247,13 @@ func (fe *frontendServer) publishPageView(ctx context.Context, session, pageType
 	if err != nil {
 		return err
 	}
-	fe.log.WithFields(logrus.Fields{
-		"topic":          pageViewedSubject,
-		"message_kind":   "event",
-		"correlation_id": envelope.CorrelationId,
-	}).Debug("NATS event sent")
+	if fe.log.IsLevelEnabled(logrus.DebugLevel) {
+		fe.log.WithFields(logrus.Fields{
+			"topic":          pageViewedSubject,
+			"message_kind":   "event",
+			"correlation_id": envelope.CorrelationId,
+		}).Debug("NATS event sent")
+	}
 	return nil
 }
 

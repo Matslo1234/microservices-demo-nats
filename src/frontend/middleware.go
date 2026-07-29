@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -30,6 +31,11 @@ import (
 
 type ctxKeyLog struct{}
 type ctxKeyRequestID struct{}
+
+var (
+	sessionCookieKeyOnce  sync.Once
+	sessionCookieKeyValue [sha256.Size]byte
+)
 
 type logHandler struct {
 	log  *logrus.Logger
@@ -60,31 +66,36 @@ func (r *responseRecorder) WriteHeader(statusCode int) {
 
 func (lh *logHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	requestID, _ := uuid.NewRandom()
-	ctx = context.WithValue(ctx, ctxKeyRequestID{}, requestID.String())
+	requestID := uuid.NewString()
+	ctx = context.WithValue(ctx, ctxKeyRequestID{}, requestID)
 
-	start := time.Now()
-	rr := &responseRecorder{w: w}
 	log := lh.log.WithFields(logrus.Fields{
 		"http.req.path":   r.URL.Path,
 		"http.req.method": r.Method,
-		"http.req.id":     requestID.String(),
-		"correlation_id":  requestID.String(),
+		"http.req.id":     requestID,
+		"correlation_id":  requestID,
 	})
 	if v, ok := r.Context().Value(ctxKeySessionID{}).(string); ok {
 		log = log.WithField("session", v)
 	}
-	log.Debug("request started")
-	defer func() {
-		log.WithFields(logrus.Fields{
-			"http.resp.took_ms": int64(time.Since(start) / time.Millisecond),
-			"http.resp.status":  rr.status,
-			"http.resp.bytes":   rr.b}).Debugf("request complete")
-	}()
+
+	nextWriter := w
+	if lh.log.IsLevelEnabled(logrus.DebugLevel) {
+		start := time.Now()
+		rr := &responseRecorder{w: w}
+		nextWriter = rr
+		log.Debug("request started")
+		defer func() {
+			log.WithFields(logrus.Fields{
+				"http.resp.took_ms": int64(time.Since(start) / time.Millisecond),
+				"http.resp.status":  rr.status,
+				"http.resp.bytes":   rr.b}).Debug("request complete")
+		}()
+	}
 
 	ctx = context.WithValue(ctx, ctxKeyLog{}, log)
 	r = r.WithContext(ctx)
-	lh.next.ServeHTTP(rr, r)
+	lh.next.ServeHTTP(nextWriter, r)
 }
 
 func ensureSessionID(next http.Handler) http.HandlerFunc {
@@ -119,20 +130,28 @@ func ensureSessionID(next http.Handler) http.HandlerFunc {
 }
 
 func sessionCookieKey() []byte {
-	secret := os.Getenv("FRONTEND_COOKIE_KEY")
-	if secret == "" {
-		// The frontend NATS credential is already a replica-shared Kubernetes
-		// Secret. Domain separation prevents using its raw value as a cookie key.
-		secret = os.Getenv("NATS_PASSWORD")
-	}
-	digest := sha256.Sum256([]byte("online-boutique.frontend-cookie.v1\x00" + secret))
-	return digest[:]
+	sessionCookieKeyOnce.Do(func() {
+		secret := os.Getenv("FRONTEND_COOKIE_KEY")
+		if secret == "" {
+			// The frontend NATS credential is already a replica-shared Kubernetes
+			// Secret. Domain separation prevents using its raw value as a cookie key.
+			secret = os.Getenv("NATS_PASSWORD")
+		}
+		sessionCookieKeyValue = sha256.Sum256(
+			[]byte("online-boutique.frontend-cookie.v1\x00" + secret),
+		)
+	})
+	return sessionCookieKeyValue[:]
+}
+
+func sessionCookieMAC(sessionID string) []byte {
+	mac := hmac.New(sha256.New, sessionCookieKey())
+	_, _ = mac.Write([]byte(sessionID))
+	return mac.Sum(nil)
 }
 
 func signSessionCookie(sessionID string) string {
-	mac := hmac.New(sha256.New, sessionCookieKey())
-	_, _ = mac.Write([]byte(sessionID))
-	return sessionID + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+	return sessionID + "." + base64.RawURLEncoding.EncodeToString(sessionCookieMAC(sessionID))
 }
 
 func verifySessionCookie(value string) (string, error) {
@@ -148,10 +167,7 @@ func verifySessionCookie(value string) (string, error) {
 	if err != nil {
 		return "", http.ErrNoCookie
 	}
-	expectedValue := signSessionCookie(sessionID)
-	expectedEncoded := expectedValue[strings.LastIndexByte(expectedValue, '.')+1:]
-	expected, _ := base64.RawURLEncoding.DecodeString(expectedEncoded)
-	if !hmac.Equal(actual, expected) {
+	if !hmac.Equal(actual, sessionCookieMAC(sessionID)) {
 		return "", http.ErrNoCookie
 	}
 	return sessionID, nil

@@ -90,7 +90,7 @@ func (fe *frontendServer) publishCartCommand(ctx context.Context, subject, messa
 		AggregateType: "cart", AggregateId: userID, AggregateVersion: expectedVersion,
 		CorrelationId: operationID, Data: wrapped,
 	}
-	setEnvelopeTrace(ctx, envelope)
+	fe.setEnvelopeTrace(ctx, envelope)
 	if err := fe.publishEnvelope(ctx, subject, operationID, envelope); err != nil {
 		return fmt.Errorf("publish cart command: %w", err)
 	}
@@ -113,7 +113,7 @@ func (fe *frontendServer) publishOperationAccepted(publishContext, traceContext 
 		AggregateType: "operation", AggregateId: operationID, AggregateVersion: uint64(now.UnixNano()),
 		CorrelationId: operationID, CausationId: operationID, Data: acceptedData,
 	}
-	setEnvelopeTrace(traceContext, accepted)
+	fe.setEnvelopeTrace(traceContext, accepted)
 	if err := fe.publishEnvelope(publishContext, operationAcceptedSubject, acceptedID, accepted); err != nil {
 		return fmt.Errorf("publish accepted operation: %w", err)
 	}
@@ -138,12 +138,14 @@ func (fe *frontendServer) publishEnvelope(ctx context.Context, subject, messageI
 	if ack == nil {
 		return fmt.Errorf("JetStream did not acknowledge %s", subject)
 	}
-	kind := messageKind(subject)
-	fe.log.WithFields(logrus.Fields{
-		"topic":          subject,
-		"message_kind":   kind,
-		"correlation_id": correlationID(envelope.CorrelationId),
-	}).Debug("NATS " + kind + " sent")
+	if fe.log.IsLevelEnabled(logrus.DebugLevel) {
+		kind := messageKind(subject)
+		fe.log.WithFields(logrus.Fields{
+			"topic":          subject,
+			"message_kind":   kind,
+			"correlation_id": correlationID(envelope.CorrelationId),
+		}).Debug("NATS " + kind + " sent")
+	}
 	return nil
 }
 
@@ -165,7 +167,10 @@ func correlationID(value string) string {
 	return value
 }
 
-func setEnvelopeTrace(ctx context.Context, envelope *commonv1.MessageEnvelope) {
+func (fe *frontendServer) setEnvelopeTrace(ctx context.Context, envelope *commonv1.MessageEnvelope) {
+	if !fe.tracingEnabled {
+		return
+	}
 	headers := nats.Header{}
 	otel.GetTextMapPropagator().Inject(ctx, natsHeaderCarrier(headers))
 	envelope.Traceparent = headers.Get("traceparent")

@@ -44,7 +44,7 @@ DEFAULT_IMAGE_DIGESTS = {
     "checkoutservice": "cc910c24e529a22b2b7973cbeb42e30be63868baffa7bdb5611e2d68014b082e",
     "currencyservice": "aadcaa314fcc6591d38e91720fc870fd55aeff7c6fdcb26322e6aa89b2c289ab",
     "emailservice": "50d3cb08c120a90acecc18b83b97ecd9ba6be2d9dd8c9f3c15f179326e67266b",
-    "frontend": "797a30719dbaec5df73ee0efd8c7a9056e8308e1afb424f41caf452cb7bd48ec",
+    "frontend": "0a84e385b5382aeb19c634e1a7c33f6410e50f2ad9b590fc39e56b3e3cf6df14",
     "loadgenerator": "c66a188ecf8bf7507bd3982a5fa50ae3e9497f3239248dd48b275fc2aee0adb3",
     "paymentservice": "9a6c36bb850627bfd0b9ab86e9b3c05bf3ce9dcb4c25967877a4ec106c954519",
     "productcatalogservice": "77716d929c9fe2d662c61d9865afe8fb8c0e77bf43458386e328d4e5e1bbece8",

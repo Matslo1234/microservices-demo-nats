@@ -59,7 +59,6 @@ var validEnvs = []string{"local", "gcp", "azure", "aws", "onprem", "alibaba"}
 
 func (fe *frontendServer) homeHandler(w http.ResponseWriter, r *http.Request) {
 	log := r.Context().Value(ctxKeyLog{}).(logrus.FieldLogger)
-	log.WithField("currency", currentCurrency(r)).Info("home")
 	view, err := fe.storefrontQuery(r.Context(), "home", storefrontQueryRequest{
 		UserID: sessionID(r), CurrencyCode: currentCurrency(r),
 	})
@@ -73,24 +72,6 @@ func (fe *frontendServer) homeHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	// Set ENV_PLATFORM (default to local if not set; use env var if set; otherwise detect GCP, which overrides env)_
-	var env = os.Getenv("ENV_PLATFORM")
-	// Only override from env variable if set + valid env
-	if env == "" || stringinSlice(validEnvs, env) == false {
-		fmt.Println("env platform is either empty or invalid")
-		env = "local"
-	}
-	// Autodetect GCP
-	addrs, err := net.LookupHost("metadata.google.internal.")
-	if err == nil && len(addrs) >= 0 {
-		log.Debugf("Detected Google metadata server: %v, setting ENV_PLATFORM to GCP.", addrs)
-		env = "gcp"
-	}
-
-	log.Debugf("ENV_PLATFORM is: %s", env)
-	plat = platformDetails{}
-	plat.setPlatformDetails(strings.ToLower(env))
-
 	if err := templates.ExecuteTemplate(w, "home", injectCommonTemplateData(r, map[string]interface{}{
 		"show_currency": true,
 		"currencies":    filterCurrencies(view.Currencies),
@@ -101,6 +82,19 @@ func (fe *frontendServer) homeHandler(w http.ResponseWriter, r *http.Request) {
 	})); err != nil {
 		log.Error(err)
 	}
+}
+
+func initializePlatform(log logrus.FieldLogger) {
+	env := os.Getenv("ENV_PLATFORM")
+	if !stringinSlice(validEnvs, env) {
+		env = "local"
+	}
+	if addrs, err := net.LookupHost("metadata.google.internal."); err == nil && len(addrs) > 0 {
+		log.Debugf("Detected Google metadata server: %v, setting ENV_PLATFORM to GCP.", addrs)
+		env = "gcp"
+	}
+	plat.setPlatformDetails(strings.ToLower(env))
+	log.Debugf("ENV_PLATFORM is: %s", env)
 }
 
 func (plat *platformDetails) setPlatformDetails(env string) {
@@ -606,20 +600,18 @@ func formatMoney(currencyCode string, units int64, nanos int32) string {
 }
 
 func renderCurrencyLogo(currencyCode string) string {
-	logos := map[string]string{
-		"USD": "$",
-		"CAD": "$",
-		"JPY": "¥",
-		"EUR": "€",
-		"TRY": "₺",
-		"GBP": "£",
+	switch currencyCode {
+	case "JPY":
+		return "¥"
+	case "EUR":
+		return "€"
+	case "TRY":
+		return "₺"
+	case "GBP":
+		return "£"
+	default:
+		return "$"
 	}
-
-	logo := "$" //default
-	if val, ok := logos[currencyCode]; ok {
-		logo = val
-	}
-	return logo
 }
 
 func stringinSlice(slice []string, val string) bool {

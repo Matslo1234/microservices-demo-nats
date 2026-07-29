@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -14,6 +15,7 @@ import (
 	"testing"
 
 	commonv1 "github.com/GoogleCloudPlatform/microservices-demo/protos/common/v1"
+	"github.com/sirupsen/logrus"
 )
 
 func TestFilterCurrenciesPreservesProjectionOrder(t *testing.T) {
@@ -21,6 +23,67 @@ func TestFilterCurrenciesPreservesProjectionOrder(t *testing.T) {
 	expected := []string{"CAD", "EUR", "JPY", "USD"}
 	if !reflect.DeepEqual(actual, expected) {
 		t.Fatalf("unexpected currencies: got %v want %v", actual, expected)
+	}
+}
+
+func TestJSONLoggerDefaultsToInfoAndAllowsDebugOverride(t *testing.T) {
+	t.Setenv("LOG_LEVEL", "")
+	if level := newJSONLogger().GetLevel(); level != logrus.InfoLevel {
+		t.Fatalf("default log level is %s, want info", level)
+	}
+	t.Setenv("LOG_LEVEL", "debug")
+	if level := newJSONLogger().GetLevel(); level != logrus.DebugLevel {
+		t.Fatalf("configured log level is %s, want debug", level)
+	}
+}
+
+func TestRenderCurrencyLogo(t *testing.T) {
+	for currency, expected := range map[string]string{
+		"USD": "$",
+		"CAD": "$",
+		"JPY": "¥",
+		"EUR": "€",
+		"TRY": "₺",
+		"GBP": "£",
+		"XXX": "$",
+	} {
+		if actual := renderCurrencyLogo(currency); actual != expected {
+			t.Fatalf("renderCurrencyLogo(%q) = %q, want %q", currency, actual, expected)
+		}
+	}
+}
+
+func TestLogHandlerOnlyWrapsResponsesForDebugAccounting(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		level       logrus.Level
+		wantWrapped bool
+	}{
+		{name: "info", level: logrus.InfoLevel, wantWrapped: false},
+		{name: "debug", level: logrus.DebugLevel, wantWrapped: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			logger := newJSONLogger()
+			logger.SetLevel(test.level)
+			logger.SetOutput(io.Discard)
+			wrapped := false
+			handler := &logHandler{
+				log: logger,
+				next: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					_, wrapped = w.(*responseRecorder)
+					w.WriteHeader(http.StatusNoContent)
+				}),
+			}
+
+			handler.ServeHTTP(
+				httptest.NewRecorder(),
+				httptest.NewRequest(http.MethodGet, "/", nil),
+			)
+
+			if wrapped != test.wantWrapped {
+				t.Fatalf("response wrapped = %t, want %t", wrapped, test.wantWrapped)
+			}
+		})
 	}
 }
 

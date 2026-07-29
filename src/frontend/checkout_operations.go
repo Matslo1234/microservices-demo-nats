@@ -78,11 +78,13 @@ func (fe *frontendServer) tokenizePayment(ctx context.Context, orderID string, c
 	requestContext, cancel := context.WithTimeout(ctx, fe.natsRequestTimeout)
 	defer cancel()
 	topic := "boutique.qry.payment.tokenize.v1"
-	fe.log.WithFields(logrus.Fields{
-		"topic":          topic,
-		"message_kind":   "query",
-		"correlation_id": orderID,
-	}).Debug("NATS query sent")
+	if fe.log.IsLevelEnabled(logrus.DebugLevel) {
+		fe.log.WithFields(logrus.Fields{
+			"topic":          topic,
+			"message_kind":   "query",
+			"correlation_id": orderID,
+		}).Debug("NATS query sent")
+	}
 	message, err := fe.natsConn.RequestWithContext(requestContext, topic, encoded)
 	if err != nil {
 		return "", fmt.Errorf("payment tokenization unavailable: %w", err)
@@ -110,7 +112,7 @@ func (fe *frontendServer) publishOrder(ctx context.Context, orderID, userID, ema
 	envelope := &commonv1.MessageEnvelope{MessageId: orderID, MessageType: "boutique.order.Submit.v1", SchemaVersion: 1,
 		OccurredAt: timestamppb.New(now), Producer: "frontend/phase5", AggregateType: "order", AggregateId: orderID,
 		CorrelationId: orderID, Data: wrapper}
-	setEnvelopeTrace(ctx, envelope)
+	fe.setEnvelopeTrace(ctx, envelope)
 	if err := fe.publishEnvelope(ctx, orderSubmitSubject, orderID, envelope); err != nil {
 		return err
 	}

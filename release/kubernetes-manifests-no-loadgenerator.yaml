@@ -1085,7 +1085,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-frontend
-        image: matslo123/frontend:v0.4.0@sha256:797a30719dbaec5df73ee0efd8c7a9056e8308e1afb424f41caf452cb7bd48ec
+        image: matslo123/frontend:v0.4.0@sha256:0a84e385b5382aeb19c634e1a7c33f6410e50f2ad9b590fc39e56b3e3cf6df14
         livenessProbe:
           failureThreshold: 6
           httpGet:

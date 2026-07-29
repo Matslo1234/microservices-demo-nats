@@ -69,6 +69,7 @@ type frontendServer struct {
 	natsRequestTimeout       time.Duration
 	natsPublishTimeout       time.Duration
 	cartOperationWaitTimeout time.Duration
+	tracingEnabled           bool
 	log                      *logrus.Logger
 
 	collectorAddr string
@@ -79,19 +80,11 @@ type frontendServer struct {
 
 func main() {
 	ctx := context.Background()
-	log := logrus.New()
-	log.Level = logrus.DebugLevel
-	log.Formatter = &logrus.JSONFormatter{
-		FieldMap: logrus.FieldMap{
-			logrus.FieldKeyTime:  "timestamp",
-			logrus.FieldKeyLevel: "severity",
-			logrus.FieldKeyMsg:   "message",
-		},
-		TimestampFormat: time.RFC3339Nano,
-	}
-	log.Out = os.Stdout
+	log := newJSONLogger()
+	tracingEnabled := os.Getenv("ENABLE_TRACING") == "1"
 
-	svc := &frontendServer{log: log}
+	svc := &frontendServer{log: log, tracingEnabled: tracingEnabled}
+	initializePlatform(log)
 
 	otel.SetTextMapPropagator(
 		propagation.NewCompositeTextMapPropagator(
@@ -99,7 +92,7 @@ func main() {
 
 	baseUrl = os.Getenv("BASE_URL")
 
-	if os.Getenv("ENABLE_TRACING") == "1" {
+	if tracingEnabled {
 		log.Info("Tracing enabled.")
 		initTracing(log, ctx, svc)
 	} else {
@@ -168,9 +161,11 @@ func main() {
 	r.HandleFunc(baseUrl+"/bot", svc.chatBotHandler).Methods(http.MethodPost)
 
 	var handler http.Handler = r
-	handler = &logHandler{log: log, next: handler}     // add logging
-	handler = ensureSessionID(handler)                 // add session ID
-	handler = otelhttp.NewHandler(handler, "frontend") // add OTel tracing
+	handler = &logHandler{log: log, next: handler} // add logging
+	handler = ensureSessionID(handler)             // add session ID
+	if tracingEnabled {
+		handler = otelhttp.NewHandler(handler, "frontend") // add OTel tracing
+	}
 
 	server := &http.Server{Addr: addr + ":" + srvPort, Handler: handler, ReadHeaderTimeout: 5 * time.Second}
 	serveErrors := make(chan error, 1)
@@ -197,6 +192,25 @@ func main() {
 		log.WithError(err).Warn("frontend NATS drain failed")
 	}
 }
+
+func newJSONLogger() *logrus.Logger {
+	log := logrus.New()
+	log.Level = logrus.InfoLevel
+	if configured, err := logrus.ParseLevel(os.Getenv("LOG_LEVEL")); err == nil {
+		log.Level = configured
+	}
+	log.Formatter = &logrus.JSONFormatter{
+		FieldMap: logrus.FieldMap{
+			logrus.FieldKeyTime:  "timestamp",
+			logrus.FieldKeyLevel: "severity",
+			logrus.FieldKeyMsg:   "message",
+		},
+		TimestampFormat: time.RFC3339Nano,
+	}
+	log.Out = os.Stdout
+	return log
+}
+
 func initStats(log logrus.FieldLogger) {
 	// TODO(arbrown) Implement OpenTelemtry stats
 }
