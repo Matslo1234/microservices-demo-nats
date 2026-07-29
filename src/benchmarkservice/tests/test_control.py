@@ -2,8 +2,10 @@
 # Licensed under the Apache License, Version 2.0 (the "License");
 
 import copy
+import io
 import threading
 import unittest
+import zipfile
 
 from control import BenchmarkManager, RunConflict
 from kubernetes_jobs import JobNotFound
@@ -155,6 +157,53 @@ class BenchmarkControlTest(unittest.TestCase):
         store.put_object(f"{run_id}/summary.json", b'{"ok":true}')
 
         self.assertEqual(b'{"ok":true}', manager.artifact(run_id, "summary.json"))
+
+    def test_combined_artifacts_are_flat_and_prefixed_by_run(self):
+        store, jobs = MemoryStore(), FakeJobs()
+        manager = self.manager(store, jobs)
+        run_ids = []
+        for number in range(2):
+            run_id = manager.start({})["status"]["run_id"]
+            run_ids.append(run_id)
+            record = store.get("run." + run_id)
+            value = record.value
+            archive = io.BytesIO()
+            with zipfile.ZipFile(archive, "w") as target:
+                target.writestr("summary.json", f'{{"run":{number}}}')
+                target.writestr("business.csv", f"run\n{number}\n")
+            object_name = f"{run_id}/artifacts.zip"
+            value["artifacts"] = {
+                "artifacts.zip": {"object": object_name}
+            }
+            store.update("run." + run_id, value, record.revision)
+            store.put_object(object_name, archive.getvalue())
+            manager._release_lease(run_id)
+
+        self.assertTrue(
+            all(
+                run["artifacts_available"]
+                for run in manager.list_runs()
+            )
+        )
+        with zipfile.ZipFile(
+            io.BytesIO(manager.combined_artifacts())
+        ) as combined:
+            self.assertEqual(
+                {
+                    f"{run_ids[0]}-summary.json",
+                    f"{run_ids[0]}-business.csv",
+                    f"{run_ids[1]}-summary.json",
+                    f"{run_ids[1]}-business.csv",
+                },
+                set(combined.namelist()),
+            )
+            self.assertEqual(
+                b'{"run":1}',
+                combined.read(f"{run_ids[1]}-summary.json"),
+            )
+            self.assertFalse(
+                any("/" in name for name in combined.namelist())
+            )
 
 
 if __name__ == "__main__":

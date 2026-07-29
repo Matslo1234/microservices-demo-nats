@@ -47,6 +47,12 @@ control/artifact store that is excluded from measured application resources.
 
 Run-level settings include workload, warm-up/steady/drain durations, user or
 arrival rate, outcome/settlement timeouts, random seed, and collector interval.
+The web UI can also submit additional runs with the same settings, waiting for
+each run to finish and for a configurable delay before submitting the next.
+Each re-run has its own run ID and artifacts. Re-run scheduling is owned by the
+browser tab, which must remain open until the sequence finishes.
+The **Download All** action places every available artifact at the root of one
+ZIP archive, prefixing each filename with its run ID to prevent collisions.
 
 ## Artifacts and resource collection
 

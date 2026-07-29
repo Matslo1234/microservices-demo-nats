@@ -41,6 +41,8 @@ HTML = r"""<!doctype html>
       border-bottom:1px solid var(--line); text-align:left } th { color:var(--muted);
       font-size:12px; text-transform:uppercase } .pill { display:inline-block;
       border-radius:100px; padding:2px 8px; background:#e8eef8; font-size:12px }
+    .card-heading { display:flex; align-items:center; justify-content:space-between;
+      gap:12px; margin:.83em 0 } .card-heading h2 { margin:0 }
     .error { color:var(--bad) } .muted { color:var(--muted) } pre { white-space:pre-wrap;
       overflow:auto; background:#f7f8fa; padding:12px; border-radius:8px }
   </style>
@@ -63,31 +65,118 @@ HTML = r"""<!doctype html>
       <label>Settlement timeout (seconds)<input name="settlement_timeout_seconds" type="number" min="1" value="60"></label>
       <label>Resource sample interval<input name="resource_sample_interval_seconds" type="number" min="1" value="5"></label>
       <label>Random seed<input name="seed" type="number" min="0" value="1"></label>
+      <label>Number of re-runs<input id="rerun-count" name="rerun_count" type="number"
+        min="0" step="1" value="0" required></label>
+      <label>Delay between re-runs (seconds)<input id="rerun-delay"
+        name="rerun_delay_seconds" type="number" min="0" step="1" value="0"
+        required disabled></label>
       <label><span>Collection</span><span><input name="collect_resources" type="checkbox" checked>
         Runtime resources</span></label>
     </div><div class="actions"><button id="start" type="submit">Start benchmark</button>
       <button id="stop" class="danger" type="button" disabled>Stop active run</button></div>
-    <p id="message" class="muted"></p></form>
+    <p class="muted">Re-runs use the same settings and produce separate results. Keep this
+      browser tab open until the sequence finishes.</p>
+    <p id="message" class="muted" role="status" aria-live="polite"></p></form>
   </section>
-  <section class="card"><h2>Runs</h2><div id="runs"></div></section>
+  <section class="card"><div class="card-heading"><h2>Runs</h2>
+    <button id="download-all" type="button" disabled>Download All</button></div>
+    <div id="runs"></div></section>
   <section class="card" id="details-card" hidden><h2>Result</h2><div id="details"></div></section>
 </main>
 <script>
-let activeRun=null; const message=document.querySelector("#message");
+const ACTIVE_STATES=new Set(["submitted","starting","running","stopping"]);
+let activeRun=null, repeatPlan=null, sequenceRequestInFlight=false, refreshPromise=null;
+const message=document.querySelector("#message"), startButton=document.querySelector("#start"),
+  stopButton=document.querySelector("#stop"), rerunCount=document.querySelector("#rerun-count"),
+  rerunDelay=document.querySelector("#rerun-delay"),
+  downloadAllButton=document.querySelector("#download-all");
 const fields=["warmup_seconds","duration_seconds","drain_seconds","users","spawn_rate",
   "arrival_rate","outcome_timeout_seconds","settlement_timeout_seconds",
   "resource_sample_interval_seconds","seed"];
 async function api(path,options={}) {
   const response=await fetch(path,options), data=await response.json().catch(()=>({error:response.statusText}));
-  if(!response.ok) throw new Error(data.error||response.statusText); return data;
+  if(!response.ok) {
+    const error=new Error(data.error||response.statusText); error.status=response.status; throw error;
+  }
+  return data;
 }
 function esc(value) { return String(value??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",
   ">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
-async function refresh() {
+function setMessage(text,isError=false) {
+  message.textContent=text; message.className=isError?"error":"muted";
+}
+function updateControls() {
+  startButton.disabled=!!activeRun||!!repeatPlan||sequenceRequestInFlight;
+  stopButton.disabled=!activeRun&&!repeatPlan&&!sequenceRequestInFlight;
+  stopButton.textContent=repeatPlan||sequenceRequestInFlight?
+    "Stop benchmark sequence":"Stop active run";
+}
+async function submitSequenceRun() {
+  const plan=repeatPlan; if(!plan||sequenceRequestInFlight)return null;
+  sequenceRequestInFlight=true; updateControls();
+  try {
+    const run=await api("/api/runs",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify(plan.payload)});
+    activeRun=run.status.run_id;
+    if(repeatPlan!==plan) {
+      try {
+        await api(`/api/runs/${activeRun}/stop`,{method:"POST"});
+        activeRun=null; setMessage("Benchmark sequence stopped.");
+      } catch(error) {
+        setMessage(`Sequence cancelled, but the submitted run could not be stopped: ${error.message}`,true);
+      }
+      return null;
+    }
+    plan.currentRunId=activeRun; plan.submittedRuns+=1; plan.nextRunAt=null;
+    setMessage(`Run ${plan.submittedRuns} of ${plan.totalRuns} submitted.`);
+    showRun(activeRun).catch(()=>{}); return run;
+  } finally {
+    sequenceRequestInFlight=false; updateControls();
+  }
+}
+async function advanceRepeatPlan(runs) {
+  const plan=repeatPlan; if(!plan||sequenceRequestInFlight)return;
+  if(plan.currentRunId) {
+    const current=runs.find(run=>run.run_id===plan.currentRunId);
+    if(!current||ACTIVE_STATES.has(current.state))return;
+    plan.currentRunId=null;
+    if(current.state==="stopped") {
+      repeatPlan=null; setMessage("Benchmark sequence stopped."); return;
+    }
+    if(plan.submittedRuns>=plan.totalRuns) {
+      repeatPlan=null;
+      setMessage(`Benchmark sequence finished (${plan.totalRuns} run${plan.totalRuns===1?"":"s"}).`);
+      return;
+    }
+    const endedAt=Date.parse(current.ended_at||"");
+    plan.nextRunAt=(Number.isFinite(endedAt)?endedAt:Date.now())+plan.delayMs;
+  }
+  if(plan.nextRunAt===null)return;
+  const secondsLeft=Math.max(0,Math.ceil((plan.nextRunAt-Date.now())/1000));
+  if(secondsLeft>0) {
+    setMessage(`Run ${plan.submittedRuns} of ${plan.totalRuns} finished. Next re-run in ${secondsLeft}s.`);
+    return;
+  }
+  if(activeRun) {
+    setMessage(`Run ${plan.submittedRuns} of ${plan.totalRuns} finished. Waiting for the active benchmark.`);
+    return;
+  }
+  try { await submitSequenceRun(); }
+  catch(error) {
+    if(repeatPlan!==plan)return;
+    if(error.status===409) {
+      setMessage("Waiting for the previous benchmark lease to be released."); return;
+    }
+    repeatPlan=null; updateControls();
+    setMessage(`Could not submit the next re-run: ${error.message}`,true);
+  }
+}
+async function refreshPage() {
   const info=await api("/api/info"); document.querySelector("#application").textContent=info.application_type;
   document.querySelector("#target").textContent=info.target_url; const runs=await api("/api/runs");
-  activeRun=runs.find(run=>["submitted","starting","running","stopping"].includes(run.state))?.run_id||null;
-  document.querySelector("#start").disabled=!!activeRun; document.querySelector("#stop").disabled=!activeRun;
+  activeRun=runs.find(run=>ACTIVE_STATES.has(run.state))?.run_id||null;
+  await advanceRepeatPlan(runs); updateControls();
+  downloadAllButton.disabled=!runs.some(run=>run.artifacts_available);
   document.querySelector("#runs").innerHTML=runs.length?`<table><thead><tr><th>Run</th>
     <th>Workload</th><th>Status</th><th>Completed</th><th>p95</th><th></th></tr></thead>
     <tbody>${runs.map(run=>`<tr><td><code>${esc(run.run_id)}</code></td><td>${esc(run.workload)}</td>
@@ -95,6 +184,10 @@ async function refresh() {
     <td>${run.p95_ms==null?"":esc(run.p95_ms)+" ms"}</td><td><button
     onclick="showRun('${esc(run.run_id)}')">View</button></td></tr>`).join("")}</tbody></table>`:
     `<p class="muted">No benchmark has been run.</p>`;
+}
+function refresh() {
+  if(!refreshPromise)refreshPromise=refreshPage().finally(()=>{refreshPromise=null});
+  return refreshPromise;
 }
 async function showRun(id) {
   const run=await api(`/api/runs/${id}`), card=document.querySelector("#details-card"); card.hidden=false;
@@ -107,19 +200,40 @@ async function showRun(id) {
     <pre>${esc(JSON.stringify(run.status,null,2))}</pre>`;
 }
 document.querySelector("#run-form").addEventListener("submit",async event=>{
-  event.preventDefault(); message.textContent="Submitting Job…"; const form=new FormData(event.target);
+  event.preventDefault(); setMessage("Submitting Job…"); const form=new FormData(event.target);
   const payload={workload:form.get("workload"),collect_resources:form.has("collect_resources")};
   fields.forEach(name=>payload[name]=form.get(name));
-  try { const run=await api("/api/runs",{method:"POST",headers:{"Content-Type":"application/json"},
-    body:JSON.stringify(payload)}); activeRun=run.status.run_id; message.textContent="Benchmark submitted.";
-    await refresh(); await showRun(activeRun); } catch(error) { message.textContent=error.message;
-    message.className="error"; }
+  const additionalRuns=Number(form.get("rerun_count")||0),
+    delaySeconds=Number(form.get("rerun_delay_seconds")||0);
+  if(!Number.isInteger(additionalRuns)||additionalRuns<0||
+    !Number.isInteger(delaySeconds)||delaySeconds<0) {
+    setMessage("Re-runs and delay must be non-negative whole numbers.",true); return;
+  }
+  const plan={payload,totalRuns:additionalRuns+1,submittedRuns:0,currentRunId:null,
+    delayMs:delaySeconds*1000,nextRunAt:null};
+  repeatPlan=plan;
+  try { await submitSequenceRun(); await refresh(); }
+  catch(error) {
+    if(repeatPlan===plan) { repeatPlan=null; setMessage(error.message,true); }
+    updateControls();
+  }
 });
-document.querySelector("#stop").addEventListener("click",async()=>{
-  if(!activeRun)return; try { await api(`/api/runs/${activeRun}/stop`,{method:"POST"});
-    message.textContent="Benchmark stopped."; activeRun=null; await refresh(); }
-  catch(error) { message.textContent=error.message; message.className="error"; }
+stopButton.addEventListener("click",async()=>{
+  const plan=repeatPlan, runToStop=plan?plan.currentRunId:activeRun;
+  if(!runToStop&&!plan&&!sequenceRequestInFlight)return;
+  repeatPlan=null; updateControls();
+  try {
+    if(runToStop)await api(`/api/runs/${runToStop}/stop`,{method:"POST"});
+    setMessage(plan?(runToStop?"Benchmark sequence stopped.":"Pending re-runs cancelled."):
+      "Benchmark stopped.");
+    if(activeRun===runToStop)activeRun=null; await refresh();
+  } catch(error) { setMessage(error.message,true); await refresh().catch(()=>{}); }
 });
+function updateRerunDelay() { rerunDelay.disabled=Number(rerunCount.value||0)===0; }
+downloadAllButton.addEventListener("click",()=>{
+  window.location.assign("/api/runs/artifacts.zip");
+});
+rerunCount.addEventListener("input",updateRerunDelay); updateRerunDelay(); updateControls();
 refresh().catch(error=>{message.textContent=error.message;message.className="error"});
 setInterval(()=>refresh().catch(()=>{}),3000);
 </script></body></html>"""
@@ -154,10 +268,9 @@ class BenchmarkHandler(BaseHTTPRequestHandler):
     def _error(self, status: HTTPStatus, message: str) -> None:
         self._json(status, {"error": message})
 
-    def _send_artifact(
-        self, run_id: str, artifact: str, content_type: str, name: str
+    def _send_download(
+        self, data: bytes, content_type: str, name: str
     ) -> None:
-        data = self.manager.artifact(run_id, artifact)
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
@@ -165,6 +278,13 @@ class BenchmarkHandler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(data)
+
+    def _send_artifact(
+        self, run_id: str, artifact: str, content_type: str, name: str
+    ) -> None:
+        self._send_download(
+            self.manager.artifact(run_id, artifact), content_type, name
+        )
 
     def _parts(self) -> list[str]:
         return [part for part in urlparse(self.path).path.split("/") if part]
@@ -197,6 +317,12 @@ class BenchmarkHandler(BaseHTTPRequestHandler):
                 )
             elif parts == ["api", "runs"]:
                 self._json(HTTPStatus.OK, self.manager.list_runs())
+            elif parts == ["api", "runs", "artifacts.zip"]:
+                self._send_download(
+                    self.manager.combined_artifacts(),
+                    "application/zip",
+                    "benchmark-runs.zip",
+                )
             elif len(parts) == 3 and parts[:2] == ["api", "runs"]:
                 self._json(HTTPStatus.OK, self.manager.details(parts[2]))
             elif len(parts) == 4 and parts[:2] == ["api", "runs"]:

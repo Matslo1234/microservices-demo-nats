@@ -640,6 +640,16 @@ Exit criterion: the release manifest has no unresolved service address, all
 business writes and workflows use the documented NATS contracts, and projection
 rebuild/stream restore is tested.
 
+### Implementation note
+Subjects of type `live` like
+
+```text
+boutique.live.operation.<operation-id>
+```
+
+were not used in the end. Instead, frontend polls for changes to the order.
+
+
 ## Acceptance tests for the final architecture
 
 - Replaying retained `BOUTIQUE_EVENTS` plus current owner snapshots rebuilds

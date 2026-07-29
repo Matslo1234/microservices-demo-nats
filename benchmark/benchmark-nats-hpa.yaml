@@ -2272,7 +2272,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-benchmarkservice
-        image: matslo123/benchmarkservice:v0.4.0@sha256:5fedc37831b9891643f129a415223ad8fe76526f055432862a213de559286bd9
+        image: matslo123/benchmarkservice:v0.4.0@sha256:7b3041d2f9f3bbd6a6a8dc9d6bca54575da873a0e45094465f8ad649eb6f2dde
         livenessProbe:
           httpGet:
             path: /healthz

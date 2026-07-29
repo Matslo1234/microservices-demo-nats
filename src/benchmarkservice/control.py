@@ -4,9 +4,12 @@
 from __future__ import annotations
 
 import copy
+import io
 import time
 import uuid
+import zipfile
 from datetime import datetime, timezone
+from pathlib import PurePosixPath
 from typing import Any, Callable
 
 from config import BenchmarkConfig, ConfigError, normalize_target_url
@@ -257,6 +260,10 @@ class BenchmarkManager:
             status["p95_ms"] = business.get(
                 "checkout_to_outcome", {}
             ).get("p95_ms")
+            archive = record.get("artifacts", {}).get("artifacts.zip")
+            status["artifacts_available"] = bool(
+                isinstance(archive, dict) and archive.get("object")
+            )
             runs.append(status)
         return runs
 
@@ -297,6 +304,64 @@ class BenchmarkManager:
             return self.store.get_object(str(metadata["object"]))
         except RecordNotFound as error:
             raise RunNotFound(f"{run_id}/{artifact}") from error
+
+    def combined_artifacts(self) -> bytes:
+        output = io.BytesIO()
+        archive_count = 0
+        with zipfile.ZipFile(
+            output, "w", compression=zipfile.ZIP_DEFLATED
+        ) as combined:
+            for key in self.store.keys(RUN_PREFIX):
+                try:
+                    record = self.store.get(key).value
+                except RecordNotFound:
+                    continue
+                run_id = str(record.get("run_id", ""))
+                if (
+                    not run_id
+                    or run_id in {".", ".."}
+                    or "/" in run_id
+                    or "\\" in run_id
+                ):
+                    continue
+                metadata = record.get("artifacts", {}).get("artifacts.zip")
+                if not isinstance(metadata, dict) or not metadata.get("object"):
+                    continue
+                try:
+                    archive_data = self.store.get_object(
+                        str(metadata["object"])
+                    )
+                except RecordNotFound as error:
+                    raise RunNotFound(f"{run_id}/artifacts.zip") from error
+                try:
+                    with zipfile.ZipFile(io.BytesIO(archive_data)) as source:
+                        for member in source.infolist():
+                            if member.is_dir():
+                                continue
+                            path = PurePosixPath(
+                                member.filename.replace("\\", "/")
+                            )
+                            if (
+                                path.is_absolute()
+                                or not path.parts
+                                or ".." in path.parts
+                            ):
+                                raise ValueError(
+                                    f"unsafe artifact path in run {run_id}"
+                                )
+                            artifact_name = "-".join(path.parts)
+                            combined.writestr(
+                                f"{run_id}-{artifact_name}",
+                                source.read(member),
+                            )
+                except zipfile.BadZipFile as error:
+                    raise ValueError(
+                        f"invalid artifact archive for run {run_id}"
+                    ) from error
+                archive_count += 1
+        if archive_count == 0:
+            raise RunNotFound("artifacts.zip")
+        return output.getvalue()
 
     def ready(self) -> bool:
         return bool(self.store.ready())
