@@ -89,7 +89,7 @@ spec:
             port: health
         resources:
           requests:
-            cpu: 500m
+            cpu: 175m
             memory: 128Mi
           limits:
             cpu: "2"

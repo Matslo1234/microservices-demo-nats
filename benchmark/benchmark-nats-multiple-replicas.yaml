@@ -2189,7 +2189,7 @@ spec:
             cpu: 300m
             memory: 2Gi
           requests:
-            cpu: 200m
+            cpu: 125m
             memory: 180Mi
         securityContext:
           allowPrivilegeEscalation: false
@@ -2400,7 +2400,7 @@ spec:
             cpu: "2"
             memory: 2Gi
           requests:
-            cpu: 500m
+            cpu: 300m
             memory: 128Mi
         securityContext:
           allowPrivilegeEscalation: false
@@ -2511,7 +2511,7 @@ spec:
             cpu: "2"
             memory: 2Gi
           requests:
-            cpu: 500m
+            cpu: 275m
             memory: 128Mi
         securityContext:
           allowPrivilegeEscalation: false
@@ -2614,7 +2614,7 @@ spec:
             cpu: 200m
             memory: 2Gi
           requests:
-            cpu: 100m
+            cpu: 5m
             memory: 64Mi
         securityContext:
           allowPrivilegeEscalation: false
@@ -2713,7 +2713,7 @@ spec:
             cpu: 200m
             memory: 2Gi
           requests:
-            cpu: 100m
+            cpu: 175m
             memory: 64Mi
         securityContext:
           allowPrivilegeEscalation: false
@@ -2867,7 +2867,7 @@ spec:
             cpu: "1"
             memory: 2Gi
           requests:
-            cpu: 200m
+            cpu: 800m
             memory: 128Mi
         securityContext:
           allowPrivilegeEscalation: false
@@ -3015,7 +3015,7 @@ spec:
             cpu: "2"
             memory: 2Gi
           requests:
-            cpu: 500m
+            cpu: 225m
             memory: 128Mi
         securityContext:
           allowPrivilegeEscalation: false
@@ -3111,7 +3111,7 @@ spec:
             cpu: 200m
             memory: 2Gi
           requests:
-            cpu: 100m
+            cpu: 5m
             memory: 64Mi
         securityContext:
           allowPrivilegeEscalation: false
@@ -3215,7 +3215,7 @@ spec:
             cpu: "2"
             memory: 2Gi
           requests:
-            cpu: 500m
+            cpu: 750m
             memory: 256Mi
         securityContext:
           allowPrivilegeEscalation: false
@@ -3320,7 +3320,7 @@ spec:
             cpu: "2"
             memory: 2Gi
           requests:
-            cpu: 500m
+            cpu: 175m
             memory: 128Mi
         securityContext:
           allowPrivilegeEscalation: false
@@ -3421,7 +3421,7 @@ spec:
             cpu: "2"
             memory: 2Gi
           requests:
-            cpu: 500m
+            cpu: 750m
             memory: 128Mi
         securityContext:
           allowPrivilegeEscalation: false
