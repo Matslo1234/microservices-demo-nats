@@ -12,6 +12,7 @@ import (
 	commonv1 "github.com/GoogleCloudPlatform/microservices-demo/protos/common/v1"
 	eventsv1 "github.com/GoogleCloudPlatform/microservices-demo/protos/events/v1"
 	stateless "github.com/GoogleCloudPlatform/microservices-demo/src/shared/stateless/go"
+	"github.com/nats-io/nats.go"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -242,6 +243,40 @@ func TestShippingCartQuoteIsDeterministicAcrossReplicas(t *testing.T) {
 	}
 	if !payload.ExpiresAt.AsTime().Equal(inputTime.Add(15 * time.Minute)) {
 		t.Fatal("cart quote expiry did not derive from the source event")
+	}
+}
+
+func TestShippingProcessesStreamBeforeFetchBatchCloses(t *testing.T) {
+	messages := make(chan *nats.Msg)
+	processed := make(chan struct{})
+	finished := make(chan struct{})
+
+	go func() {
+		processShippingStream(
+			messages,
+			shippingCommandBatchSize,
+			1,
+			func(*nats.Msg) { close(processed) },
+		)
+		close(finished)
+	}()
+
+	messages <- &nats.Msg{}
+	select {
+	case <-processed:
+	case <-time.After(time.Second):
+		t.Fatal("message was not processed until the stream closed")
+	}
+	select {
+	case <-finished:
+		t.Fatal("stream processor stopped before the batch stream closed")
+	default:
+	}
+	close(messages)
+	select {
+	case <-finished:
+	case <-time.After(time.Second):
+		t.Fatal("stream processor did not stop after the batch stream closed")
 	}
 }
 

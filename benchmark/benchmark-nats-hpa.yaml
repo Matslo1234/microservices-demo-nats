@@ -2167,7 +2167,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-adservice
-        image: matslo123/adservice:v0.4.0@sha256:863919b5c2929e90b69888c20e54509cd6c3d09425104269df2b629aab40a643
+        image: matslo123/adservice:v0.4.0@sha256:793686df2852e1c7932ef56a51030bcbf2b6a200da7e604f62db8b3a7f7581ae
         livenessProbe:
           httpGet:
             path: /healthz
@@ -2493,7 +2493,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-checkoutservice
-        image: matslo123/checkoutservice:v0.4.0@sha256:a731c618cb17ce69c2bfa460f0ce461f915ba7c4a97e776d8a67a8d43fb82396
+        image: matslo123/checkoutservice:v0.4.0@sha256:cc910c24e529a22b2b7973cbeb42e30be63868baffa7bdb5611e2d68014b082e
         livenessProbe:
           httpGet:
             path: /healthz
@@ -2693,7 +2693,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-emailservice
-        image: matslo123/emailservice:v0.4.0@sha256:e046d889abeae53491e79af99d2810cb12e3722f71996dd6ad14e436e820555c
+        image: matslo123/emailservice:v0.4.0@sha256:50d3cb08c120a90acecc18b83b97ecd9ba6be2d9dd8c9f3c15f179326e67266b
         livenessProbe:
           httpGet:
             path: /healthz
@@ -3192,7 +3192,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-recommendationservice
-        image: matslo123/recommendationservice:v0.4.0@sha256:71ec7c4a3f83ac01986030b7c6b571dd29ba4bfa2da06faaa607073ac6b7797f
+        image: matslo123/recommendationservice:v0.4.0@sha256:06f1532dda8ddd7ecf67be7740fa844b5d72fe4f91a058d6b838243842193539
         livenessProbe:
           failureThreshold: 6
           httpGet:
@@ -3298,7 +3298,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-shippingservice
-        image: matslo123/shippingservice:v0.4.0@sha256:411e3d354bdd04b93a9de61d17a2dba9b94d7ad95a2bd2079aee666b223f0250
+        image: matslo123/shippingservice:v0.4.0@sha256:b5ae14bc9920d3a3f5b2eb973005d98ca384a534d1f6f6753015f805df1a6af5
         livenessProbe:
           failureThreshold: 6
           httpGet:
@@ -3398,7 +3398,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-storefrontprojectionservice
-        image: matslo123/storefrontprojectionservice:v0.4.0@sha256:68df57b58766042061552326a6e9a3f91754f2bb7d062f45c8eaf83df07b781a
+        image: matslo123/storefrontprojectionservice:v0.4.0@sha256:e6ef2e964e25b1aa76f42803ebcd436ec048937d37207a560434da78a86c7a7f
         livenessProbe:
           failureThreshold: 6
           httpGet:

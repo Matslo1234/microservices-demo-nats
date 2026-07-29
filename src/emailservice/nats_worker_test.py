@@ -15,7 +15,7 @@ from nats_worker import (
     RESULT_SLOT,
     SENT_SUBJECT,
     _build_outcome,
-    _fetch_messages,
+    _fetch_message,
     _process_message,
     _provider_idempotency_key,
     _ready,
@@ -175,22 +175,27 @@ class FetchRecoveryTest(unittest.IsolatedAsyncioTestCase):
     _ready.clear()
 
   async def test_transient_service_unavailable_does_not_stop_consumer(self):
-    expected = [object()]
+    expected = object()
 
     class Subscription:
       def __init__(self):
         self.calls = 0
+        self.requests = []
 
-      async def fetch(self, **_):
+      async def fetch(self, **request):
         self.calls += 1
+        self.requests.append(request)
         if self.calls == 1:
           raise ServiceUnavailableError
-        return expected
+        return [expected]
 
     subscription = Subscription()
     self.assertEqual(
-        expected, await _fetch_messages(subscription, retry_delay=0))
+        expected, await _fetch_message(subscription, retry_delay=0))
     self.assertEqual(2, subscription.calls)
+    self.assertEqual(
+        [{"batch": 1, "timeout": 1}, {"batch": 1, "timeout": 1}],
+        subscription.requests)
     self.assertTrue(_ready.is_set())
 
 

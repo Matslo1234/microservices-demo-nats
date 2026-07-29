@@ -33,6 +33,7 @@ import java.security.cert.Certificate;
 import java.security.cert.CertificateFactory;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Iterator;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
@@ -153,7 +154,9 @@ final class NatsEventWorker implements AutoCloseable {
   private void consume(JetStream jetStream, JetStreamSubscription subscription) {
     while (running.get()) {
       try {
-        for (Message message : subscription.fetch(32, Duration.ofSeconds(1))) {
+        Iterator<Message> messages = subscription.iterate(32, Duration.ofSeconds(1));
+        while (running.get() && messages.hasNext()) {
+          Message message = messages.next();
           ThreadContext.put("correlation_id", "unknown");
           ThreadContext.put("message_id", "unknown");
           MessageEnvelope source = null;

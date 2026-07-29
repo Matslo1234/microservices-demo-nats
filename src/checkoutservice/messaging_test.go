@@ -5,8 +5,10 @@ package main
 
 import (
 	"testing"
+	"time"
 
 	commonv1 "github.com/GoogleCloudPlatform/microservices-demo/protos/common/v1"
+	"github.com/nats-io/nats.go"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -49,5 +51,43 @@ func TestCheckoutMessageGroupUsesAggregateIdentity(t *testing.T) {
 	}
 	if got, want := checkoutMessageGroup(encoded), "order\x00order-1"; got != want {
 		t.Fatalf("message group = %q, want %q", got, want)
+	}
+}
+
+func TestCheckoutProcessesStreamBeforeFetchBatchCloses(t *testing.T) {
+	messages := make(chan *nats.Msg)
+	processed := make(chan struct{})
+	finished := make(chan struct{})
+	worker := &checkoutWorker{}
+
+	go func() {
+		worker.processStream(
+			messages,
+			func(*nats.Msg) error {
+				close(processed)
+				return nil
+			},
+			256,
+			1,
+		)
+		close(finished)
+	}()
+
+	messages <- &nats.Msg{}
+	select {
+	case <-processed:
+	case <-time.After(time.Second):
+		t.Fatal("message was not processed until the stream closed")
+	}
+	select {
+	case <-finished:
+		t.Fatal("stream processor stopped before the batch stream closed")
+	default:
+	}
+	close(messages)
+	select {
+	case <-finished:
+	case <-time.After(time.Second):
+		t.Fatal("stream processor did not stop after the batch stream closed")
 	}
 }

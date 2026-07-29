@@ -150,10 +150,10 @@ def _build_outcome(envelope, failure_mode=None):
   }
 
 
-async def _fetch_messages(subscription, retry_delay=0.1):
+async def _fetch_message(subscription, retry_delay=0.1):
   while not _stop.is_set():
     try:
-      messages = await subscription.fetch(batch=16, timeout=1)
+      messages = await subscription.fetch(batch=1, timeout=1)
     except (NatsTimeoutError, asyncio.TimeoutError):
       _ready.set()
       continue
@@ -165,8 +165,9 @@ async def _fetch_messages(subscription, retry_delay=0.1):
       await asyncio.sleep(retry_delay)
       continue
     _ready.set()
-    return messages
-  return []
+    if messages:
+      return messages[0]
+  return None
 
 
 async def _process_message(message, js, failure_mode):
@@ -238,11 +239,9 @@ async def _consume_connection():
     _ready.set()
     logger.info("Email order-completed consumer is ready")
     while not _stop.is_set():
-      messages = await _fetch_messages(subscription)
-      await asyncio.gather(*(
-          _process_message(message, js, failure_mode)
-          for message in messages
-      ))
+      message = await _fetch_message(subscription)
+      if message is not None:
+        await _process_message(message, js, failure_mode)
   finally:
     _ready.clear()
     await connection.drain()

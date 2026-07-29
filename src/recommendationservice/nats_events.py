@@ -280,7 +280,7 @@ async def _process_message(message, handler):
 async def _consume(subscription, handler):
     while not _stop.is_set():
         try:
-            messages = await subscription.fetch(batch=64, timeout=1)
+            messages = await subscription.fetch(batch=1, timeout=1)
         except (NatsTimeoutError, asyncio.TimeoutError):
             continue
         except (nats.errors.Error, ServiceUnavailableError):
@@ -293,12 +293,10 @@ async def _consume(subscription, handler):
             continue
         if messages:
             logger.debug(
-                "NATS event batch received",
-                extra={"message_kind": "event", "batch_size": len(messages)},
+                "NATS event received",
+                extra={"message_kind": "event"},
             )
-            await asyncio.gather(
-                *(_process_message(message, handler) for message in messages)
-            )
+            await _process_message(messages[0], handler)
 
 
 async def _durable(js, subject, durable):

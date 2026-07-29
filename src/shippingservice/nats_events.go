@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -26,6 +27,7 @@ const (
 	shippingCommandConsumer   = "shipping-commands-v1"
 	shippingCommandBatchSize  = 256
 	shippingCommandMaxPending = 512
+	shippingCommandWorkers    = 32
 )
 
 type shippingEventWorker struct {
@@ -146,30 +148,86 @@ func (worker *shippingEventWorker) runCommands() {
 			return
 		default:
 		}
-		messages, err := worker.commandSubscription.Fetch(shippingCommandBatchSize, nats.MaxWait(time.Second))
-		if err != nil && err != nats.ErrTimeout {
-			log.Errorf("shipping command fetch failed: %v", err)
-			time.Sleep(time.Second)
+		batch, err := worker.commandSubscription.FetchBatch(
+			shippingCommandBatchSize,
+			nats.MaxWait(time.Second),
+		)
+		if err != nil {
+			if !shippingConsumerStopped(err) {
+				log.Errorf("shipping command fetch failed: %v", err)
+				time.Sleep(time.Second)
+			}
 			continue
 		}
-		for _, message := range messages {
-			entry := shippingMessageLog(message, "command")
-			entry.Debug("NATS command received")
-		}
-		results := worker.handleCommandBatch(messages)
-		for index, message := range messages {
-			entry := shippingMessageLog(message, "command")
-			if err := results[index]; err != nil {
-				entry.WithError(err).Error("shipping command processing failed")
-				_ = message.NakWithDelay(time.Second)
-				continue
-			}
-			if err := message.Ack(); err != nil {
-				entry.WithError(err).Error("shipping command acknowledgement failed")
-				continue
-			}
+		processShippingStream(
+			batch.Messages(),
+			shippingCommandBatchSize,
+			shippingCommandWorkers,
+			worker.processCommandMessage,
+		)
+		if err := batch.Error(); err != nil && !shippingConsumerStopped(err) {
+			log.Errorf("shipping command stream failed: %v", err)
+			time.Sleep(time.Second)
 		}
 	}
+}
+
+func (worker *shippingEventWorker) processCommandMessage(message *nats.Msg) {
+	entry := shippingMessageLog(message, "command")
+	entry.Debug("NATS command received")
+	if err := worker.handleCommand(message); err != nil {
+		entry.WithError(err).Error("shipping command processing failed")
+		_ = message.NakWithDelay(time.Second)
+		return
+	}
+	if err := message.Ack(); err != nil {
+		entry.WithError(err).Error("shipping command acknowledgement failed")
+	}
+}
+
+func processShippingStream(
+	messages <-chan *nats.Msg,
+	fetchSize int,
+	parallelism int,
+	process func(*nats.Msg),
+) {
+	if parallelism <= 1 {
+		for message := range messages {
+			process(message)
+		}
+		return
+	}
+	lanes := make([]chan *nats.Msg, parallelism)
+	var running sync.WaitGroup
+	for index := range lanes {
+		lane := make(chan *nats.Msg, fetchSize)
+		lanes[index] = lane
+		running.Add(1)
+		go func(messages <-chan *nats.Msg) {
+			defer running.Done()
+			for message := range messages {
+				process(message)
+			}
+		}(lane)
+	}
+	for message := range messages {
+		lane := shippingMessageLane(message.Data, len(lanes))
+		lanes[lane] <- message
+	}
+	for _, lane := range lanes {
+		close(lane)
+	}
+	running.Wait()
+}
+
+func shippingMessageLane(data []byte, lanes int) int {
+	correlationID, _ := shippingEnvelopeContext(data)
+	hash := uint32(2166136261)
+	for index := 0; index < len(correlationID); index++ {
+		hash ^= uint32(correlationID[index])
+		hash *= 16777619
+	}
+	return int(hash % uint32(lanes))
 }
 
 func (worker *shippingEventWorker) run() {
@@ -179,13 +237,15 @@ func (worker *shippingEventWorker) run() {
 			return
 		default:
 		}
-		messages, err := worker.subscription.Fetch(32, nats.MaxWait(time.Second))
-		if err != nil && err != nats.ErrTimeout {
-			log.Errorf("shipping cart event fetch failed: %v", err)
-			time.Sleep(time.Second)
+		batch, err := worker.subscription.FetchBatch(32, nats.MaxWait(time.Second))
+		if err != nil {
+			if !shippingConsumerStopped(err) {
+				log.Errorf("shipping cart event fetch failed: %v", err)
+				time.Sleep(time.Second)
+			}
 			continue
 		}
-		for _, message := range messages {
+		for message := range batch.Messages() {
 			entry := shippingMessageLog(message, "event")
 			entry.Debug("NATS event received")
 			if err := worker.handle(message); err != nil {
@@ -198,7 +258,18 @@ func (worker *shippingEventWorker) run() {
 				continue
 			}
 		}
+		if err := batch.Error(); err != nil && !shippingConsumerStopped(err) {
+			log.Errorf("shipping cart event stream failed: %v", err)
+			time.Sleep(time.Second)
+		}
 	}
+}
+
+func shippingConsumerStopped(err error) bool {
+	return errors.Is(err, nats.ErrTimeout) ||
+		errors.Is(err, nats.ErrConnectionClosed) ||
+		errors.Is(err, nats.ErrBadSubscription) ||
+		errors.Is(err, nats.ErrSubscriptionClosed)
 }
 
 func shippingMessageLog(message *nats.Msg, kind string) *logrus.Entry {

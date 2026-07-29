@@ -360,52 +360,76 @@ func (worker *checkoutWorker) consume(
 			return
 		default:
 		}
-		messages, err := subscription.Fetch(fetchSize, nats.MaxWait(time.Second))
+		batch, err := subscription.FetchBatch(fetchSize, nats.MaxWait(time.Second))
 		if err != nil {
-			if !errors.Is(err, nats.ErrTimeout) && !errors.Is(err, nats.ErrConnectionClosed) {
+			if !checkoutConsumerStopped(err) {
 				log.WithError(err).Error("checkout consumer fetch failed")
 				time.Sleep(time.Second)
 			}
 			continue
 		}
-		worker.processBatch(messages, handler, parallelism)
+		worker.processStream(batch.Messages(), handler, fetchSize, parallelism)
+		if err := batch.Error(); err != nil && !checkoutConsumerStopped(err) {
+			log.WithError(err).Error("checkout consumer stream failed")
+			time.Sleep(time.Second)
+		}
 	}
 }
 
-func (worker *checkoutWorker) processBatch(
-	messages []*nats.Msg,
+func checkoutConsumerStopped(err error) bool {
+	return errors.Is(err, nats.ErrTimeout) ||
+		errors.Is(err, nats.ErrConnectionClosed) ||
+		errors.Is(err, nats.ErrBadSubscription) ||
+		errors.Is(err, nats.ErrSubscriptionClosed)
+}
+
+func (worker *checkoutWorker) processStream(
+	messages <-chan *nats.Msg,
 	handler func(*nats.Msg) error,
+	fetchSize int,
 	parallelism int,
 ) {
-	if parallelism <= 1 || len(messages) <= 1 {
-		for _, message := range messages {
+	if parallelism <= 1 {
+		for message := range messages {
 			worker.processMessage(message, handler)
 		}
 		return
 	}
-	groups := make(map[string][]*nats.Msg, len(messages))
-	for _, message := range messages {
-		group := checkoutMessageGroup(message.Data)
-		groups[group] = append(groups[group], message)
-	}
+
 	// Replicated Redis and JetStream commits spend most of their time waiting
-	// for I/O. Run independent aggregates concurrently while retaining stream
-	// order for every individual aggregate.
-	parallel := make(chan struct{}, parallelism)
+	// for I/O. Dispatch each message as soon as FetchBatch yields it while
+	// retaining stream order for every individual aggregate.
+	lanes := make([]chan *nats.Msg, parallelism)
 	var running sync.WaitGroup
-	for _, group := range groups {
-		group := group
+	for index := range lanes {
+		lane := make(chan *nats.Msg, fetchSize)
+		lanes[index] = lane
 		running.Add(1)
-		go func() {
+		go func(messages <-chan *nats.Msg) {
 			defer running.Done()
-			parallel <- struct{}{}
-			defer func() { <-parallel }()
-			for _, message := range group {
+			for message := range messages {
 				worker.processMessage(message, handler)
 			}
-		}()
+		}(lane)
+	}
+	for message := range messages {
+		lane := checkoutMessageLane(message.Data, len(lanes))
+		lanes[lane] <- message
+	}
+	for _, lane := range lanes {
+		close(lane)
 	}
 	running.Wait()
+}
+
+func checkoutMessageLane(data []byte, lanes int) int {
+	group := checkoutMessageGroup(data)
+	hash := uint32(2166136261)
+	for index := 0; index < len(group); index++ {
+		hash ^= uint32(group[index])
+		hash *= 16777619
+	}
+	return int(hash % uint32(lanes))
 }
 
 func (worker *checkoutWorker) processMessage(message *nats.Msg, handler func(*nats.Msg) error) {

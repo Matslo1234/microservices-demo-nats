@@ -186,6 +186,66 @@ func TestTerminalOrderOutcomeUsesImmutableJetStreamPublishTime(t *testing.T) {
 	}
 }
 
+func TestProjectionProcessesStreamBeforeFetchBatchCloses(t *testing.T) {
+	orders := newMemoryKV()
+	worker := &projector{orders: orders}
+	payload, err := anypb.New(&eventsv1.OrderCompletedEvent{
+		Order: &commonv1.SanitizedOrderSnapshot{
+			OrderId: "stream-order",
+			UserId:  "stream-user",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := proto.Marshal(&commonv1.MessageEnvelope{
+		MessageId:        "stream-completed",
+		SchemaVersion:    1,
+		OccurredAt:       timestamppb.Now(),
+		AggregateType:    "order",
+		AggregateId:      "stream-order",
+		AggregateVersion: 1,
+		CorrelationId:    "stream-order",
+		Data:             payload,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	messages := make(chan *nats.Msg)
+	finished := make(chan struct{})
+	go func() {
+		worker.applyStream(messages)
+		close(finished)
+	}()
+	messages <- &nats.Msg{
+		Subject: "boutique.evt.order.completed.v1",
+		Data:    encoded,
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		if _, err := orders.Get(storefront.OrderKey("stream-order")); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("projection was not applied until the stream closed")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	select {
+	case <-finished:
+		t.Fatal("stream processor stopped before the batch stream closed")
+	default:
+	}
+	close(messages)
+	select {
+	case <-finished:
+	case <-time.After(time.Second):
+		t.Fatal("stream processor did not stop after the batch stream closed")
+	}
+}
+
 func TestProjectionCASConvergesOnNewestAggregateVersion(t *testing.T) {
 	bucket := newMemoryKV()
 	workers := []*projector{{}, {}, {}}

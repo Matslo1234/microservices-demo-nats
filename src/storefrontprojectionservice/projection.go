@@ -180,13 +180,22 @@ func (p *projector) run(subscription *nats.Subscription, stop <-chan struct{}) {
 			return
 		default:
 		}
-		messages, err := subscription.Fetch(projectionFetchSize, nats.MaxWait(time.Second))
-		if err != nil && !errors.Is(err, nats.ErrTimeout) {
-			log.Printf("projection fetch failed: %v", err)
-			time.Sleep(time.Second)
+		batch, err := subscription.FetchBatch(
+			projectionFetchSize,
+			nats.MaxWait(time.Second),
+		)
+		if err != nil {
+			if !projectionConsumerStopped(err) {
+				log.Printf("projection fetch failed: %v", err)
+				time.Sleep(time.Second)
+			}
 			continue
 		}
-		p.applyBatch(messages)
+		p.applyStream(batch.Messages())
+		if err := batch.Error(); err != nil && !projectionConsumerStopped(err) {
+			log.Printf("projection stream failed: %v", err)
+			time.Sleep(time.Second)
+		}
 	}
 }
 
@@ -197,9 +206,25 @@ type projectionMessage struct {
 	publishedAt   time.Time
 }
 
-func (p *projector) applyBatch(messages []*nats.Msg) {
-	groups := make(map[string][]projectionMessage, len(messages))
-	for _, message := range messages {
+func (p *projector) applyStream(messages <-chan *nats.Msg) {
+	queueDepth := projectionFetchSize/projectionParallelism + 1
+	lanes := make([]chan projectionMessage, projectionParallelism)
+	var running sync.WaitGroup
+	for index := range lanes {
+		lane := make(chan projectionMessage, queueDepth)
+		lanes[index] = lane
+		running.Add(1)
+		go func(messages <-chan projectionMessage) {
+			defer running.Done()
+			for message := range messages {
+				p.applyMessage(message)
+			}
+		}(lane)
+	}
+
+	received := 0
+	groups := make(map[string]struct{})
+	for message := range messages {
 		if !projectionHandlesSubject(message.Subject) {
 			if err := message.Ack(); err != nil {
 				log.Printf("ignored projection event acknowledgement failed topic=%q error=%v", message.Subject, err)
@@ -214,42 +239,53 @@ func (p *projector) applyBatch(messages []*nats.Msg) {
 		if metadata, err := message.Metadata(); err == nil && !metadata.Timestamp.IsZero() {
 			publishedAt = metadata.Timestamp.UTC()
 		}
-		groups[correlationID] = append(groups[correlationID], projectionMessage{
+		item := projectionMessage{
 			message: message, correlationID: correlationID, messageID: messageID, publishedAt: publishedAt,
-		})
+		}
+		received++
+		groups[correlationID] = struct{}{}
+		lanes[projectionMessageLane(correlationID, len(lanes))] <- item
 	}
-	if len(messages) != 0 {
-		slog.Debug("NATS projection batch received", "message_kind", "event",
-			"messages", len(messages), "correlation_groups", len(groups))
-	}
-
-	parallel := make(chan struct{}, projectionParallelism)
-	var running sync.WaitGroup
-	for _, group := range groups {
-		group := group
-		running.Add(1)
-		go func() {
-			defer running.Done()
-			parallel <- struct{}{}
-			defer func() { <-parallel }()
-			for _, item := range group {
-				if err := p.apply(item.message.Subject, item.message.Data, item.publishedAt); err != nil {
-					log.Printf("projection event processing failed topic=%q message_id=%q correlation_id=%q error=%v",
-						item.message.Subject, item.messageID, item.correlationID, err)
-					if nakErr := item.message.NakWithDelay(time.Second); nakErr != nil {
-						log.Printf("projection event NAK failed topic=%q message_id=%q correlation_id=%q error=%v",
-							item.message.Subject, item.messageID, item.correlationID, nakErr)
-					}
-					continue
-				}
-				if err := item.message.Ack(); err != nil {
-					log.Printf("projection event acknowledgement failed topic=%q message_id=%q correlation_id=%q error=%v",
-						item.message.Subject, item.messageID, item.correlationID, err)
-				}
-			}
-		}()
+	for _, lane := range lanes {
+		close(lane)
 	}
 	running.Wait()
+	if received != 0 {
+		slog.Debug("NATS projection batch received", "message_kind", "event",
+			"messages", received, "correlation_groups", len(groups))
+	}
+}
+
+func (p *projector) applyMessage(item projectionMessage) {
+	if err := p.apply(item.message.Subject, item.message.Data, item.publishedAt); err != nil {
+		log.Printf("projection event processing failed topic=%q message_id=%q correlation_id=%q error=%v",
+			item.message.Subject, item.messageID, item.correlationID, err)
+		if nakErr := item.message.NakWithDelay(time.Second); nakErr != nil {
+			log.Printf("projection event NAK failed topic=%q message_id=%q correlation_id=%q error=%v",
+				item.message.Subject, item.messageID, item.correlationID, nakErr)
+		}
+		return
+	}
+	if err := item.message.Ack(); err != nil {
+		log.Printf("projection event acknowledgement failed topic=%q message_id=%q correlation_id=%q error=%v",
+			item.message.Subject, item.messageID, item.correlationID, err)
+	}
+}
+
+func projectionMessageLane(correlationID string, lanes int) int {
+	hash := uint32(2166136261)
+	for index := 0; index < len(correlationID); index++ {
+		hash ^= uint32(correlationID[index])
+		hash *= 16777619
+	}
+	return int(hash % uint32(lanes))
+}
+
+func projectionConsumerStopped(err error) bool {
+	return errors.Is(err, nats.ErrTimeout) ||
+		errors.Is(err, nats.ErrConnectionClosed) ||
+		errors.Is(err, nats.ErrBadSubscription) ||
+		errors.Is(err, nats.ErrSubscriptionClosed)
 }
 
 func projectionFiltersMatch(single string, multiple []string) bool {
