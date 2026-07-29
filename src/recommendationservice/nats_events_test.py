@@ -3,6 +3,7 @@
 # Licensed under the Apache License, Version 2.0 (the "License");
 
 import unittest
+from unittest.mock import patch
 
 from nats.js.errors import NoKeysError
 
@@ -59,12 +60,14 @@ class StreamingConsumerTests(unittest.IsolatedAsyncioTestCase):
       processed.append(received)
       _stop.set()
 
-    await _consume(subscription, handler)
+    with patch("nats_events._message_context") as message_context:
+      await _consume(subscription, handler)
 
     self.assertEqual([message], processed)
     self.assertEqual([{"batch": 1, "timeout": 1}], subscription.requests)
     self.assertEqual(1, message.acks)
     self.assertEqual(0, message.naks)
+    message_context.assert_not_called()
 
   async def test_empty_catalog_bucket_has_no_keys(self):
     store = _NATSCatalogStore(EmptyBucket())

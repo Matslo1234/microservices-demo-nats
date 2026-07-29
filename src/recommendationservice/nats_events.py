@@ -268,11 +268,11 @@ async def _handle_trigger(js, catalog_store, message):
 
 
 async def _process_message(message, handler):
-    correlation_id, message_id = _message_context(message)
     try:
         await handler(message)
         await message.ack()
     except Exception:
+        correlation_id, message_id = _message_context(message)
         logger.exception(
             "Event processing failed",
             extra={

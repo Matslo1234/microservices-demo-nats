@@ -206,15 +206,14 @@ async def catalog_candidates(store, excluded, seed, model_revision, limit=5):
   if len(product_ids) < int(snapshot.get("product_count", 0)):
     raise CatalogNotReady("catalog product index is incomplete")
 
-  available = []
-  for product_id in product_ids:
-    try:
-      record, _ = await store.get(product_key(product_id))
-    except CatalogNotFound:
-      continue
-    if product_id and product_id not in excluded and not record.get("removed", False):
-      available.append(product_id)
-  available.sort()
+  # The CAS-maintained index is the authoritative active-product set. Reading
+  # every product record again made the request cost grow linearly with the
+  # catalog even though recommendation selection only needs product IDs.
+  available = [
+      product_id
+      for product_id in product_ids
+      if product_id not in excluded
+  ]
   count = min(limit, len(available))
   deterministic_seed = "\0".join((seed, model_revision, str(catalog_revision)))
   selected = random.Random(deterministic_seed).sample(available, count)

@@ -48,7 +48,7 @@ DEFAULT_IMAGE_DIGESTS = {
     "loadgenerator": "c66a188ecf8bf7507bd3982a5fa50ae3e9497f3239248dd48b275fc2aee0adb3",
     "paymentservice": "9a6c36bb850627bfd0b9ab86e9b3c05bf3ce9dcb4c25967877a4ec106c954519",
     "productcatalogservice": "77716d929c9fe2d662c61d9865afe8fb8c0e77bf43458386e328d4e5e1bbece8",
-    "recommendationservice": "6d70aae9e79f36a9d52110fb1eab2bc3ee871ef55524e69545c78751046619b7",
+    "recommendationservice": "d0adcd103cba195421e44713447a90ecca2a01e1fd938d9920539c964969baf4",
     "shippingservice": "b5ae14bc9920d3a3f5b2eb973005d98ca384a534d1f6f6753015f805df1a6af5",
     "storefrontprojectionservice": "e6ef2e964e25b1aa76f42803ebcd436ec048937d37207a560434da78a86c7a7f",
 }

@@ -22,10 +22,12 @@ class MemoryCatalog:
     self._values = {}
     self._revision = 0
     self._lock = asyncio.Lock()
+    self.get_calls = []
     self.keys_calls = 0
 
   async def get(self, key):
     async with self._lock:
+      self.get_calls.append(key)
       if key not in self._values:
         raise CatalogNotFound(key)
       value, revision = self._values[key]
@@ -125,6 +127,32 @@ class SharedCatalogTests(unittest.IsolatedAsyncioTestCase):
     self.assertEqual(42, results[0][1])
     self.assertNotIn("a", results[0][0])
     self.assertEqual(0, store.keys_calls)
+
+  async def test_candidate_read_cost_does_not_scale_with_catalog_size(self):
+    store = MemoryCatalog()
+    for index in range(100):
+      product_id = f"product-{index}"
+      await apply_product(
+          store,
+          product(product_id, index + 1, f"event-{index}"),
+      )
+    await apply_snapshot(store, {
+        "catalog_revision": 42,
+        "product_count": 100,
+        "checksum": "checksum",
+        "source_event_id": "snapshot-42",
+        "source_version": 42,
+    })
+    store.get_calls.clear()
+
+    candidates, revision = await catalog_candidates(
+        store, {"product-0"}, "page-view-1", "model-v1"
+    )
+
+    self.assertEqual(42, revision)
+    self.assertEqual(5, len(candidates))
+    self.assertNotIn("product-0", candidates)
+    self.assertEqual(["catalog", "catalog-products"], store.get_calls)
 
   async def test_removed_product_is_removed_from_shared_index(self):
     store = MemoryCatalog()
