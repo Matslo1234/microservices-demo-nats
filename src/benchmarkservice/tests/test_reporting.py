@@ -62,6 +62,7 @@ class ReportingTest(unittest.TestCase):
 
             self.assertEqual(2, summary["business"]["submitted"])
             self.assertEqual(1, summary["business"]["completed"])
+            self.assertEqual(1, summary["worker_count"])
             self.assertEqual(0.1, summary["business"]["goodput_orders_per_second"])
             self.assertEqual(
                 100.0, summary["business"]["checkout_to_outcome"]["p95_ms"]

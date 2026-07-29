@@ -241,6 +241,16 @@ class NatsSharedStore:
     def get_object(self, name: str) -> bytes:
         return self._call(self._get_object(name))
 
+    async def _delete_object(self, name: str) -> None:
+        await self._ensure_connected()
+        try:
+            await self._objects.delete(name)
+        except self._errors["object_not_found"]:
+            return
+
+    def delete_object(self, name: str) -> None:
+        self._call(self._delete_object(name))
+
     async def _ready(self) -> None:
         await self._ensure_connected()
         await self._kv.status()

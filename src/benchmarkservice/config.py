@@ -3,13 +3,16 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+import math
+from dataclasses import asdict, dataclass, replace
 from typing import Any, Mapping
 from urllib.parse import urlparse
 
 
 APPLICATION_TYPES = {"GRPC", "NATS"}
 WORKLOADS = {"closed", "open"}
+MAX_OPEN_ARRIVAL_RATE_PER_WORKER = 100.0
+MAX_CLOSED_USERS_PER_WORKER = 1_000
 
 
 class ConfigError(ValueError):
@@ -104,6 +107,21 @@ class BenchmarkConfig:
         application_type: str,
         target_url: str,
     ) -> "BenchmarkConfig":
+        return cls._from_values(
+            values,
+            application_type,
+            target_url,
+            minimum_spawn_rate=0.01,
+        )
+
+    @classmethod
+    def _from_values(
+        cls,
+        values: Mapping[str, Any],
+        application_type: str,
+        target_url: str,
+        minimum_spawn_rate: float,
+    ) -> "BenchmarkConfig":
         app_type = application_type.strip().upper()
         if app_type not in APPLICATION_TYPES:
             raise ConfigError("APPLICATION_TYPE must be GRPC or NATS")
@@ -120,7 +138,13 @@ class BenchmarkConfig:
             duration_seconds=_integer(values, "duration_seconds", 120, 1, 3600),
             drain_seconds=_integer(values, "drain_seconds", 60, 1, 1800),
             users=_integer(values, "users", 10, 1, 10_000),
-            spawn_rate=_number(values, "spawn_rate", 1.0, 0.01, 10_000.0),
+            spawn_rate=_number(
+                values,
+                "spawn_rate",
+                1.0,
+                minimum_spawn_rate,
+                10_000.0,
+            ),
             arrival_rate=_number(values, "arrival_rate", 1.0, 0.01, 10_000.0),
             outcome_timeout_seconds=_number(
                 values, "outcome_timeout_seconds", 30.0, 1.0, 1800.0
@@ -145,6 +169,17 @@ class BenchmarkConfig:
             str(values.get("target_url", "")),
         )
 
+    @classmethod
+    def from_worker_dict(
+        cls, values: Mapping[str, Any]
+    ) -> "BenchmarkConfig":
+        return cls._from_values(
+            values,
+            str(values.get("application_type", "")),
+            str(values.get("target_url", "")),
+            minimum_spawn_rate=0.001,
+        )
+
     @property
     def submission_seconds(self) -> int:
         return self.warmup_seconds + self.duration_seconds
@@ -152,6 +187,51 @@ class BenchmarkConfig:
     @property
     def run_seconds(self) -> int:
         return self.submission_seconds + self.drain_seconds
+
+    @property
+    def worker_count(self) -> int:
+        if self.workload == "open":
+            return max(
+                1,
+                math.ceil(
+                    self.arrival_rate / MAX_OPEN_ARRIVAL_RATE_PER_WORKER
+                ),
+            )
+        return max(1, math.ceil(self.users / MAX_CLOSED_USERS_PER_WORKER))
+
+    def for_worker(self, index: int) -> "BenchmarkConfig":
+        workers = self.worker_count
+        if index < 0 or index >= workers:
+            raise IndexError(
+                f"worker index {index} is outside [0, {workers})"
+            )
+
+        seed = (self.seed + index) % 2_147_483_648
+        common = {
+            "seed": seed,
+            # Resource and NATS metrics describe the shared target, so sampling
+            # them in every worker would duplicate and corrupt the aggregate.
+            "collect_resources": self.collect_resources and index == 0,
+            "collect_nats_metrics": self.collect_nats_metrics and index == 0,
+        }
+        if self.workload == "open":
+            return replace(
+                self,
+                arrival_rate=min(
+                    MAX_OPEN_ARRIVAL_RATE_PER_WORKER,
+                    self.arrival_rate
+                    - index * MAX_OPEN_ARRIVAL_RATE_PER_WORKER,
+                ),
+                **common,
+            )
+
+        users_per_worker, remainder = divmod(self.users, workers)
+        return replace(
+            self,
+            users=users_per_worker + (1 if index < remainder else 0),
+            spawn_rate=self.spawn_rate / workers,
+            **common,
+        )
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)

@@ -172,10 +172,17 @@ class BenchmarkManager:
         }
         try:
             self.store.create(run_key(run_id), record)
-            name = self.jobs.create(run_id, maximum_seconds)
+            name = self.jobs.create(
+                run_id, maximum_seconds, config.worker_count
+            )
             record = self.mutate(
                 run_id,
-                lambda value: value["status"].update({"job_name": name}),
+                lambda value: value["status"].update(
+                    {
+                        "job_name": name,
+                        "worker_count": config.worker_count,
+                    }
+                ),
             )
         except Exception as error:
             try:

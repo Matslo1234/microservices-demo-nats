@@ -461,6 +461,7 @@ def build_report(run_directory: Path) -> dict[str, Any]:
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "application_type": config.application_type,
         "workload": config.workload,
+        "worker_count": config.worker_count,
         "warmup_seconds": config.warmup_seconds,
         "steady_seconds": config.duration_seconds,
         "drain_seconds": config.drain_seconds,

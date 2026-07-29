@@ -22,7 +22,7 @@ from config import BenchmarkConfig
 CONFIG_FILE = Path(os.environ["BENCHMARK_CONFIG_FILE"])
 OUTPUT_DIRECTORY = Path(os.environ["BENCHMARK_OUTPUT_DIR"])
 with CONFIG_FILE.open(encoding="utf-8") as source:
-    CONFIG = BenchmarkConfig.from_dict(json.load(source))
+    CONFIG = BenchmarkConfig.from_worker_dict(json.load(source))
 
 TEST_STARTED_MONOTONIC = 0.0
 TEST_STARTED_EPOCH = 0.0
@@ -30,6 +30,12 @@ TEST_STARTED_EPOCH = 0.0
 
 def start_clock() -> None:
     global TEST_STARTED_MONOTONIC, TEST_STARTED_EPOCH
+    synchronized_start = float(
+        os.environ.get("BENCHMARK_START_EPOCH", "0") or 0
+    )
+    delay = synchronized_start - time.time()
+    if delay > 0:
+        gevent.sleep(delay)
     TEST_STARTED_MONOTONIC = time.monotonic()
     TEST_STARTED_EPOCH = time.time()
 

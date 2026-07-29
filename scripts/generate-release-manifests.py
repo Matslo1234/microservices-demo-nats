@@ -39,7 +39,7 @@ SERVICES = (
 )
 DEFAULT_IMAGE_DIGESTS = {
     "adservice": "793686df2852e1c7932ef56a51030bcbf2b6a200da7e604f62db8b3a7f7581ae",
-    "benchmarkservice": "7b3041d2f9f3bbd6a6a8dc9d6bca54575da873a0e45094465f8ad649eb6f2dde",
+    "benchmarkservice": "ea3905c2a87fd9230f3ae67d3115f2405a2f9c5155d2c8155b6a6a0923da96f0",
     "cartservice": "c11e45917947e9e3192d5f9feb330b6b5c4b1c7f26cccfc02c1374cd11aee3e7",
     "checkoutservice": "cc910c24e529a22b2b7973cbeb42e30be63868baffa7bdb5611e2d68014b082e",
     "currencyservice": "aadcaa314fcc6591d38e91720fc870fd55aeff7c6fdcb26322e6aa89b2c289ab",
@@ -125,12 +125,14 @@ def main() -> None:
         FOOTER,
     )
     nats = render("kubernetes-manifests/nats/fresh-cluster")
+    metrics_server = render("benchmark/manifests/metrics-server")
     single_replica_application = render(
         "benchmark/manifests/single-replica",
         allow_external_resources=True,
     )
     single_replica_benchmark = nats + "---\n" + single_replica_application
     benchmark = nats + "---\n" + application
+    hpa_benchmark = benchmark + "---\n" + metrics_server
     benchmark_variants = {
         "benchmark-nats-single-replica.yaml": (
             "Self-contained stateless NATS single-replica benchmark "
@@ -151,7 +153,7 @@ def main() -> None:
                 "disposable Jobs; run state and artifacts are held in replicated JetStream",
                 "KV/Object Store buckets.",
             ),
-            benchmark,
+            hpa_benchmark,
         ),
         "benchmark-nats-multiple-replicas.yaml": (
             "Self-contained stateless NATS replica-scaling benchmark "

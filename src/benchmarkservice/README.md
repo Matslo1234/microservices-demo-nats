@@ -9,8 +9,9 @@ artifact state in their pods:
   JetStream KV bucket;
 - raw JSONL/CSV/log files and complete archives are stored in the replicated
   `BENCHMARK_ARTIFACTS` JetStream Object Store bucket; and
-- every accepted run creates one disposable Kubernetes Job. Locust is never a
-  child of an API process.
+- every accepted run creates one disposable Kubernetes Job. Larger runs use
+  Indexed Job completions so each Locust worker has an isolated pod; Locust is
+  never a child of an API process.
 
 Any API replica can list, inspect, download, stop, or reconcile any run. Run
 submission uses KV compare-and-set on the expiring lease, so concurrent API
@@ -26,6 +27,13 @@ the failure.
 - `open` schedules checkout transactions at an absolute arrival rate.
   Submission scheduling is independent of completion tracking, so slow
   outcomes do not reduce the requested arrival rate.
+
+Open-loop runs use one worker for every 100 requested orders/s. Closed-loop
+runs use one worker for every 1,000 users, and divide the requested user spawn
+rate evenly across those workers. Worker start times are synchronized. Worker
+zero samples shared application resources once, then merges every worker's
+business and outstanding-order records into the run-level report. Individual
+Locust CSVs and logs remain in the complete artifact archive for diagnostics.
 
 Warm-up samples remain in raw artifacts but are excluded from summaries. After
 the steady interval, submission stops for the configured drain period.

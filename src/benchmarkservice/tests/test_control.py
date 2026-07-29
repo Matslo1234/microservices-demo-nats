@@ -56,6 +56,10 @@ class MemoryStore:
         with self.lock:
             self.objects[name] = bytes(data)
 
+    def delete_object(self, name):
+        with self.lock:
+            self.objects.pop(name, None)
+
     def ready(self):
         return True
 
@@ -67,10 +71,12 @@ class FakeJobs:
     def __init__(self) -> None:
         self.states = {}
         self.deleted = []
+        self.worker_counts = []
 
-    def create(self, run_id, maximum_seconds):
+    def create(self, run_id, maximum_seconds, worker_count=1):
         name = f"job-{run_id}"
         self.states[name] = "pending"
+        self.worker_counts.append(worker_count)
         return name
 
     def state(self, name):
@@ -126,6 +132,17 @@ class BenchmarkControlTest(unittest.TestCase):
         self.assertEqual(1, len(jobs.deleted))
         third = second.start({})
         self.assertNotEqual(run_id, third["status"]["run_id"])
+
+    def test_parallel_worker_count_is_given_to_kubernetes_job(self):
+        store, jobs = MemoryStore(), FakeJobs()
+        manager = self.manager(store, jobs)
+
+        result = manager.start(
+            {"workload": "open", "arrival_rate": 250}
+        )
+
+        self.assertEqual([3], jobs.worker_counts)
+        self.assertEqual(3, result["status"]["worker_count"])
 
     def test_expired_lease_is_recovered_by_another_replica(self):
         now = [1000.0]

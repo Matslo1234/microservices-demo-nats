@@ -340,6 +340,23 @@ def verify_release_manifests() -> None:
                 )
         else:
             require(content, "kind: HorizontalPodAutoscaler")
+        if path.name == "benchmark-nats-hpa.yaml":
+            metrics_server = document(content, "Deployment", "metrics-server")
+            require(
+                metrics_server,
+                "image: registry.k8s.io/metrics-server/metrics-server:v0.9.0",
+                "namespace: kube-system",
+            )
+            metrics_api = document(
+                content, "APIService", "v1beta1.metrics.k8s.io"
+            )
+            require(metrics_api, "group: metrics.k8s.io")
+        else:
+            forbid(
+                content,
+                "image: registry.k8s.io/metrics-server/metrics-server:",
+                "name: v1beta1.metrics.k8s.io",
+            )
         forbid(
             content,
             "name: redis-cart-data",

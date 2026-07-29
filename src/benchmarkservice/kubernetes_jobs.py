@@ -100,7 +100,11 @@ class KubernetesJobClient:
                 return str(container["image"])
         raise RuntimeError("benchmark API pod has no server image")
 
-    def create(self, run_id: str, maximum_seconds: int) -> str:
+    def create(
+        self, run_id: str, maximum_seconds: int, worker_count: int = 1
+    ) -> str:
+        if worker_count < 1:
+            raise ValueError("worker_count must be at least one")
         name = job_name(run_id)
         if not self.image:
             self.image = self._own_image()
@@ -139,6 +143,10 @@ class KubernetesJobClient:
                                 "command": ["python", "job.py"],
                                 "env": [
                                     {"name": "BENCHMARK_RUN_ID", "value": run_id},
+                                    {
+                                        "name": "BENCHMARK_WORKER_COUNT",
+                                        "value": str(worker_count),
+                                    },
                                     {
                                         "name": "POD_NAMESPACE",
                                         "valueFrom": {
@@ -220,6 +228,28 @@ class KubernetesJobClient:
                 },
             },
         }
+        if worker_count > 1:
+            job["spec"].update(
+                {
+                    "completionMode": "Indexed",
+                    "completions": worker_count,
+                    "parallelism": worker_count,
+                }
+            )
+            job["spec"]["template"]["spec"]["containers"][0]["env"].append(
+                {
+                    "name": "BENCHMARK_WORKER_INDEX",
+                    "valueFrom": {
+                        "fieldRef": {
+                            "fieldPath": (
+                                "metadata.annotations["
+                                "'batch.kubernetes.io/"
+                                "job-completion-index']"
+                            )
+                        }
+                    },
+                }
+            )
         try:
             self._request("POST", self.collection_path, job)
         except Exception as create_error:
@@ -238,12 +268,12 @@ class KubernetesJobClient:
         value = self._request("GET", path)
         assert value is not None
         status = value.get("status", {})
+        if int(status.get("active", 0)):
+            return "running"
         if int(status.get("succeeded", 0)):
             return "succeeded"
         if int(status.get("failed", 0)):
             return "failed"
-        if int(status.get("active", 0)):
-            return "running"
         return "pending"
 
     def delete(self, name: str) -> None:
