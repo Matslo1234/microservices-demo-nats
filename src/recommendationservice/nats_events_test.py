@@ -4,7 +4,9 @@
 
 import unittest
 
-from nats_events import _consume, _stop
+from nats.js.errors import NoKeysError
+
+from nats_events import _NATSCatalogStore, _consume, _stop
 
 
 class Message:
@@ -34,6 +36,12 @@ class Subscription:
     return [self.message]
 
 
+class EmptyBucket:
+
+  async def keys(self):
+    raise NoKeysError
+
+
 class StreamingConsumerTests(unittest.IsolatedAsyncioTestCase):
 
   async def asyncSetUp(self):
@@ -57,6 +65,11 @@ class StreamingConsumerTests(unittest.IsolatedAsyncioTestCase):
     self.assertEqual([{"batch": 1, "timeout": 1}], subscription.requests)
     self.assertEqual(1, message.acks)
     self.assertEqual(0, message.naks)
+
+  async def test_empty_catalog_bucket_has_no_keys(self):
+    store = _NATSCatalogStore(EmptyBucket())
+
+    self.assertEqual([], await store.keys())
 
 
 if __name__ == "__main__":

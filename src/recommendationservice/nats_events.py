@@ -16,7 +16,7 @@ from google.protobuf.any_pb2 import Any
 from google.protobuf.timestamp_pb2 import Timestamp
 from nats.errors import TimeoutError as NatsTimeoutError
 from nats.js.api import AckPolicy, ConsumerConfig, DeliverPolicy
-from nats.js.errors import ServiceUnavailableError
+from nats.js.errors import NoKeysError, ServiceUnavailableError
 
 from catalog_kv import (
     CatalogConflict,
@@ -181,7 +181,13 @@ class _NATSCatalogStore:
             raise
 
     async def keys(self):
-        return await self._bucket.keys()
+        try:
+            return await self._bucket.keys()
+        except NoKeysError:
+            # nats-py models a valid, empty KV bucket as an exception. Expose
+            # the store contract expected by the catalog-index migration.
+            return []
+
 
 def _kv_not_found(error):
     return type(error).__name__ in {
