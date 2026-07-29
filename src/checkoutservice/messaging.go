@@ -30,6 +30,7 @@ const (
 	checkoutWorkflowFetchBatchSize   = 256
 	checkoutProjectionMaxPending     = 256
 	checkoutWorkflowMaxPending       = 1024
+	checkoutProjectionParallelism    = 16
 	checkoutWorkflowParallelism      = 32
 )
 
@@ -58,10 +59,18 @@ type checkoutConsumerDefinition struct {
 	filters     []string
 	durable     string
 	stream      string
-	handler     func(*nats.Msg) error
+	handler     checkoutMessageHandler
 	fetchSize   int
 	maxPending  int
 	parallelism int
+}
+
+type checkoutMessageHandler func(*nats.Msg, *commonv1.MessageEnvelope) error
+
+type checkoutStreamMessage struct {
+	message  *nats.Msg
+	envelope *commonv1.MessageEnvelope
+	err      error
 }
 
 type checkoutMetrics struct {
@@ -170,11 +179,11 @@ func startCheckoutWorker(store *stateStore) (*checkoutWorker, error) {
 
 	projections := []checkoutConsumerDefinition{
 		{[]string{"boutique.evt.catalog.>"}, "checkout-catalog-v1", "BOUTIQUE_EVENTS",
-			worker.handleProjectionMessage, checkoutProjectionFetchBatchSize, checkoutProjectionMaxPending, 1},
+			worker.handleProjectionMessage, checkoutProjectionFetchBatchSize, checkoutProjectionMaxPending, checkoutProjectionParallelism},
 		{[]string{"boutique.evt.currency.>"}, "checkout-currency-v1", "BOUTIQUE_EVENTS",
-			worker.handleProjectionMessage, checkoutProjectionFetchBatchSize, checkoutProjectionMaxPending, 1},
+			worker.handleProjectionMessage, checkoutProjectionFetchBatchSize, checkoutProjectionMaxPending, checkoutProjectionParallelism},
 		{[]string{"boutique.evt.cart.>"}, "checkout-cart-v1", "BOUTIQUE_EVENTS",
-			worker.handleProjectionMessage, checkoutProjectionFetchBatchSize, checkoutProjectionMaxPending, 1},
+			worker.handleProjectionMessage, checkoutProjectionFetchBatchSize, checkoutProjectionMaxPending, checkoutProjectionParallelism},
 	}
 	workflows := []checkoutConsumerDefinition{
 		{[]string{"boutique.cmd.order.submit.v1"}, "checkout-order-commands-v1", "BOUTIQUE_COMMANDS",
@@ -350,7 +359,7 @@ func checkoutConsumerFiltersMatch(single string, multiple, wanted []string) bool
 
 func (worker *checkoutWorker) consume(
 	subscription *nats.Subscription,
-	handler func(*nats.Msg) error,
+	handler checkoutMessageHandler,
 	fetchSize int,
 	parallelism int,
 ) {
@@ -385,13 +394,13 @@ func checkoutConsumerStopped(err error) bool {
 
 func (worker *checkoutWorker) processStream(
 	messages <-chan *nats.Msg,
-	handler func(*nats.Msg) error,
+	handler checkoutMessageHandler,
 	fetchSize int,
 	parallelism int,
 ) {
 	if parallelism <= 1 {
 		for message := range messages {
-			worker.processMessage(message, handler)
+			worker.processMessage(decodeCheckoutStreamMessage(message), handler)
 		}
 		return
 	}
@@ -399,13 +408,13 @@ func (worker *checkoutWorker) processStream(
 	// Replicated Redis and JetStream commits spend most of their time waiting
 	// for I/O. Dispatch each message as soon as FetchBatch yields it while
 	// retaining stream order for every individual aggregate.
-	lanes := make([]chan *nats.Msg, parallelism)
+	lanes := make([]chan checkoutStreamMessage, parallelism)
 	var running sync.WaitGroup
 	for index := range lanes {
-		lane := make(chan *nats.Msg, fetchSize)
+		lane := make(chan checkoutStreamMessage, fetchSize)
 		lanes[index] = lane
 		running.Add(1)
-		go func(messages <-chan *nats.Msg) {
+		go func(messages <-chan checkoutStreamMessage) {
 			defer running.Done()
 			for message := range messages {
 				worker.processMessage(message, handler)
@@ -413,8 +422,9 @@ func (worker *checkoutWorker) processStream(
 		}(lane)
 	}
 	for message := range messages {
-		lane := checkoutMessageLane(message.Data, len(lanes))
-		lanes[lane] <- message
+		decoded := decodeCheckoutStreamMessage(message)
+		lane := checkoutMessageLane(decoded.envelope, len(lanes))
+		lanes[lane] <- decoded
 	}
 	for _, lane := range lanes {
 		close(lane)
@@ -422,8 +432,13 @@ func (worker *checkoutWorker) processStream(
 	running.Wait()
 }
 
-func checkoutMessageLane(data []byte, lanes int) int {
-	group := checkoutMessageGroup(data)
+func decodeCheckoutStreamMessage(message *nats.Msg) checkoutStreamMessage {
+	envelope, err := decodeEnvelope(message.Data)
+	return checkoutStreamMessage{message: message, envelope: envelope, err: err}
+}
+
+func checkoutMessageLane(envelope *commonv1.MessageEnvelope, lanes int) int {
+	group := checkoutMessageGroup(envelope)
 	hash := uint32(2166136261)
 	for index := 0; index < len(group); index++ {
 		hash ^= uint32(group[index])
@@ -432,31 +447,44 @@ func checkoutMessageLane(data []byte, lanes int) int {
 	return int(hash % uint32(lanes))
 }
 
-func (worker *checkoutWorker) processMessage(message *nats.Msg, handler func(*nats.Msg) error) {
-	correlationID, messageID := checkoutMessageContext(message.Data)
-	entry := log.WithFields(logrus.Fields{
-		"topic": message.Subject, "message_kind": checkoutMessageKind(message.Subject),
-		"message_id": messageID, "correlation_id": correlationID,
-	})
-	if err := handler(message); err != nil {
+func (worker *checkoutWorker) processMessage(message checkoutStreamMessage, handler checkoutMessageHandler) {
+	err := message.err
+	if err == nil {
+		err = handler(message.message, message.envelope)
+	}
+	if err != nil {
+		entry := checkoutMessageLog(message.message, message.envelope)
 		if errors.Is(err, errCheckoutProjectionLag) {
 			entry.WithError(err).Debug("checkout command is waiting for its projections")
 		} else {
 			entry.WithError(err).Error("checkout message processing failed")
 		}
-		_ = message.NakWithDelay(time.Second)
+		_ = message.message.NakWithDelay(time.Second)
 		return
 	}
-	if err := message.Ack(); err != nil {
-		entry.WithError(err).Error("checkout message acknowledgement failed")
+	if err := message.message.Ack(); err != nil {
+		checkoutMessageLog(message.message, message.envelope).
+			WithError(err).Error("checkout message acknowledgement failed")
 	}
 }
 
-func (worker *checkoutWorker) handleProjectionMessage(message *nats.Msg) error {
-	envelope, err := decodeEnvelope(message.Data)
-	if err != nil {
-		return err
+func checkoutMessageLog(message *nats.Msg, envelope *commonv1.MessageEnvelope) *logrus.Entry {
+	correlationID, messageID := "unknown", "unknown"
+	if envelope != nil {
+		if envelope.CorrelationId != "" {
+			correlationID = envelope.CorrelationId
+		}
+		if envelope.MessageId != "" {
+			messageID = envelope.MessageId
+		}
 	}
+	return log.WithFields(logrus.Fields{
+		"topic": message.Subject, "message_kind": checkoutMessageKind(message.Subject),
+		"message_id": messageID, "correlation_id": correlationID,
+	})
+}
+
+func (worker *checkoutWorker) handleProjectionMessage(message *nats.Msg, envelope *commonv1.MessageEnvelope) error {
 	if err := worker.store.ApplyProjection(message.Subject, envelope); err != nil {
 		return err
 	}
@@ -464,11 +492,7 @@ func (worker *checkoutWorker) handleProjectionMessage(message *nats.Msg) error {
 	return nil
 }
 
-func (worker *checkoutWorker) handleCommandMessage(message *nats.Msg) error {
-	envelope, err := decodeEnvelope(message.Data)
-	if err != nil {
-		return err
-	}
+func (worker *checkoutWorker) handleCommandMessage(_ *nats.Msg, envelope *commonv1.MessageEnvelope) error {
 	outcome, err := worker.processOrderCommand(envelope)
 	if err != nil {
 		return err
@@ -476,13 +500,9 @@ func (worker *checkoutWorker) handleCommandMessage(message *nats.Msg) error {
 	return worker.finishTransition(outcome)
 }
 
-func (worker *checkoutWorker) handleEventMessage(message *nats.Msg) error {
+func (worker *checkoutWorker) handleEventMessage(message *nats.Msg, envelope *commonv1.MessageEnvelope) error {
 	if !isCheckoutSagaEvent(message.Subject) {
 		return nil
-	}
-	envelope, err := decodeEnvelope(message.Data)
-	if err != nil {
-		return err
 	}
 	outcome, err := worker.processSagaEvent(message.Subject, envelope)
 	if err != nil {
@@ -569,24 +589,8 @@ func checkoutMessageKind(topic string) string {
 	return "event"
 }
 
-func checkoutMessageContext(data []byte) (string, string) {
-	envelope := &commonv1.MessageEnvelope{}
-	if err := proto.Unmarshal(data, envelope); err != nil {
-		return "unknown", "unknown"
-	}
-	correlationID, messageID := envelope.CorrelationId, envelope.MessageId
-	if correlationID == "" {
-		correlationID = "unknown"
-	}
-	if messageID == "" {
-		messageID = "unknown"
-	}
-	return correlationID, messageID
-}
-
-func checkoutMessageGroup(data []byte) string {
-	envelope := &commonv1.MessageEnvelope{}
-	if err := proto.Unmarshal(data, envelope); err != nil {
+func checkoutMessageGroup(envelope *commonv1.MessageEnvelope) string {
+	if envelope == nil {
 		return "unknown"
 	}
 	if envelope.AggregateId != "" {

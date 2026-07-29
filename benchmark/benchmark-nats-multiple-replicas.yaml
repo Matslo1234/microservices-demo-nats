@@ -2493,7 +2493,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-checkoutservice
-        image: matslo123/checkoutservice:v0.4.0@sha256:cc910c24e529a22b2b7973cbeb42e30be63868baffa7bdb5611e2d68014b082e
+        image: matslo123/checkoutservice:v0.4.0@sha256:bc111e2ab6b35bd66b6dfa7d4d6781d509bf66e05e2a316e39b4aa02edb03a04
         livenessProbe:
           httpGet:
             path: /healthz

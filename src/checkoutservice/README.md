@@ -16,7 +16,10 @@ publish. A duplicate delivery reloads and republishes the same bytes.
 
 All replicas scan bounded deadline shards. Expiring fencing leases and stable
 synthetic input IDs let another replica recover a deadline after a stop at
-either the state-commit or result-publication boundary.
+either the state-commit or result-publication boundary. Projection consumers
+process independent aggregates concurrently while preserving the stream order
+within each aggregate; an envelope is decoded once before it is assigned to
+that aggregate's lane.
 
 Required runtime configuration:
 
