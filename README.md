@@ -120,8 +120,7 @@ bash scripts/nats/verify.sh
 
 Note: the application requires a working NATS setup. Verify that NATS is running before you deploy the application.
 
-You can use the release manifest (replace its image prefix/tag when publishing
-your own build):
+You can use the release manifest:
 
 ```sh
 kubectl apply -f release/kubernetes-manifests.yaml
