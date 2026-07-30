@@ -5,6 +5,7 @@
 import asyncio
 import base64
 import hashlib
+import logging
 import os
 import ssl
 import struct
@@ -35,15 +36,6 @@ _thread = None
 
 def messaging_ready():
   return _ready.is_set()
-
-
-def _message_context(message):
-  try:
-    envelope = message_pb2.MessageEnvelope.FromString(message.data)
-    return (envelope.correlation_id or "unknown",
-            envelope.message_id or "unknown")
-  except Exception:
-    return "unknown", "unknown"
 
 
 def _stable_id(*parts):
@@ -171,31 +163,37 @@ async def _fetch_message(subscription, retry_delay=0.1):
 
 
 async def _process_message(message, js, failure_mode):
-  correlation_id, source_event_id = _message_context(message)
-  logger.debug(
-      "NATS event received",
-      extra={
-          "topic": message.subject,
-          "message_kind": "event",
-          "message_id": source_event_id,
-          "correlation_id": correlation_id,
-      })
+  correlation_id = "unknown"
+  source_event_id = "unknown"
   try:
     envelope = message_pb2.MessageEnvelope.FromString(message.data)
+    correlation_id = envelope.correlation_id or "unknown"
+    source_event_id = envelope.message_id or "unknown"
+    if logger.isEnabledFor(logging.DEBUG):
+      logger.debug(
+          "NATS event received",
+          extra={
+              "topic": message.subject,
+              "message_kind": "event",
+              "message_id": source_event_id,
+              "correlation_id": correlation_id,
+          })
     outcome = _build_outcome(envelope, failure_mode)
     await js.publish(
         outcome["subject"],
         outcome["data"],
         headers={"Nats-Msg-Id": outcome["message_id"]})
-    logger.debug(
-        "NATS event sent",
-        extra={
-            "topic": outcome["subject"],
-            "message_kind": "event",
-            "message_id": outcome["message_id"],
-            "correlation_id": correlation_id,
-            "provider_idempotency_key": outcome["provider_idempotency_key"],
-        })
+    if logger.isEnabledFor(logging.DEBUG):
+      logger.debug(
+          "NATS event sent",
+          extra={
+              "topic": outcome["subject"],
+              "message_kind": "event",
+              "message_id": outcome["message_id"],
+              "correlation_id": correlation_id,
+              "provider_idempotency_key":
+                  outcome["provider_idempotency_key"],
+          })
     await message.ack()
   except Exception:
     logger.exception(

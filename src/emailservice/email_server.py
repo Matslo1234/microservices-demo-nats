@@ -7,11 +7,6 @@ import signal
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from opentelemetry import trace
-from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
-from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import BatchSpanProcessor
-
 from logger import getJSONLogger
 from nats_worker import messaging_ready, start_nats_worker, stop_nats_worker
 
@@ -24,8 +19,9 @@ class HealthHandler(BaseHTTPRequestHandler):
       self._reply(200, "ok\n")
       return
     if self.path == "/readyz":
-      self._reply(200 if messaging_ready() else 503,
-                  "ok\n" if messaging_ready() else "email NATS consumer is not ready\n")
+      ready = messaging_ready()
+      self._reply(200 if ready else 503,
+                  "ok\n" if ready else "email NATS consumer is not ready\n")
       return
     if self.path == "/metrics":
       ready = 1 if messaging_ready() else 0
@@ -53,6 +49,14 @@ def configure_tracing():
   if os.getenv("ENABLE_TRACING") != "1":
     logger.info("tracing disabled")
     return
+  # Import the exporter only when tracing is enabled. The normal deployment
+  # does not export spans, so eagerly loading OpenTelemetry and gRPC needlessly
+  # increases every replica's startup time and resident memory.
+  from opentelemetry import trace
+  from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+  from opentelemetry.sdk.trace import TracerProvider
+  from opentelemetry.sdk.trace.export import BatchSpanProcessor
+
   endpoint = os.getenv("COLLECTOR_SERVICE_ADDR", "localhost:4317")
   trace.set_tracer_provider(TracerProvider())
   trace.get_tracer_provider().add_span_processor(

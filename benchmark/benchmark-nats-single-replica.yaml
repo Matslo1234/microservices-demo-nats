@@ -2579,7 +2579,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-emailservice
-        image: matslo123/emailservice:v0.4.0@sha256:50d3cb08c120a90acecc18b83b97ecd9ba6be2d9dd8c9f3c15f179326e67266b
+        image: matslo123/emailservice:v0.4.0@sha256:5594fc462d81611fecfee6048c07f9483040916e7171c9bf9769a017cb954d20
         livenessProbe:
           httpGet:
             path: /healthz

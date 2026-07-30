@@ -2,13 +2,17 @@
 # Copyright 2026 Google LLC
 # Licensed under the Apache License, Version 2.0 (the "License");
 
+import logging
+import os
 import unittest
 from datetime import datetime, timezone
+from unittest import mock
 
 from google.protobuf.any_pb2 import Any
 from google.protobuf.timestamp_pb2 import Timestamp
 from nats.js.errors import ServiceUnavailableError
 
+from logger import getJSONLogger
 from nats_worker import (
     FAILED_SUBJECT,
     NOTIFICATION_TYPE,
@@ -164,6 +168,38 @@ class PublishBeforeAckTest(unittest.IsolatedAsyncioTestCase):
         second_replica.published[0],
         "another replica changed the result after an ambiguous response")
 
+  async def test_message_envelope_is_decoded_once(self):
+    envelope = completed_order_envelope()
+
+    class Message:
+      subject = "boutique.evt.order.completed.v1"
+      data = envelope.SerializeToString(deterministic=True)
+
+      def __init__(self):
+        self.naks = 0
+
+      async def ack(self):
+        return
+
+      async def nak(self, **_):
+        self.naks += 1
+
+    class Publisher:
+      async def publish(self, *_args, **_kwargs):
+        return
+
+    decode = message_pb2.MessageEnvelope.FromString
+    with mock.patch.object(
+        message_pb2.MessageEnvelope,
+        "FromString",
+        wraps=decode,
+    ) as mocked_decode:
+      message = Message()
+      await _process_message(message, Publisher(), "")
+
+    self.assertEqual(1, mocked_decode.call_count)
+    self.assertEqual(0, message.naks)
+
 
 class FetchRecoveryTest(unittest.IsolatedAsyncioTestCase):
   async def asyncSetUp(self):
@@ -197,6 +233,27 @@ class FetchRecoveryTest(unittest.IsolatedAsyncioTestCase):
         [{"batch": 1, "timeout": 1}, {"batch": 1, "timeout": 1}],
         subscription.requests)
     self.assertTrue(_ready.is_set())
+
+
+class LoggerConfigurationTest(unittest.TestCase):
+  def tearDown(self):
+    for name in ("emailservice-test-default", "emailservice-test-debug"):
+      logging.getLogger(name).handlers.clear()
+
+  def test_logging_defaults_to_info_without_duplicate_handlers(self):
+    with mock.patch.dict(os.environ, {}, clear=True):
+      logger = getJSONLogger("emailservice-test-default")
+      same_logger = getJSONLogger("emailservice-test-default")
+
+    self.assertIs(logger, same_logger)
+    self.assertEqual(logging.INFO, logger.level)
+    self.assertEqual(1, len(logger.handlers))
+
+  def test_log_level_can_enable_debug(self):
+    with mock.patch.dict(os.environ, {"LOG_LEVEL": "DEBUG"}, clear=True):
+      logger = getJSONLogger("emailservice-test-debug")
+
+    self.assertEqual(logging.DEBUG, logger.level)
 
 
 if __name__ == "__main__":

@@ -43,7 +43,7 @@ DEFAULT_IMAGE_DIGESTS = {
     "cartservice": "1b972fde4595139f9d77b1d1c09ff8154e359e86ead9b46d874f8703de61b33e",
     "checkoutservice": "bc111e2ab6b35bd66b6dfa7d4d6781d509bf66e05e2a316e39b4aa02edb03a04",
     "currencyservice": "aadcaa314fcc6591d38e91720fc870fd55aeff7c6fdcb26322e6aa89b2c289ab",
-    "emailservice": "50d3cb08c120a90acecc18b83b97ecd9ba6be2d9dd8c9f3c15f179326e67266b",
+    "emailservice": "5594fc462d81611fecfee6048c07f9483040916e7171c9bf9769a017cb954d20",
     "frontend": "0a84e385b5382aeb19c634e1a7c33f6410e50f2ad9b590fc39e56b3e3cf6df14",
     "loadgenerator": "c66a188ecf8bf7507bd3982a5fa50ae3e9497f3239248dd48b275fc2aee0adb3",
     "paymentservice": "9a6c36bb850627bfd0b9ab86e9b3c05bf3ce9dcb4c25967877a4ec106c954519",

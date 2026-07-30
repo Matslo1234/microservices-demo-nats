@@ -31,7 +31,7 @@ or completely uniform schema.
 | Go: checkout | Logrus JSON at debug level, using Logrus's default field names. |
 | Go: storefront projection | `slog` JSON at debug level for structured event/query records. Some operational and error paths still use the standard `log` package, so this service also emits plain-text lines. |
 | Node.js: currency, payment | Pino JSON at debug level with `message` and `severity` fields. |
-| Python: email, recommendation | `python-json-logger` writes JSON to stdout at debug level and adds `timestamp`, uppercase `severity`, logger `name`, and `message`. |
+| Python: email, recommendation | `python-json-logger` writes JSON to stdout at INFO level by default and adds `timestamp`, uppercase `severity`, logger `name`, and `message`. Set `LOG_LEVEL=DEBUG` to include per-event debug records. |
 | C#: cart | A custom `SeverityJsonConsoleFormatter` emits `timestamp`, normalized `severity`, logger `name`, `message`, structured state, event metadata, and exceptions. The default level is Information, with debug enabled for the NATS relay. |
 | Java: ad | Log4j2 writes compact JSON to stdout. Its layout includes trace/span fields understood by Google Cloud Logging plus `correlation_id`; the root level is TRACE. |
 
