@@ -78,6 +78,11 @@ namespace cartservice
                 new RedisAtomicAggregateStore(
                     provider.GetRequiredService<IConnectionMultiplexer>().GetDatabase(),
                     "cart:v1"));
+            services.AddSingleton<RedisCatalogProjection>();
+            services.AddSingleton<IProductCatalog>(provider =>
+                provider.GetRequiredService<RedisCatalogProjection>());
+            services.AddSingleton<ICatalogProjection>(provider =>
+                provider.GetRequiredService<RedisCatalogProjection>());
             services.AddSingleton<RedisAggregateCartStore>();
             services.AddSingleton<ICartStore>(provider =>
                 provider.GetRequiredService<RedisAggregateCartStore>());

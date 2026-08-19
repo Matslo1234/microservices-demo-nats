@@ -214,8 +214,8 @@
     },
     {
       "service": "cartservice",
-      "current_correctness_state": "Cart-keyed state, versions, inbox identities, and exact deterministic result journals are committed atomically in the cart Redis Cluster; handlers republish stored results before acknowledging.",
-      "target_store": "Cart-keyed clustered Redis records with atomic inbox, aggregate transition, and stored deterministic results; catalog validation uses shared KV.",
+      "current_correctness_state": "Cart-keyed state, versions, inbox identities, and exact deterministic result journals are committed atomically in the cart Redis Cluster; a shared replayable Redis catalog projection validates add-item commands; handlers republish stored results before acknowledging.",
+      "target_store": "Cart-keyed clustered Redis records with atomic inbox, aggregate transition, and stored deterministic results; catalog validation uses a shared replayable projection.",
       "idempotency_contract": "Input message ID is the inbox key, user ID is the transaction partition, and duplicate inputs republish stored result slots."
     },
     {

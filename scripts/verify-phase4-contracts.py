@@ -32,6 +32,13 @@ for required in (
 ):
     require(frontend, required, frontend_dir)
 
+handlers = (frontend_dir / "handlers.go").read_text()
+add_start = handlers.index("func (fe *frontendServer) addToCartHandler")
+add_end = handlers.index("\nfunc (fe *frontendServer) emptyCartHandler", add_start)
+add_handler = handlers[add_start:add_end]
+for forbidden in ("storefrontQuery(", "CartVersion"):
+    forbid(add_handler, forbidden, frontend_dir / "handlers.go")
+
 frontend_manifest = ROOT / "kubernetes-manifests" / "frontend.yaml"
 manifest = frontend_manifest.read_text()
 forbid(manifest, "CART_SERVICE_ADDR", frontend_manifest)
@@ -41,8 +48,13 @@ cart_dir = ROOT / "src" / "cartservice" / "src"
 cart = "\n".join(path.read_text() for path in cart_dir.rglob("*.cs"))
 for required in (
     'new ConsumerConfig("cart-commands-v1")',
+    'new ConsumerConfig("cart-catalog-v1")',
     'FilterSubject = "boutique.cmd.cart.>"',
-    "ExpectedCartVersion",
+    'FilterSubject = "boutique.evt.catalog.>"',
+    "MaxAckPending = 1",
+    "RedisCatalogProjection",
+    "IProductCatalog",
+    '"PRODUCT_NOT_FOUND"',
     "RedisAtomicAggregateStore",
     "ResultEnvelopes.CreateMetadata",
     "CartResultJournal",

@@ -30,8 +30,8 @@ public sealed class CartServiceTests
         var backend = new FakeAtomicAggregateStore();
         var first = Worker(backend);
         var second = Worker(backend);
-        var command = AddCommand("command-duplicate", "user-duplicate", 0, 2);
-        var envelope = Envelope(command, "boutique.cart.AddItem.v1", command.ExpectedCartVersion);
+        var command = AddCommand("command-duplicate", "user-duplicate", 2);
+        var envelope = Envelope(command, "boutique.cart.AddItem.v1", 0);
         CartStoredResult? firstAttempt = null;
 
         await Assert.ThrowsAsync<TimeoutException>(() =>
@@ -73,7 +73,7 @@ public sealed class CartServiceTests
     {
         var backend = new FakeAtomicAggregateStore();
         var worker = Worker(backend);
-        var command = AddCommand("command-round-trips", "user-round-trips", 0, 1);
+        var command = AddCommand("command-round-trips", "user-round-trips", 1);
 
         await worker.Processor.HandleAddItemAsync(
             command,
@@ -86,14 +86,14 @@ public sealed class CartServiceTests
     }
 
     [Fact]
-    public async Task ConcurrentExpectedVersionConflictCommitsOneMutationAndOneRejection()
+    public async Task ConcurrentAddCommandsBothCommitAfterInternalConflictRetry()
     {
         var backend = new FakeAtomicAggregateStore();
         var workers = new[] { Worker(backend), Worker(backend) };
         var commands = new[]
         {
-            AddCommand("command-conflict-a", "user-conflict", 0, 2),
-            AddCommand("command-conflict-b", "user-conflict", 0, 7)
+            AddCommand("command-conflict-a", "user-conflict", 2),
+            AddCommand("command-conflict-b", "user-conflict", 7)
         };
         var published = new ConcurrentBag<CartStoredResult>();
 
@@ -111,17 +111,12 @@ public sealed class CartServiceTests
         var envelopes = published
             .Select(result => MessageEnvelope.Parser.ParseFrom(result.Data.Span))
             .ToArray();
-        Assert.Single(envelopes, envelope =>
-            envelope.MessageType == "boutique.cart.ItemAdded.v1");
-        var rejectedEnvelope = Assert.Single(envelopes, envelope =>
-            envelope.MessageType == "boutique.cart.CommandRejected.v1");
-        Assert.True(rejectedEnvelope.Data.TryUnpack<CartCommandRejectedEvent>(out var rejected));
-        Assert.Equal("CART_VERSION_CONFLICT", rejected.Failure.Code);
-        Assert.Equal(1UL, rejected.CurrentCartVersion);
+        Assert.All(envelopes, envelope =>
+            Assert.Equal("boutique.cart.ItemAdded.v1", envelope.MessageType));
 
         var cart = await workers[0].Store.GetCartAsync("user-conflict");
-        Assert.Equal(1UL, (await backend.LoadAsync("user-conflict")).Version);
-        Assert.Contains(Assert.Single(cart.Items).Quantity, new[] { 2, 7 });
+        Assert.Equal(2UL, (await backend.LoadAsync("user-conflict")).Version);
+        Assert.Equal(9, Assert.Single(cart.Items).Quantity);
     }
 
     [Fact]
@@ -129,7 +124,7 @@ public sealed class CartServiceTests
     {
         var backend = new FakeAtomicAggregateStore { FailAfterCommitOnce = true };
         var worker = Worker(backend);
-        var command = AddCommand("command-failover", "user-failover", 0, 3);
+        var command = AddCommand("command-failover", "user-failover", 3);
         var publications = new List<CartStoredResult>();
 
         var outcome = await worker.Processor.HandleAddItemAsync(
@@ -172,7 +167,6 @@ public sealed class CartServiceTests
             var command = AddCommand(
                 $"scale-{replicaCount}-command-{aggregate:D4}",
                 userId,
-                0,
                 1);
             var envelope = Envelope(command, "boutique.cart.AddItem.v1", 0);
             for (var delivery = 0; delivery < deliveriesPerCommand; delivery++)
@@ -213,7 +207,7 @@ public sealed class CartServiceTests
     {
         var backend = new FakeAtomicAggregateStore();
         var worker = Worker(backend);
-        var command = AddCommand("command-invalid", "user-invalid", 0, 0);
+        var command = AddCommand("command-invalid", "user-invalid", 0);
         CartStoredResult? published = null;
 
         var first = await worker.Processor.HandleAddItemAsync(
@@ -239,6 +233,53 @@ public sealed class CartServiceTests
     }
 
     [Fact]
+    public async Task ProductMissingFromCartCatalogIsRejectedWithoutMutation()
+    {
+        var backend = new FakeAtomicAggregateStore();
+        var worker = Worker(backend, new FakeProductCatalog(false));
+        var command = AddCommand("command-missing-product", "user-missing-product", 1);
+        CartStoredResult? published = null;
+
+        await worker.Processor.HandleAddItemAsync(
+            command,
+            Envelope(command, "boutique.cart.AddItem.v1", 0),
+            (result, _) =>
+            {
+                published = result;
+                return Task.CompletedTask;
+            });
+
+        Assert.Equal(0UL, (await backend.LoadAsync(command.UserId)).Version);
+        Assert.Empty((await worker.Store.GetCartAsync(command.UserId)).Items);
+        var resultEnvelope = MessageEnvelope.Parser.ParseFrom(published!.Data.Span);
+        Assert.True(resultEnvelope.Data.TryUnpack<CartCommandRejectedEvent>(out var rejected));
+        Assert.Equal("PRODUCT_NOT_FOUND", rejected.Failure.Code);
+    }
+
+    [Fact]
+    public async Task LegacyExpectedVersionOnAddIsIgnored()
+    {
+        var backend = new FakeAtomicAggregateStore();
+        var worker = Worker(backend);
+        var first = AddCommand("command-first", "user-legacy-version", 1);
+        var legacy = AddCommand("command-legacy", "user-legacy-version", 2);
+        legacy.ExpectedCartVersion = 99;
+
+        await worker.Processor.HandleAddItemAsync(
+            first,
+            Envelope(first, "boutique.cart.AddItem.v1", 0),
+            (_, _) => Task.CompletedTask);
+        await worker.Processor.HandleAddItemAsync(
+            legacy,
+            Envelope(legacy, "boutique.cart.AddItem.v1", 99),
+            (_, _) => Task.CompletedTask);
+
+        var cart = await worker.Store.GetCartAsync(legacy.UserId);
+        Assert.Equal(3, Assert.Single(cart.Items).Quantity);
+        Assert.Equal(2UL, (await backend.LoadAsync(legacy.UserId)).Version);
+    }
+
+    [Fact]
     public async Task LiveRedisClusterContinuesAfterReplicaTakeover()
     {
         var address = Environment.GetEnvironmentVariable("CART_REDIS_TEST_ADDR");
@@ -259,6 +300,7 @@ public sealed class CartServiceTests
         var metrics = new CartMetrics();
         var store = new RedisAggregateCartStore(
             new RedisAtomicAggregateStore(connection.GetDatabase(), prefix),
+            new FakeProductCatalog(true),
             metrics,
             NullLogger<RedisAggregateCartStore>.Instance,
             connection);
@@ -307,11 +349,14 @@ public sealed class CartServiceTests
         Assert.Equal(2, root.GetProperty("attempt").GetInt32());
     }
 
-    private static WorkerFixture Worker(FakeAtomicAggregateStore backend)
+    private static WorkerFixture Worker(
+        FakeAtomicAggregateStore backend,
+        IProductCatalog? products = null)
     {
         var metrics = new CartMetrics();
         var store = new RedisAggregateCartStore(
             backend,
+            products ?? new FakeProductCatalog(true),
             metrics,
             NullLogger<RedisAggregateCartStore>.Instance);
         return new WorkerFixture(
@@ -330,7 +375,6 @@ public sealed class CartServiceTests
             var command = AddCommand(
                 $"live-command-{index:D4}",
                 $"live-user-{index:D4}",
-                0,
                 1);
             return processor.HandleAddItemAsync(
                 command,
@@ -342,15 +386,13 @@ public sealed class CartServiceTests
     private static CartAddItemCommand AddCommand(
         string commandId,
         string userId,
-        ulong expectedVersion,
         int quantity) =>
         new()
         {
             CommandId = commandId,
             UserId = userId,
             ProductId = "OLJCESPC7Z",
-            Quantity = quantity,
-            ExpectedCartVersion = expectedVersion
+            Quantity = quantity
         };
 
     private static MessageEnvelope Envelope<T>(
@@ -391,6 +433,17 @@ public sealed class CartServiceTests
         RedisAggregateCartStore Store,
         CartCommandProcessor Processor,
         CartMetrics Metrics);
+
+    private sealed class FakeProductCatalog(bool contains) : IProductCatalog
+    {
+        public Task<bool> ContainsAsync(
+            string productId,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return Task.FromResult(contains);
+        }
+    }
 
     private sealed class FakeAtomicAggregateStore : IAtomicAggregateStore
     {

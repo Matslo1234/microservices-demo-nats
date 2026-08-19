@@ -35,23 +35,26 @@ public sealed class RedisAggregateCartStore : ICartStore, ICartCommandStore
     private static readonly TimeSpan MaximumRetryDelay = TimeSpan.FromMilliseconds(250);
 
     private readonly IAtomicAggregateStore _aggregates;
+    private readonly IProductCatalog _products;
     private readonly IConnectionMultiplexer? _connection;
     private readonly CartMetrics _metrics;
     private readonly ILogger<RedisAggregateCartStore> _logger;
 
     public RedisAggregateCartStore(
         IAtomicAggregateStore aggregates,
+        IProductCatalog products,
         CartMetrics metrics,
         ILogger<RedisAggregateCartStore> logger,
         IConnectionMultiplexer? connection = null)
     {
         _aggregates = aggregates;
+        _products = products;
         _metrics = metrics;
         _logger = logger;
         _connection = connection;
     }
 
-    public Task<CartCommandCommit> HandleAddItemCommandAsync(
+    public async Task<CartCommandCommit> HandleAddItemCommandAsync(
         CartAddItemCommand command,
         MessageEnvelope envelope,
         CancellationToken cancellationToken = default)
@@ -60,15 +63,20 @@ public sealed class RedisAggregateCartStore : ICartStore, ICartCommandStore
         ValidateEnvelope(
             command.CommandId,
             command.UserId,
-            command.ExpectedCartVersion,
+            null,
             "boutique.cart.AddItem.v1",
             envelope);
-        return ExecuteAsync(
+        var argumentsValid =
+            !string.IsNullOrWhiteSpace(command.ProductId) && command.Quantity > 0;
+        var productAvailable = argumentsValid && await _products.ContainsAsync(
+            command.ProductId,
+            cancellationToken);
+        return await ExecuteAsync(
             command.UserId,
             envelope,
             (cart, currentVersion) =>
             {
-                if (string.IsNullOrWhiteSpace(command.ProductId) || command.Quantity <= 0)
+                if (!argumentsValid)
                 {
                     return Rejection(
                         cart,
@@ -78,15 +86,15 @@ public sealed class RedisAggregateCartStore : ICartStore, ICartCommandStore
                         "INVALID_ARGUMENT",
                         "Product ID and a positive quantity are required.");
                 }
-                if (command.ExpectedCartVersion != currentVersion)
+                if (!productAvailable)
                 {
                     return Rejection(
                         cart,
                         currentVersion,
                         command.CommandId,
                         command.UserId,
-                        "CART_VERSION_CONFLICT",
-                        "The cart changed before this command was applied.");
+                        "PRODUCT_NOT_FOUND",
+                        "The requested product is not available.");
                 }
 
                 var next = cart.Clone();
@@ -377,7 +385,7 @@ public sealed class RedisAggregateCartStore : ICartStore, ICartCommandStore
     private static void ValidateEnvelope(
         string commandId,
         string userId,
-        ulong expectedVersion,
+        ulong? expectedVersion,
         string messageType,
         MessageEnvelope envelope)
     {
@@ -394,7 +402,8 @@ public sealed class RedisAggregateCartStore : ICartStore, ICartCommandStore
             !string.Equals(userId, envelope.AggregateId, StringComparison.Ordinal) ||
             !string.Equals(envelope.AggregateType, "cart", StringComparison.Ordinal) ||
             !string.Equals(envelope.MessageType, messageType, StringComparison.Ordinal) ||
-            envelope.AggregateVersion != expectedVersion ||
+            (expectedVersion.HasValue &&
+                envelope.AggregateVersion != expectedVersion.Value) ||
             envelope.SchemaVersion != 1 ||
             envelope.OccurredAt == null ||
             envelope.Data == null)

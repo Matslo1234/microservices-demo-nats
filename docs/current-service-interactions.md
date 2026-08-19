@@ -91,6 +91,13 @@ then forwards named `order` events after projection updates. Core NATS delivery
 is intentionally ephemeral; reconnecting obtains a fresh view rather than
 replaying missed notifications.
 
+Add-item POSTs publish directly after request validation; they do not query the
+storefront for a cart version. `cartservice` validates product availability
+against its shared Redis projection of replayable catalog events, deduplicates
+the command ID, and retries its internal aggregate CAS when another add wins the
+first commit. Clear and checkout retain observed-version preconditions because
+they operate on the complete cart state.
+
 ### Domain ownership and consumers
 
 | Workload | Durable input / query | Outputs and owned state |

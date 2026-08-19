@@ -41,6 +41,7 @@ public sealed class NatsCartCommandWorker : BackgroundService, ICartMessagingHea
 
     private readonly IConfiguration _configuration;
     private readonly CartCommandProcessor _processor;
+    private readonly ICatalogProjection _catalog;
     private readonly ILogger<NatsCartCommandWorker> _logger;
     private volatile bool _consumerEstablished;
     private volatile bool _ready;
@@ -48,10 +49,12 @@ public sealed class NatsCartCommandWorker : BackgroundService, ICartMessagingHea
     public NatsCartCommandWorker(
         IConfiguration configuration,
         CartCommandProcessor processor,
+        ICatalogProjection catalog,
         ILogger<NatsCartCommandWorker> logger)
     {
         _configuration = configuration;
         _processor = processor;
+        _catalog = catalog;
         _logger = logger;
     }
 
@@ -131,7 +134,32 @@ public sealed class NatsCartCommandWorker : BackgroundService, ICartMessagingHea
         {
             await client.ConnectAsync();
             var jetStream = client.CreateJetStreamContext();
-            var consumer = await jetStream.CreateOrUpdateConsumerAsync(
+            var catalogConsumer = await jetStream.CreateOrUpdateConsumerAsync(
+                "BOUTIQUE_EVENTS",
+                new ConsumerConfig("cart-catalog-v1")
+                {
+                    AckPolicy = ConsumerConfigAckPolicy.Explicit,
+                    AckWait = TimeSpan.FromSeconds(30),
+                    DeliverPolicy = ConsumerConfigDeliverPolicy.All,
+                    FilterSubject = "boutique.evt.catalog.>",
+                    // The snapshot-completed marker is the readiness barrier.
+                    // Keep one event in flight across all replicas so it cannot
+                    // overtake an earlier product projection update.
+                    MaxAckPending = 1,
+                    MaxDeliver = 10
+                },
+                stoppingToken);
+            var catalogTask = ConsumeCatalogAsync(catalogConsumer, stoppingToken);
+            var catalogReadyTask = _catalog.WaitUntilReadyAsync(stoppingToken);
+            if (await Task.WhenAny(catalogTask, catalogReadyTask) == catalogTask)
+            {
+                await catalogTask;
+                throw new InvalidOperationException(
+                    "Cart catalog consumer stopped before the projection became ready.");
+            }
+            await catalogReadyTask;
+
+            var commandConsumer = await jetStream.CreateOrUpdateConsumerAsync(
                 "BOUTIQUE_COMMANDS",
                 new ConsumerConfig("cart-commands-v1")
                 {
@@ -145,20 +173,80 @@ public sealed class NatsCartCommandWorker : BackgroundService, ICartMessagingHea
                 stoppingToken);
             _consumerEstablished = true;
             _ready = true;
-            await ConsumeCommandsAsync(
+            var commandTask = ConsumeCommandsAsync(
                 jetStream,
-                consumer,
+                commandConsumer,
                 BoundedInteger(
                     "CART_COMMAND_CONCURRENCY",
                     DefaultCommandConcurrency,
                     1,
                     MaximumCommandConcurrency),
                 stoppingToken);
+            var completed = await Task.WhenAny(catalogTask, commandTask);
+            await completed;
+            if (!stoppingToken.IsCancellationRequested)
+            {
+                throw new InvalidOperationException(
+                    "A cart NATS consumer stopped unexpectedly.");
+            }
+            await Task.WhenAll(catalogTask, commandTask);
         }
         finally
         {
             _consumerEstablished = false;
             _ready = false;
+        }
+    }
+
+    private async Task ConsumeCatalogAsync(
+        INatsJSConsumer consumer,
+        CancellationToken stoppingToken)
+    {
+        _logger.LogInformation("Cart catalog projection consumer started");
+        await foreach (var message in consumer.ConsumeAsync<byte[]>(
+            opts: new NatsJSConsumeOpts { MaxMsgs = 1, ThresholdMsgs = 1 },
+            cancellationToken: stoppingToken))
+        {
+            var correlationId = "unknown";
+            var messageId = "unknown";
+            try
+            {
+                if (message.Data == null)
+                {
+                    throw new InvalidOperationException("Catalog event is empty.");
+                }
+                var envelope = MessageEnvelope.Parser.ParseFrom(message.Data);
+                correlationId = string.IsNullOrWhiteSpace(envelope.CorrelationId)
+                    ? "unknown"
+                    : envelope.CorrelationId;
+                messageId = string.IsNullOrWhiteSpace(envelope.MessageId)
+                    ? "unknown"
+                    : envelope.MessageId;
+                using var activity = CartTelemetry.StartConsumer(
+                    envelope,
+                    message.Subject,
+                    "event");
+                CartTelemetry.Inject(envelope);
+                await _catalog.ApplyAsync(
+                    message.Subject,
+                    envelope,
+                    stoppingToken);
+                await message.AckAsync(cancellationToken: stoppingToken);
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                return;
+            }
+            catch (Exception exception)
+            {
+                _logger.LogError(
+                    exception,
+                    "Catalog projection failed for {Topic} ({MessageId}, correlation_id={CorrelationId}); requesting redelivery",
+                    message.Subject,
+                    messageId,
+                    correlationId);
+                await message.NakAsync(cancellationToken: stoppingToken);
+            }
         }
     }
 

@@ -154,7 +154,7 @@ handler may have multiple replicas sharing one durable pull consumer.
 
 | Subject | Publisher | Subscriber | Required data and result event |
 | --- | --- | --- | --- |
-| `boutique.cmd.cart.add-item.v1` | `frontend` | `cartservice` | `command_id`, user ID, product ID, quantity, expected cart version → `cart.item-added` or `cart.command-rejected` |
+| `boutique.cmd.cart.add-item.v1` | `frontend` | `cartservice` | `command_id`, user ID, product ID, quantity → `cart.item-added` or `cart.command-rejected`; the legacy expected-version field is ignored |
 | `boutique.cmd.cart.clear.v1` | `frontend` or `checkoutservice` | `cartservice` | `command_id`, user ID, expected version, reason, optional order ID → `cart.cleared` or `cart.command-rejected` |
 | `boutique.cmd.order.submit.v1` | `frontend` | `checkoutservice` | Operation/order ID, user ID, expected cart/catalog/rate versions, currency, address, email, payment token → an `order.*` lifecycle event |
 | `boutique.cmd.shipping.calculate-order-quote.v1` | `checkoutservice` | `shippingservice` | Order ID, address, immutable cart snapshot → `shipping.order-quote-calculated` or `shipping.order-quote-failed` |
@@ -596,8 +596,9 @@ scaled to zero, then restored every Deployment to 1/1 ready.
 
 ### Phase 4: migrate cart commands
 
-1. Implement durable `cart.add-item` and `cart.clear` consumers with optimistic
-   cart versions and idempotency.
+1. Implement durable `cart.add-item` and `cart.clear` consumers with internal
+   optimistic commits and idempotency. Keep the client version precondition for
+   clear, while additive item deltas rebase after an internal conflict.
 2. Add HTTP operation resources and the bounded redirect compatibility wait.
 3. Update the load generator and integration tests for both immediate redirects
    and `202` fallback.
@@ -606,10 +607,10 @@ scaled to zero, then restored every Deployment to 1/1 ready.
 Exit criterion: retries of one HTTP idempotency key change the cart once, and a
 cart worker outage queues commands without losing them.
 
-The authorized live outage check returned `202` for both queued commands. After
-the cart worker was restored, the first command reached `SUCCEEDED`, the stale
-second command reached `REJECTED`, and the projected cart contained exactly one
-mutation.
+The add-item HTTP path publishes without a storefront read. Product validation
+is performed by `cartservice` from its shared replayable catalog projection;
+distinct concurrent adds both commit, while retries of one command ID still
+produce exactly one mutation.
 
 ### Phase 5: migrate checkout to a saga
 

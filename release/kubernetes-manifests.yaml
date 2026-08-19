@@ -431,7 +431,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-adservice
-        image: matslo123/adservice:v0.4.0@sha256:bad60d4429a32419d11cec3ac2e8ba7b857cf34b50aaafa7c27ddf2cf907302b
+        image: matslo123/adservice:v0.4.0@sha256:ce4f217a588fed1d74f6a710e9c9ff3b3d9045f8219efe0aebb758eb2a831413
         livenessProbe:
           httpGet:
             path: /healthz
@@ -632,7 +632,7 @@ spec:
         - name: NATS_REQUIRED
           value: "true"
         - name: NATS_REQUIRED_SUBSCRIPTIONS
-          value: cart-commands-v1
+          value: cart-catalog-v1,cart-commands-v1
         - name: ENABLE_TRACING
           value: "1"
         - name: COLLECTOR_SERVICE_ADDR
@@ -656,7 +656,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-cartservice
-        image: matslo123/cartservice:v0.4.0@sha256:8661c991a570f340f36eae4cd270395be5c0739afe6a870b23b423fed7b9b5e5
+        image: matslo123/cartservice:v0.4.0@sha256:751cbd6b8fb98199757f722457853775304e51d20a57eae331cb60825dd524e2
         livenessProbe:
           failureThreshold: 6
           httpGet:
@@ -914,7 +914,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-currencyservice
-        image: matslo123/currencyservice:v0.4.0@sha256:9f4da55ff3ed85f2bea630cc2983ad6677cdd300870cc844fb460e2b00111fae
+        image: matslo123/currencyservice:v0.4.0@sha256:bcf569c32033a09c30fe9d7c5c6751c68ba43eb8f477dc1d069e1281b7c6100b
         livenessProbe:
           httpGet:
             path: /healthz
@@ -1193,7 +1193,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-frontend
-        image: matslo123/frontend:v0.4.0@sha256:8dec4a2df305470cfa7ff4f7718b59a4c89ac03477772a4975ab0b2abe8a691a
+        image: matslo123/frontend:v0.4.0@sha256:9fa9292420bea28f676fa7f237ed22d9949629f1e2c7a9dbf5baf372aaa5914f
         livenessProbe:
           failureThreshold: 6
           httpGet:
@@ -1366,7 +1366,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-paymentservice
-        image: matslo123/paymentservice:v0.4.0@sha256:71365cbd3a4621470b016ba6c3dc9523bb2ee882a073aa1a6c748b66ad5527fb
+        image: matslo123/paymentservice:v0.4.0@sha256:f5d0b3aeb1b032da3a5af9b64afc3a2688308d0818207735d18b51aad9807648
         livenessProbe:
           failureThreshold: 6
           httpGet:

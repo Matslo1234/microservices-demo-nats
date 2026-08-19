@@ -28,6 +28,8 @@ message CartAddItemCommand {
   string user_id = 2;
   string product_id = 3;
   int32 quantity = 4;
+  // Retained for wire compatibility with already-published v1 messages. Cart
+  // add is a command-ID-deduplicated delta; cartservice ignores this value.
   uint64 expected_cart_version = 5;
 }
 

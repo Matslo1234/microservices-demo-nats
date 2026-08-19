@@ -181,22 +181,10 @@ func (fe *frontendServer) addToCartHandler(w http.ResponseWriter, r *http.Reques
 	}
 	log = log.WithField("correlation_id", operationID)
 	telemetry.SetCorrelationID(r.Context(), operationID)
-	view, err := fe.storefrontQuery(r.Context(), "product", storefrontQueryRequest{
-		ProductID: payload.ProductID, UserID: sessionID(r), CurrencyCode: currentCurrency(r),
-		CorrelationID: operationID,
-	})
-	if err != nil {
-		renderStorefrontError(log, r, w, errors.Wrap(err, "could not validate product"))
-		return
-	}
-	if view.Product == nil || view.Product.Item == nil {
-		renderStorefrontError(log, r, w, errors.New("product projection is incomplete"))
-		return
-	}
 
 	setOperationHeaders(w, operationID)
-	if err := fe.publishCartAdd(r.Context(), operationID, sessionID(r), view.Product.Item.GetId(),
-		int32(payload.Quantity), view.CartVersion); err != nil {
+	if err := fe.publishCartAdd(r.Context(), operationID, sessionID(r), payload.ProductID,
+		int32(payload.Quantity)); err != nil {
 		w.Header().Set("Retry-After", "1")
 		renderHTTPError(log, r, w, errors.Wrap(err, "failed to queue cart update"), http.StatusServiceUnavailable)
 		return

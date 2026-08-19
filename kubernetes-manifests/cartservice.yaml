@@ -62,7 +62,7 @@ spec:
         - name: NATS_REQUIRED
           value: "true"
         - name: NATS_REQUIRED_SUBSCRIPTIONS
-          value: "cart-commands-v1"
+          value: "cart-catalog-v1,cart-commands-v1"
         envFrom:
         - configMapRef:
             name: nats-client-config
