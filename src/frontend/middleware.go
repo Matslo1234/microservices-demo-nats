@@ -50,6 +50,11 @@ type responseRecorder struct {
 
 func (r *responseRecorder) Header() http.Header { return r.w.Header() }
 
+// Unwrap lets http.ResponseController reach optional interfaces such as
+// http.Flusher on the underlying writer. Streaming responses must continue to
+// work when debug response accounting is enabled.
+func (r *responseRecorder) Unwrap() http.ResponseWriter { return r.w }
+
 func (r *responseRecorder) Write(p []byte) (int, error) {
 	if r.status == 0 {
 		r.status = http.StatusOK

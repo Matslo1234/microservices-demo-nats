@@ -1143,7 +1143,7 @@ spec:
             app: benchmarkservice
       containers:
       - name: server
-        image: matslo123/benchmarkservice:v0.5.0@sha256:ea3905c2a87fd9230f3ae67d3115f2405a2f9c5155d2c8155b6a6a0923da96f0
+        image: matslo123/benchmarkservice:v0.5.0@sha256:ff16cd2f0e927a1241fc4f7dae72945c365855eb7e04faf311a2e8955b105e93
         env:
         - name: PORT
           value: "8080"

@@ -71,6 +71,7 @@ type frontendServer struct {
 	cartOperationWaitTimeout time.Duration
 	tracingEnabled           bool
 	log                      *logrus.Logger
+	shutdown                 chan struct{}
 
 	collectorAddr string
 	collectorConn *grpc.ClientConn
@@ -83,7 +84,7 @@ func main() {
 	log := newJSONLogger()
 	tracingEnabled := os.Getenv("ENABLE_TRACING") == "1"
 
-	svc := &frontendServer{log: log, tracingEnabled: tracingEnabled}
+	svc := &frontendServer{log: log, tracingEnabled: tracingEnabled, shutdown: make(chan struct{})}
 	initializePlatform(log)
 
 	otel.SetTextMapPropagator(
@@ -133,6 +134,7 @@ func main() {
 	r.HandleFunc(baseUrl+"/cart/empty", svc.emptyCartHandler).Methods(http.MethodPost)
 	r.HandleFunc(baseUrl+"/operations/{id}", svc.operationHandler).Methods(http.MethodGet)
 	r.HandleFunc(baseUrl+"/orders/{id}", svc.orderHandler).Methods(http.MethodGet)
+	r.HandleFunc(baseUrl+"/orders/{id}/events", svc.orderEventsHandler).Methods(http.MethodGet)
 	r.HandleFunc(baseUrl+"/setCurrency", svc.setCurrencyHandler).Methods(http.MethodPost)
 	r.HandleFunc(baseUrl+"/logout", svc.logoutHandler).Methods(http.MethodGet)
 	r.HandleFunc(baseUrl+"/cart/checkout", svc.placeOrderHandler).Methods(http.MethodPost)
@@ -185,6 +187,7 @@ func main() {
 	}
 	shutdownContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	close(svc.shutdown)
 	if err := server.Shutdown(shutdownContext); err != nil {
 		log.WithError(err).Warn("frontend HTTP drain failed")
 	}

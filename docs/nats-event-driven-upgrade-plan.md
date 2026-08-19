@@ -339,6 +339,7 @@ back to HTTP.
 | `POST /cart/checkout` | Tokenize card, publish durable `order.submit`, return `202` with `Location: /orders/{order_id}` |
 | `GET /assistant` | Query `storefront.currencies`, then render the existing page |
 | `GET /orders/{order_id}` | Query `storefront.order`; return `200` with the known processing/terminal status, `404` if unknown, or `503` if the projection query is unavailable |
+| `GET /orders/{order_id}/events` | SSE stream of session-scoped, sanitized order status changes |
 | `GET /operations/{operation_id}` | Query `storefront.operation`; return queued/processing/succeeded/failed |
 | `GET /operations/{operation_id}/events` | Optional SSE stream of sanitized status changes |
 | `POST /bot` | Store image externally, publish `assistant.generate-response`, return `202` and an operation URL |
@@ -370,10 +371,10 @@ must be updated to follow `202`, poll until a terminal state, and reuse an
 
 For optional SSE, `storefrontprojectionservice` publishes a sanitized Core NATS
 notification on `boutique.live.operation.<operation-id>` after updating the
-authoritative operation projection. Only the frontend instance holding that SSE
-connection subscribes. Core delivery is best-effort, so reconnecting clients
-always resume by querying the operation resource rather than relying on missed
-notifications.
+authoritative operation or order projection. An order ID is also its checkout
+operation ID. Only the frontend instance holding that SSE connection subscribes.
+Core delivery is best-effort, so reconnecting clients always resume by querying
+the authoritative resource rather than relying on missed notifications.
 
 ## Checkout saga
 
@@ -647,7 +648,8 @@ Subjects of type `live` like
 boutique.live.operation.<operation-id>
 ```
 
-were not used in the end. Instead, frontend polls for changes to the order.
+carry best-effort order updates to active frontend SSE connections. Reconnects
+query the authoritative order projection before waiting for another update.
 
 
 ## Acceptance tests for the final architecture

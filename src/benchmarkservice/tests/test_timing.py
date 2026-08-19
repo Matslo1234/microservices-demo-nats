@@ -3,34 +3,20 @@
 
 import unittest
 
-from timing import outcome_latency_ms
+from timing import received_latency_ms
 
 
 class TimingTest(unittest.TestCase):
-    def test_outcome_latency_uses_terminal_timestamp(self) -> None:
+    def test_received_latency_uses_local_event_receipt(self) -> None:
         self.assertAlmostEqual(
             125.25,
-            outcome_latency_ms(
-                1_785_024_000.0, "2026-07-26T00:00:00.125250Z"
-            ),
+            received_latency_ms(100.0, 100.12525),
             places=3,
         )
 
-    def test_outcome_latency_accepts_rfc3339_offset(self) -> None:
-        self.assertAlmostEqual(
-            250.0,
-            outcome_latency_ms(
-                1_785_024_000.0, "2026-07-26T02:00:00.250+02:00"
-            ),
-            places=3,
-        )
-
-    def test_outcome_latency_requires_timestamp_and_timezone(self) -> None:
-        for value in (None, "", "not-a-time", "2026-07-26T00:00:00"):
-            with self.subTest(value=value):
-                with self.assertRaises(ValueError):
-                    outcome_latency_ms(1_785_024_000.0, value)
-
+    def test_received_latency_rejects_reversed_clock_values(self) -> None:
+        with self.assertRaises(ValueError):
+            received_latency_ms(100.0, 99.0)
 
 if __name__ == "__main__":
     unittest.main()

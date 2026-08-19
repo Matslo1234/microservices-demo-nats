@@ -333,6 +333,42 @@ func TestTerminalOrderOutcomeUsesImmutableJetStreamPublishTime(t *testing.T) {
 	}
 }
 
+func TestOrderProjectionPublishesCommittedViewToLiveSubject(t *testing.T) {
+	orders := newMemoryKV()
+	var subject string
+	var update storefront.OrderView
+	worker := &projector{
+		orders: orders,
+		publishLive: func(publishedSubject string, data []byte) error {
+			subject = publishedSubject
+			return json.Unmarshal(data, &update)
+		},
+	}
+	want := storefront.OrderView{
+		OrderID: "order-1", UserID: "user-1", Status: "PROCESSING",
+		Stage: "WAITING_FOR_QUOTE", UpdatedAt: time.Now().UTC(),
+	}
+
+	if err := worker.updateOrder(want); err != nil {
+		t.Fatal(err)
+	}
+	if subject != "boutique.live.operation.order-1" {
+		t.Fatalf("live subject = %q, want order operation subject", subject)
+	}
+	if update.OrderID != want.OrderID || update.UserID != want.UserID ||
+		update.Status != want.Status || update.Stage != want.Stage ||
+		!update.UpdatedAt.Equal(want.UpdatedAt) {
+		t.Fatalf("unexpected live order update: %#v", update)
+	}
+	committed, err := getJSON[storefront.OrderView](orders, storefront.OrderKey(want.OrderID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if committed.OrderID != update.OrderID || committed.Status != update.Status {
+		t.Fatalf("live update %#v does not match committed view %#v", update, committed)
+	}
+}
+
 func TestProjectionProcessesStreamBeforeFetchBatchCloses(t *testing.T) {
 	orders := newMemoryKV()
 	worker := &projector{orders: orders}

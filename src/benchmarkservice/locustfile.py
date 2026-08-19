@@ -8,6 +8,7 @@ import math
 import random
 import time
 import uuid
+from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any
 
@@ -27,7 +28,16 @@ from runtime import (
     submission_deadline,
 )
 from session_cookie import SESSION_COOKIE_NAME, issued_session_cookie
-from timing import outcome_latency_ms
+from sse import (
+    ReceivedOrderEvent,
+    SSEProtocolError,
+    close_stream_response,
+    is_event_stream_content_type,
+    iter_received_orders,
+    order_events_url,
+    utc_timestamp,
+)
+from timing import received_latency_ms
 
 
 PRODUCTS = (
@@ -50,10 +60,29 @@ TERMINAL_ORDER_STATUSES = {
 }
 TERMINAL_NOTIFICATION_STATUSES = {"SENT", "FAILED"}
 TERMINAL_CART_CLEAR_STATUSES = {"SUCCEEDED", "REJECTED"}
+SSE_RECONNECT_DELAY_SECONDS = 0.25
+SSE_NETWORK_TIMEOUT_SECONDS = 20.0
 SETTLEMENT_TRACKERS: set[gevent.Greenlet] = set()
 
 
 class BusinessFailure(Exception):
+    def __init__(
+        self,
+        outcome: str,
+        detail: str = "",
+        *,
+        received_monotonic: float | None = None,
+        received_epoch: float | None = None,
+    ) -> None:
+        suffix = f": {detail}" if detail else ""
+        super().__init__(outcome + suffix)
+        self.outcome = outcome
+        self.detail = detail
+        self.received_monotonic = received_monotonic
+        self.received_epoch = received_epoch
+
+
+class SSEDeadlineReached(Exception):
     pass
 
 
@@ -65,9 +94,60 @@ def retry_after_seconds(response: Any, default: float = 1.0) -> float:
     return min(5.0, max(0.05, value))
 
 
-def failure_message(outcome: str, detail: str = "") -> BusinessFailure:
-    suffix = f": {detail}" if detail else ""
-    return BusinessFailure(outcome + suffix)
+def failure_message(
+    outcome: str,
+    detail: str = "",
+    *,
+    received_monotonic: float | None = None,
+    received_epoch: float | None = None,
+) -> BusinessFailure:
+    return BusinessFailure(
+        outcome,
+        detail,
+        received_monotonic=received_monotonic,
+        received_epoch=received_epoch,
+    )
+
+
+def receipt_context(
+    context: dict[str, Any],
+    prefix: str,
+    received_epoch: float,
+    event_id: str | None = None,
+) -> None:
+    context[f"{prefix}_received_at"] = utc_timestamp(received_epoch)
+    context[f"{prefix}_received_epoch"] = round(received_epoch, 6)
+    if event_id:
+        context[f"{prefix}_event_id"] = event_id
+
+
+def record_received_failure(
+    context: dict[str, Any], error: BusinessFailure
+) -> None:
+    if error.received_epoch is None:
+        return
+    receipt_context(context, "failure", error.received_epoch)
+    context["failure_message"] = error.detail or str(error)
+
+
+def close_order_stream(
+    stream: Iterator[ReceivedOrderEvent] | None,
+) -> None:
+    if stream is None:
+        return
+    close = getattr(stream, "close", None)
+    if callable(close):
+        close()
+
+
+def next_order_event_before(
+    stream: Iterator[ReceivedOrderEvent], deadline: float
+) -> ReceivedOrderEvent:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise SSEDeadlineReached()
+    with gevent.Timeout(remaining, SSEDeadlineReached()):
+        return next(stream)
 
 
 @contextmanager
@@ -411,7 +491,7 @@ class NatsAdapter(StorefrontAdapter):
         data = self.checkout_data()
         checkout_started = time.monotonic()
         checkout_started_epoch = time.time()
-        outcome_context, order, location, outcome_error = (
+        outcome_context, order, events_location, stream, outcome_error = (
             self._checkout_to_outcome(
                 data,
                 dict(base_context),
@@ -419,14 +499,13 @@ class NatsAdapter(StorefrontAdapter):
                 checkout_started_epoch,
             )
         )
-        settled_context.update(
-            {
-                "accepted": outcome_context.get("accepted", False),
-                "outcome": outcome_context.get("outcome", "UNKNOWN"),
-                "order_id": outcome_context.get("order_id"),
-            }
-        )
-        if outcome_error is not None or order is None or location is None:
+        settled_context.update(outcome_context)
+        if (
+            outcome_error is not None
+            or order is None
+            or events_location is None
+        ):
+            close_order_stream(stream)
             settled_context["settlement"] = "ORDER_NOT_COMPLETED"
             self._fire_settlement(
                 settled_context,
@@ -440,8 +519,9 @@ class NatsAdapter(StorefrontAdapter):
             return
 
         arguments = (
-            location,
+            events_location,
             order,
+            stream,
             checkout_started,
             checkout_started_epoch,
             settled_context,
@@ -455,8 +535,9 @@ class NatsAdapter(StorefrontAdapter):
 
     def _track_settlement(
         self,
-        location: str,
-        order: dict[str, Any],
+        events_location: str,
+        order: ReceivedOrderEvent,
+        stream: Iterator[ReceivedOrderEvent] | None,
         checkout_started: float,
         checkout_started_epoch: float,
         context: dict[str, Any],
@@ -464,7 +545,11 @@ class NatsAdapter(StorefrontAdapter):
         error: BusinessFailure | None = failure_message("INCOMPLETE")
         try:
             error = self._wait_for_settlement(
-                location, order, checkout_started, context
+                events_location,
+                order,
+                stream,
+                checkout_started,
+                context,
             )
         finally:
             if "settlement" not in context:
@@ -480,10 +565,17 @@ class NatsAdapter(StorefrontAdapter):
         checkout_started_epoch: float,
         error: BusinessFailure | None,
     ) -> None:
+        finished_monotonic = context.get("_settlement_received_monotonic")
+        if not isinstance(finished_monotonic, (int, float)):
+            finished_monotonic = getattr(error, "received_monotonic", None)
+        if not isinstance(finished_monotonic, (int, float)):
+            finished_monotonic = time.monotonic()
         self.user.environment.events.request.fire(
             request_type="BUSINESS",
             name="checkout_to_settled",
-            response_time=(time.monotonic() - checkout_started) * 1000,
+            response_time=received_latency_ms(
+                checkout_started, float(finished_monotonic)
+            ),
             response_length=0,
             response=None,
             context=context,
@@ -500,12 +592,15 @@ class NatsAdapter(StorefrontAdapter):
         checkout_started_epoch: float,
     ) -> tuple[
         dict[str, Any],
-        dict[str, Any] | None,
+        ReceivedOrderEvent | None,
         str | None,
+        Iterator[ReceivedOrderEvent] | None,
         BusinessFailure | None,
     ]:
-        final_order: dict[str, Any] | None = None
+        final_order: ReceivedOrderEvent | None = None
         location: str | None = None
+        events_location: str | None = None
+        stream: Iterator[ReceivedOrderEvent] | None = None
         error: BusinessFailure | None = None
         transaction_id = str(uuid.uuid4())
         context["transaction_id"] = transaction_id
@@ -577,93 +672,188 @@ class NatsAdapter(StorefrontAdapter):
                             RECORDER.accepted(
                                 transaction_id, str(context["phase"])
                             )
-                            delay = retry_after_seconds(response)
 
             if error is not None or location is None:
                 outcome_measurement["exception"] = error
-                return context, None, None, error
+                return context, None, None, None, error
+
+            try:
+                events_location = order_events_url(location)
+            except ValueError as location_error:
+                context["outcome"] = "INVALID_RESPONSE"
+                error = failure_message(
+                    "INVALID_RESPONSE", str(location_error)
+                )
+                outcome_measurement["exception"] = error
+                RECORDER.terminal(
+                    transaction_id, "INVALID_RESPONSE", phase_now()
+                )
+                return context, None, None, None, error
 
             per_order_deadline = (
                 checkout_started + CONFIG.outcome_timeout_seconds
             )
             deadline = min(per_order_deadline, drain_deadline())
             while time.monotonic() < deadline:
-                gevent.sleep(delay)
-                with self.client.get(
-                    location,
-                    headers=self.headers("application/json"),
-                    catch_response=True,
-                    name="/orders/[id]",
-                ) as status_response:
-                    delay = retry_after_seconds(status_response)
-                    if status_response.status_code in (404, 503):
-                        status_response.success()
-                        continue
-                    if status_response.status_code != 200:
-                        status_response.failure(
-                            "unexpected order status "
-                            f"{status_response.status_code}"
-                        )
-                        context["outcome"] = "STATUS_ERROR"
-                        error = failure_message(
-                            "STATUS_ERROR",
-                            f"status {status_response.status_code}",
-                        )
-                        outcome_measurement["exception"] = error
-                        RECORDER.terminal(
-                            transaction_id, "STATUS_ERROR", phase_now()
-                        )
-                        return context, None, location, error
-                    try:
-                        order = status_response.json()
-                    except Exception:
-                        status_response.failure("order response is not JSON")
-                        context["outcome"] = "INVALID_RESPONSE"
-                        error = failure_message(
-                            "INVALID_RESPONSE", "order status is not JSON"
-                        )
-                        outcome_measurement["exception"] = error
-                        RECORDER.terminal(
-                            transaction_id, "INVALID_RESPONSE", phase_now()
-                        )
-                        return context, None, location, error
-                    status_response.success()
-                    status = str(order.get("status", "UNKNOWN"))
-                    if status not in TERMINAL_ORDER_STATUSES:
-                        continue
-                    try:
-                        response_time = outcome_latency_ms(
-                            checkout_started_epoch, order.get("outcome_at")
-                        )
-                    except ValueError as timestamp_error:
-                        context["outcome"] = "INVALID_RESPONSE"
-                        error = failure_message(
-                            "INVALID_RESPONSE", str(timestamp_error)
-                        )
-                        outcome_measurement["exception"] = error
-                        RECORDER.terminal(
-                            transaction_id, "INVALID_RESPONSE", phase_now()
-                        )
-                        return context, None, location, error
-                    outcome_measurement["response_time"] = response_time
-                    context.update(
-                        {
-                            "outcome": status,
-                            "order_id": order.get("order_id")
-                            or context.get("order_id"),
-                            "failure_code": order.get("failure_code"),
-                            "outcome_at": order.get("outcome_at"),
-                        }
+                if stream is None:
+                    stream, error = self._open_order_event_stream(
+                        events_location, "/orders/[id]/events"
                     )
-                    RECORDER.terminal(transaction_id, status, phase_now())
-                    final_order = order
-                    if status != "COMPLETED":
-                        error = failure_message(
-                            status, str(order.get("failure_code", ""))
-                        )
+                    if error is not None:
+                        context["outcome"] = error.outcome
+                        record_received_failure(context, error)
+                        if error.received_monotonic is not None:
+                            outcome_measurement["response_time"] = (
+                                received_latency_ms(
+                                    checkout_started,
+                                    error.received_monotonic,
+                                )
+                            )
                         outcome_measurement["exception"] = error
-                    return context, final_order, location, error
+                        RECORDER.terminal(
+                            transaction_id, error.outcome, phase_now()
+                        )
+                        return context, None, events_location, None, error
+                    if stream is None:
+                        gevent.sleep(
+                            min(
+                                SSE_RECONNECT_DELAY_SECONDS,
+                                max(0.0, deadline - time.monotonic()),
+                            )
+                        )
+                        continue
 
+                try:
+                    received_order = next_order_event_before(stream, deadline)
+                except SSEDeadlineReached:
+                    break
+                except SSEProtocolError as stream_error:
+                    received_monotonic = time.monotonic()
+                    received_epoch = time.time()
+                    close_order_stream(stream)
+                    stream = None
+                    context["outcome"] = "INVALID_RESPONSE"
+                    error = failure_message(
+                        "INVALID_RESPONSE",
+                        str(stream_error),
+                        received_monotonic=received_monotonic,
+                        received_epoch=received_epoch,
+                    )
+                    record_received_failure(context, error)
+                    outcome_measurement["response_time"] = (
+                        received_latency_ms(
+                            checkout_started, received_monotonic
+                        )
+                    )
+                    outcome_measurement["exception"] = error
+                    RECORDER.terminal(
+                        transaction_id, "INVALID_RESPONSE", phase_now()
+                    )
+                    return context, None, events_location, None, error
+                except StopIteration:
+                    close_order_stream(stream)
+                    stream = None
+                    gevent.sleep(
+                        min(
+                            SSE_RECONNECT_DELAY_SECONDS,
+                            max(0.0, deadline - time.monotonic()),
+                        )
+                    )
+                    continue
+                except gevent.Timeout:
+                    close_order_stream(stream)
+                    stream = None
+                    continue
+                except Exception:
+                    close_order_stream(stream)
+                    stream = None
+                    gevent.sleep(
+                        min(
+                            SSE_RECONNECT_DELAY_SECONDS,
+                            max(0.0, deadline - time.monotonic()),
+                        )
+                    )
+                    continue
+
+                order = received_order.order
+                expected_order_id = context.get("order_id")
+                event_order_id = str(order.get("order_id", ""))
+                if expected_order_id and event_order_id != expected_order_id:
+                    received_monotonic = received_order.received_monotonic
+                    received_epoch = received_order.received_epoch
+                    close_order_stream(stream)
+                    stream = None
+                    context["outcome"] = "INVALID_RESPONSE"
+                    error = failure_message(
+                        "INVALID_RESPONSE",
+                        "order event ID does not match accepted order",
+                        received_monotonic=received_monotonic,
+                        received_epoch=received_epoch,
+                    )
+                    record_received_failure(context, error)
+                    outcome_measurement["response_time"] = (
+                        received_latency_ms(
+                            checkout_started, received_monotonic
+                        )
+                    )
+                    outcome_measurement["exception"] = error
+                    RECORDER.terminal(
+                        transaction_id, "INVALID_RESPONSE", phase_now()
+                    )
+                    return context, None, events_location, None, error
+
+                status = str(order.get("status", "UNKNOWN"))
+                if status not in TERMINAL_ORDER_STATUSES:
+                    continue
+
+                outcome_measurement["response_time"] = received_latency_ms(
+                    checkout_started, received_order.received_monotonic
+                )
+                context.update(
+                    {
+                        "outcome": status,
+                        "order_id": event_order_id,
+                        "failure_code": order.get("failure_code"),
+                        "safe_message": order.get("safe_message"),
+                        "outcome_at": order.get("outcome_at"),
+                        "outcome_transport": "SSE",
+                    }
+                )
+                receipt_context(
+                    context,
+                    "outcome",
+                    received_order.received_epoch,
+                    received_order.event_id,
+                )
+                RECORDER.terminal(transaction_id, status, phase_now())
+                final_order = received_order
+                if status != "COMPLETED":
+                    detail = str(
+                        order.get("safe_message")
+                        or order.get("failure_code")
+                        or ""
+                    )
+                    error = failure_message(
+                        status,
+                        detail,
+                        received_monotonic=(
+                            received_order.received_monotonic
+                        ),
+                        received_epoch=received_order.received_epoch,
+                    )
+                    record_received_failure(context, error)
+                    outcome_measurement["exception"] = error
+                    close_order_stream(stream)
+                    stream = None
+                return (
+                    context,
+                    final_order,
+                    events_location,
+                    stream,
+                    error,
+                )
+
+            close_order_stream(stream)
             outcome = (
                 "INCOMPLETE"
                 if drain_deadline() <= per_order_deadline
@@ -673,73 +863,241 @@ class NatsAdapter(StorefrontAdapter):
             error = failure_message(outcome)
             outcome_measurement["exception"] = error
             RECORDER.terminal(transaction_id, outcome, phase_now())
-            return context, None, location, error
+            return context, None, events_location, None, error
+
+    def _open_order_event_stream(
+        self, events_location: str, name: str
+    ) -> tuple[
+        Iterator[ReceivedOrderEvent] | None,
+        BusinessFailure | None,
+    ]:
+        response = self.client.get(
+            events_location,
+            headers=self.headers("text/event-stream"),
+            allow_redirects=False,
+            catch_response=True,
+            stream=True,
+            name=name,
+        )
+        received_monotonic = time.monotonic()
+        received_epoch = time.time()
+        with response as status_response:
+            if status_response.status_code in (404, 503):
+                status_response.success()
+                close_stream_response(status_response)
+                return None, None
+            if status_response.status_code != 200:
+                status_response.failure(
+                    "unexpected order event stream status "
+                    f"{status_response.status_code}"
+                )
+                close_stream_response(status_response)
+                return None, failure_message(
+                    "STATUS_ERROR",
+                    f"SSE status {status_response.status_code}",
+                    received_monotonic=received_monotonic,
+                    received_epoch=received_epoch,
+                )
+            content_type = status_response.headers.get("Content-Type", "")
+            if not is_event_stream_content_type(content_type):
+                status_response.failure(
+                    "order event response is not text/event-stream"
+                )
+                close_stream_response(status_response)
+                return None, failure_message(
+                    "INVALID_RESPONSE",
+                    f"SSE Content-Type is {content_type!r}",
+                    received_monotonic=received_monotonic,
+                    received_epoch=received_epoch,
+                )
+            status_response.success()
+        return iter_received_orders(response), None
 
     def _wait_for_settlement(
         self,
-        location: str,
-        order: dict[str, Any],
+        events_location: str,
+        order: ReceivedOrderEvent,
+        stream: Iterator[ReceivedOrderEvent] | None,
         checkout_started: float,
         context: dict[str, Any],
     ) -> BusinessFailure | None:
-        delay = 1.0
         per_order_deadline = (
             checkout_started + CONFIG.settlement_timeout_seconds
         )
         deadline = min(per_order_deadline, drain_deadline())
-        while True:
-            notification_status = str(order.get("notification_status", ""))
-            cart_clear_status = str(order.get("cart_clear_status", ""))
-            context.update(
-                {
-                    "notification_status": notification_status or None,
-                    "cart_clear_status": cart_clear_status or None,
-                    "cart_clear_failure_code": order.get(
-                        "cart_clear_failure_code"
-                    ),
-                }
-            )
-            if (
-                notification_status in TERMINAL_NOTIFICATION_STATUSES
-                and cart_clear_status in TERMINAL_CART_CLEAR_STATUSES
-            ):
-                context["settlement"] = "SETTLED"
-                return None
-            if time.monotonic() >= deadline:
-                settlement = (
-                    "INCOMPLETE"
-                    if drain_deadline() <= per_order_deadline
-                    else "SETTLEMENT_TIMEOUT"
-                )
-                context["settlement"] = settlement
-                return failure_message(settlement)
-            gevent.sleep(delay)
-            with self.client.get(
-                location,
-                headers=self.headers("application/json"),
-                catch_response=True,
-                name="/orders/[id] [settlement]",
-            ) as status_response:
-                delay = retry_after_seconds(status_response)
-                if status_response.status_code in (404, 503):
-                    status_response.success()
-                    continue
-                if status_response.status_code != 200:
-                    status_response.failure(
-                        "unexpected settlement status "
-                        f"{status_response.status_code}"
+        try:
+            while True:
+                if self._record_settlement_event(context, order):
+                    context["settlement"] = "SETTLED"
+                    return None
+                if time.monotonic() >= deadline:
+                    settlement = (
+                        "INCOMPLETE"
+                        if drain_deadline() <= per_order_deadline
+                        else "SETTLEMENT_TIMEOUT"
                     )
-                    context["settlement"] = "STATUS_ERROR"
-                    return failure_message(
-                        "STATUS_ERROR", f"status {status_response.status_code}"
+                    context["settlement"] = settlement
+                    return failure_message(settlement)
+
+                if stream is None:
+                    stream, error = self._open_order_event_stream(
+                        events_location,
+                        "/orders/[id]/events [settlement]",
                     )
+                    if error is not None:
+                        context["settlement"] = error.outcome
+                        record_received_failure(context, error)
+                        return error
+                    if stream is None:
+                        gevent.sleep(
+                            min(
+                                SSE_RECONNECT_DELAY_SECONDS,
+                                max(0.0, deadline - time.monotonic()),
+                            )
+                        )
+                        continue
+
                 try:
-                    order = status_response.json()
-                except Exception:
-                    status_response.failure("settlement response is not JSON")
+                    order = next_order_event_before(stream, deadline)
+                except SSEDeadlineReached:
+                    continue
+                except SSEProtocolError as stream_error:
+                    received_monotonic = time.monotonic()
+                    received_epoch = time.time()
                     context["settlement"] = "INVALID_RESPONSE"
-                    return failure_message("INVALID_RESPONSE")
-                status_response.success()
+                    error = failure_message(
+                        "INVALID_RESPONSE",
+                        str(stream_error),
+                        received_monotonic=received_monotonic,
+                        received_epoch=received_epoch,
+                    )
+                    record_received_failure(context, error)
+                    return error
+                except StopIteration:
+                    close_order_stream(stream)
+                    stream = None
+                    gevent.sleep(
+                        min(
+                            SSE_RECONNECT_DELAY_SECONDS,
+                            max(0.0, deadline - time.monotonic()),
+                        )
+                    )
+                except gevent.Timeout:
+                    close_order_stream(stream)
+                    stream = None
+                except Exception:
+                    close_order_stream(stream)
+                    stream = None
+                    gevent.sleep(
+                        min(
+                            SSE_RECONNECT_DELAY_SECONDS,
+                            max(0.0, deadline - time.monotonic()),
+                        )
+                    )
+        finally:
+            close_order_stream(stream)
+
+    def _record_settlement_event(
+        self,
+        context: dict[str, Any],
+        received_order: ReceivedOrderEvent,
+    ) -> bool:
+        order = received_order.order
+        notification_status = str(order.get("notification_status", ""))
+        cart_clear_status = str(order.get("cart_clear_status", ""))
+        context.update(
+            {
+                "notification_status": notification_status or None,
+                "cart_clear_status": cart_clear_status or None,
+                "cart_clear_failure_code": order.get(
+                    "cart_clear_failure_code"
+                ),
+                "settlement_transport": "SSE",
+            }
+        )
+        if (
+            notification_status in TERMINAL_NOTIFICATION_STATUSES
+            and "notification_received_at" not in context
+        ):
+            receipt_context(
+                context,
+                "notification",
+                received_order.received_epoch,
+                received_order.event_id,
+            )
+        if (
+            notification_status == "FAILED"
+            and "notification_failure_received_at" not in context
+        ):
+            receipt_context(
+                context,
+                "notification_failure",
+                received_order.received_epoch,
+                received_order.event_id,
+            )
+            context["notification_failure_message"] = (
+                "order confirmation notification failed"
+            )
+            if "failure_received_at" not in context:
+                receipt_context(
+                    context,
+                    "failure",
+                    received_order.received_epoch,
+                    received_order.event_id,
+                )
+                context["failure_message"] = context[
+                    "notification_failure_message"
+                ]
+        if (
+            cart_clear_status in TERMINAL_CART_CLEAR_STATUSES
+            and "cart_clear_received_at" not in context
+        ):
+            receipt_context(
+                context,
+                "cart_clear",
+                received_order.received_epoch,
+                received_order.event_id,
+            )
+        if (
+            cart_clear_status == "REJECTED"
+            and "cart_clear_failure_received_at" not in context
+        ):
+            receipt_context(
+                context,
+                "cart_clear_failure",
+                received_order.received_epoch,
+                received_order.event_id,
+            )
+            context["cart_clear_failure_message"] = str(
+                order.get("cart_clear_failure_code")
+                or "cart clear rejected"
+            )
+            if "failure_received_at" not in context:
+                receipt_context(
+                    context,
+                    "failure",
+                    received_order.received_epoch,
+                    received_order.event_id,
+                )
+                context["failure_message"] = context[
+                    "cart_clear_failure_message"
+                ]
+
+        settled = (
+            notification_status in TERMINAL_NOTIFICATION_STATUSES
+            and cart_clear_status in TERMINAL_CART_CLEAR_STATUSES
+        )
+        if settled:
+            receipt_context(
+                context,
+                "settlement",
+                received_order.received_epoch,
+                received_order.event_id,
+            )
+            context["_settlement_received_monotonic"] = (
+                received_order.received_monotonic
+            )
+        return settled
 
 
 def adapter_for(
@@ -751,7 +1109,7 @@ def adapter_for(
 
 class ClosedLoopUser(FastHttpUser):
     wait_time = between(1, 10)
-    network_timeout = 10.0
+    network_timeout = SSE_NETWORK_TIMEOUT_SECONDS
     connection_timeout = 5.0
 
     def on_start(self) -> None:
@@ -800,7 +1158,7 @@ class ClosedLoopUser(FastHttpUser):
 class OpenLoopDriver(FastHttpUser):
     fixed_count = 1
     wait_time = lambda self: 0
-    network_timeout = 10.0
+    network_timeout = SSE_NETWORK_TIMEOUT_SECONDS
     connection_timeout = 5.0
     concurrency = max(
         20,

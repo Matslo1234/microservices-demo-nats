@@ -503,7 +503,7 @@ data:
                 "boutique.qry.payment.tokenize.v1", "$JS.API.INFO",
                 "$JS.API.STREAM.INFO.*"
               ],
-              subscribe: ["_INBOX.>"]
+              subscribe: ["_INBOX.>", "boutique.live.operation.>"]
             }
           },
           {
@@ -513,7 +513,8 @@ data:
                 "$JS.API.>", "$JS.ACK.>", "$JS.FC.>", "_INBOX.>",
                 "$KV.STOREFRONT_PRODUCTS.>", "$KV.STOREFRONT_CARTS.>",
                 "$KV.STOREFRONT_CONTEXT.>", "$KV.STOREFRONT_ORDERS.>",
-                "$KV.STOREFRONT_OPERATIONS.>", "$KV.STOREFRONT_ASSISTANT.>"
+                "$KV.STOREFRONT_OPERATIONS.>", "$KV.STOREFRONT_ASSISTANT.>",
+                "boutique.live.operation.>"
               ],
               subscribe: ["_INBOX.>", "$SRV.>", "boutique.evt.>", "boutique.qry.storefront.>"]
             }
@@ -2274,7 +2275,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-benchmarkservice
-        image: matslo123/benchmarkservice:v0.4.0@sha256:ea3905c2a87fd9230f3ae67d3115f2405a2f9c5155d2c8155b6a6a0923da96f0
+        image: matslo123/benchmarkservice:v0.4.0@sha256:ff16cd2f0e927a1241fc4f7dae72945c365855eb7e04faf311a2e8955b105e93
         livenessProbe:
           httpGet:
             path: /healthz
@@ -2841,7 +2842,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-frontend
-        image: matslo123/frontend:v0.4.0@sha256:0a84e385b5382aeb19c634e1a7c33f6410e50f2ad9b590fc39e56b3e3cf6df14
+        image: matslo123/frontend:v0.4.0@sha256:fc733170d78ff5bb8d17d930b72712e84b634e13cb0326a987266660fa83bc5a
         livenessProbe:
           failureThreshold: 6
           httpGet:
@@ -2869,7 +2870,7 @@ spec:
             cpu: "1"
             memory: 2Gi
           requests:
-            cpu: 800m
+            cpu: 300m
             memory: 128Mi
         securityContext:
           allowPrivilegeEscalation: false
@@ -3217,7 +3218,7 @@ spec:
             cpu: "2"
             memory: 2Gi
           requests:
-            cpu: 750m
+            cpu: 300m
             memory: 256Mi
         securityContext:
           allowPrivilegeEscalation: false
@@ -3400,7 +3401,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-storefrontprojectionservice
-        image: matslo123/storefrontprojectionservice:v0.4.0@sha256:87306446db89abfcb6aaaee80939dd1e1999e115a9970eced9bda93df598698e
+        image: matslo123/storefrontprojectionservice:v0.4.0@sha256:e2936cd35fb0067c75cd5d7f61ca642d95153a9079870d583c4eb664e4625483
         livenessProbe:
           failureThreshold: 6
           httpGet:

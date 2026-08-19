@@ -16,6 +16,7 @@ import (
 	commonv1 "github.com/GoogleCloudPlatform/microservices-demo/protos/common/v1"
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
+	"github.com/nats-io/nats.go"
 	"github.com/sirupsen/logrus"
 	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -23,9 +24,12 @@ import (
 
 const (
 	orderSubmitSubject      = "boutique.cmd.order.submit.v1"
+	liveOperationPrefix     = "boutique.live.operation."
 	orderAPIPollRetryAfter  = "1"
 	orderQueryAttempts      = 3
 	orderQueryRetryInterval = time.Second
+	orderSSEHeartbeat       = 15 * time.Second
+	orderSSEChannelSize     = 32
 )
 
 type paymentCard struct {
@@ -136,10 +140,10 @@ func (fe *frontendServer) orderHandler(response http.ResponseWriter, request *ht
 		http.Error(response, "order status unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	if orderNeedsPolling(view.Order) {
-		response.Header().Set("Retry-After", orderAPIPollRetryAfter)
-	}
 	if !acceptsHTML(request) {
+		if orderNeedsPolling(view.Order) {
+			response.Header().Set("Retry-After", orderAPIPollRetryAfter)
+		}
 		response.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(response).Encode(view.Order)
 		return
@@ -147,7 +151,124 @@ func (fe *frontendServer) orderHandler(response http.ResponseWriter, request *ht
 	response.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_ = templates.ExecuteTemplate(response, "order", injectCommonTemplateData(request, map[string]interface{}{
 		"show_currency": false, "order": view.Order, "order_url": baseUrl + "/orders/" + orderID,
+		"order_events_url": baseUrl + "/orders/" + orderID + "/events",
 	}))
+}
+
+func (fe *frontendServer) orderEventsHandler(response http.ResponseWriter, request *http.Request) {
+	orderID := mux.Vars(request)["id"]
+	subject, err := liveOperationSubject(orderID)
+	if err != nil {
+		http.Error(response, "invalid order ID", http.StatusBadRequest)
+		return
+	}
+
+	updates := make(chan *nats.Msg, orderSSEChannelSize)
+	subscription, err := fe.natsConn.ChanSubscribe(subject, updates)
+	if err != nil {
+		http.Error(response, "order updates unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	defer func() { _ = subscription.Unsubscribe() }()
+	// Ensure the subscription is active before reading the current view. Any
+	// notification racing with the query will then be buffered rather than lost.
+	if err := fe.natsConn.Flush(); err != nil {
+		http.Error(response, "order updates unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
+	view, err := fe.storefrontQuery(request.Context(), "order", storefrontQueryRequest{
+		OrderID: orderID, UserID: sessionID(request), CorrelationID: orderID,
+	})
+	if err != nil {
+		if errors.Is(err, errProjectionNotFound) {
+			http.Error(response, "order not found", http.StatusNotFound)
+			return
+		}
+		http.Error(response, "order status unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if view.Order == nil {
+		http.Error(response, "order status unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
+	response.Header().Set("Content-Type", "text/event-stream")
+	response.Header().Set("Cache-Control", "no-cache")
+	response.Header().Set("X-Accel-Buffering", "no")
+	controller := http.NewResponseController(response)
+	if err := writeOrderSSE(response, view.Order); err != nil {
+		return
+	}
+	if err := controller.Flush(); err != nil || !orderNeedsPolling(view.Order) {
+		return
+	}
+
+	lastUpdatedAt := view.Order.UpdatedAt
+	heartbeat := time.NewTicker(orderSSEHeartbeat)
+	defer heartbeat.Stop()
+	for {
+		select {
+		case <-request.Context().Done():
+			return
+		case <-fe.shutdown:
+			return
+		case <-heartbeat.C:
+			if _, err := fmt.Fprint(response, ": keep-alive\n\n"); err != nil {
+				return
+			}
+			if err := controller.Flush(); err != nil {
+				return
+			}
+		case message, ok := <-updates:
+			if !ok {
+				return
+			}
+			var order orderStatus
+			if err := json.Unmarshal(message.Data, &order); err != nil ||
+				order.OrderID != orderID || order.UserID != sessionID(request) ||
+				order.UpdatedAt.Before(lastUpdatedAt) {
+				continue
+			}
+			if err := writeOrderSSE(response, &order); err != nil {
+				return
+			}
+			if err := controller.Flush(); err != nil {
+				return
+			}
+			lastUpdatedAt = order.UpdatedAt
+			if !orderNeedsPolling(&order) {
+				return
+			}
+		}
+	}
+}
+
+func liveOperationSubject(operationID string) (string, error) {
+	if operationID == "" {
+		return "", errors.New("operation ID is empty")
+	}
+	for _, character := range operationID {
+		if (character < 'a' || character > 'z') &&
+			(character < 'A' || character > 'Z') &&
+			(character < '0' || character > '9') && character != '-' && character != '_' {
+			return "", errors.New("operation ID is not a safe NATS subject token")
+		}
+	}
+	return liveOperationPrefix + operationID, nil
+}
+
+func writeOrderSSE(response http.ResponseWriter, order *orderStatus) error {
+	if order == nil {
+		return errors.New("order status is missing")
+	}
+	encoded, err := json.Marshal(order)
+	if err != nil {
+		return err
+	}
+	eventID := order.UpdatedAt.UTC().Format(time.RFC3339Nano)
+	_, err = fmt.Fprintf(response, "event: order\nid: %s\ndata: %s\n\n", eventID, encoded)
+	return err
 }
 
 func queryOrderWithRetry(ctx context.Context, retryInterval time.Duration, retryNotFound bool,

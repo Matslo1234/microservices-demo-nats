@@ -12,6 +12,7 @@ data:
     allowed_subject="boutique.qry.storefront.home.v1"
     denied_subject="boutique.evt.payment.phase1-verify.v1"
     advisory_subject="boutique.evt.ops.phase1-max-delivery.v1"
+    live_subject="boutique.live.operation.phase1-verify-$(date +%s)"
     consumer="PHASE1_REPLAY_VERIFY"
     advisory_consumer="PHASE1_MAX_DELIVERY_VERIFY"
     payload="phase1-replay-payload"
@@ -24,6 +25,12 @@ data:
 
     nats_frontend() {
       nats --server="${NATS_URL}" --user=frontend --password="${FRONTEND_PASSWORD}" \
+        --tlsca=/etc/nats-ca/ca.crt --timeout=5s "$@"
+    }
+
+    nats_projection() {
+      nats --server="${NATS_URL}" --user=storefrontprojectionservice \
+        --password="${STOREFRONTPROJECTIONSERVICE_PASSWORD}" \
         --tlsca=/etc/nats-ca/ca.crt --timeout=5s "$@"
     }
 
@@ -104,6 +111,15 @@ data:
       exit 1
     fi
     echo "PASS: frontend publish allowlist permits storefront queries and denies payment events"
+
+    live_output=/tmp/live-update
+    nats_frontend sub "${live_subject}" --count 1 --raw >"${live_output}" &
+    live_subscriber=$!
+    sleep 1
+    nats_projection pub "${live_subject}" "phase1-live-update" >/dev/null
+    wait "${live_subscriber}"
+    test "$(cat "${live_output}")" = "phase1-live-update"
+    echo "PASS: projection live updates reach frontend SSE subscriptions"
 ---
 apiVersion: batch/v1
 kind: Job
@@ -139,6 +155,11 @@ spec:
             secretKeyRef:
               name: nats-server-auth
               key: FRONTEND_PASSWORD
+        - name: STOREFRONTPROJECTIONSERVICE_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: nats-server-auth
+              key: STOREFRONTPROJECTIONSERVICE_PASSWORD
         envFrom:
         - secretRef:
             name: nats-admin-credentials

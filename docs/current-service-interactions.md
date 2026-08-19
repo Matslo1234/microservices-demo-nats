@@ -9,10 +9,11 @@ The migration history and its acceptance criteria are in
 
 ```mermaid
 flowchart LR
-    User[Browser or API client] -->|HTTP| FE[frontend]
+    User[Browser or API client] -->|HTTP / order SSE| FE[frontend]
     Load[loadgenerator] -->|HTTP| FE
 
     FE -->|Core NATS projected queries| Projection[storefront projection]
+    Projection -->|Core NATS live order updates| FE
     FE -->|JetStream cart/order commands| NATS[(NATS JetStream)]
     FE -->|Core NATS tokenization query| Payment[payment]
 
@@ -50,13 +51,14 @@ bucket for either optional workload is present in the release path.
 
 ## Interaction model
 
-The architecture uses three interaction styles:
+The architecture uses four interaction styles:
 
 | Style | Subjects / storage | Purpose |
 | --- | --- | --- |
 | Durable commands | `boutique.cmd.>` in `BOUTIQUE_COMMANDS` | Cart changes and the checkout/payment/shipping workflow |
 | Replayable facts | `boutique.evt.>` in `BOUTIQUE_EVENTS` | Owner snapshots, workflow results, notifications, and storefront inputs |
 | Bounded queries | `boutique.qry.>` over Core NATS | Reads from the storefront projection and payment tokenization |
+| Live notifications | `boutique.live.operation.<order-id>` over Core NATS | Best-effort order updates bridged to active browser SSE connections |
 
 Commands and events use the protobuf envelope and identity conventions in
 [`development/nats-message-conventions.md`](development/nats-message-conventions.md).
@@ -74,6 +76,7 @@ domain owners directly.
 | Home, product, cart and currency views | `boutique.qry.storefront.home.v1`, `.product.v1`, `.cart.v1`, `.currencies.v1` |
 | Product metadata and search | `boutique.qry.storefront.product-meta.v1`, `.search-products.v1` |
 | Operation and order resources | `boutique.qry.storefront.operation.v1`, `.order.v1` |
+| Live order status | `boutique.live.operation.<order-id>` subscription exposed as `GET /orders/{id}/events` |
 | Product page context | `boutique.evt.storefront.page-viewed.v1` |
 | Add/clear cart | `boutique.cmd.cart.add-item.v1`, `.clear.v1`, plus `boutique.evt.storefront.operation-accepted.v1` |
 | Checkout | `boutique.qry.payment.tokenize.v1`, then `boutique.cmd.order.submit.v1` |
@@ -81,7 +84,12 @@ domain owners directly.
 Cart and checkout HTTP writes require or derive an idempotency identity. They
 return the same operation/order resource for a repeated identity. A write that
 cannot finish inside the bounded compatibility wait is represented as `202
-Accepted`; clients poll `/operations/{id}` or `/orders/{id}`.
+Accepted`; browser order pages subscribe to `/orders/{id}/events`, while API
+clients can continue polling `/operations/{id}` or `/orders/{id}`.
+The SSE endpoint first returns the session-scoped authoritative order view,
+then forwards named `order` events after projection updates. Core NATS delivery
+is intentionally ephemeral; reconnecting obtains a fresh view rather than
+replaying missed notifications.
 
 ### Domain ownership and consumers
 
@@ -96,7 +104,7 @@ Accepted`; clients poll `/operations/{id}` or `/orders/{id}`.
 | `shippingservice` | Shipping commands and cart facts | Deterministic fake-provider outcomes and shipping facts; no pod-owned provider state |
 | `paymentservice` | Tokenization query and payment commands | Key-ID-addressed short-lived tokens, deterministic signed provider references, and payment facts |
 | `emailservice` | Completed-order facts | Order/notification-keyed deterministic provider result and notification facts |
-| `storefrontprojectionservice` | `boutique.evt.>` | Query endpoints and five JetStream KV materialized views |
+| `storefrontprojectionservice` | `boutique.evt.>` | Query endpoints, best-effort live order notifications, and five JetStream KV materialized views |
 
 The storefront projection stores products, carts, recent page context, orders,
 and operation status in `STOREFRONT_PRODUCTS`, `STOREFRONT_CARTS`,

@@ -25,6 +25,8 @@ import (
 
 const projectionDurable = "storefront-projection-v1"
 
+const liveOperationPrefix = "boutique.live.operation."
+
 const (
 	projectionFetchSize   = 1024
 	projectionParallelism = 128
@@ -46,13 +48,14 @@ var projectionFilterSubjects = []string{
 }
 
 type projector struct {
-	js         nats.JetStreamContext
-	products   projectionKV
-	catalog    *projectionReadCache
-	carts      projectionKV
-	context    projectionKV
-	operations projectionKV
-	orders     projectionKV
+	js          nats.JetStreamContext
+	products    projectionKV
+	catalog     *projectionReadCache
+	carts       projectionKV
+	context     projectionKV
+	operations  projectionKV
+	orders      projectionKV
+	publishLive func(string, []byte) error
 
 	kvConflictRetries atomic.Uint64
 	staleEventSkips   atomic.Uint64
@@ -768,6 +771,7 @@ func (p *projector) updateOrder(incoming storefront.OrderView) error {
 			}
 			if _, err := p.orders.Create(key, encoded); err == nil {
 				p.recordProjected(incoming.UpdatedAt)
+				p.publishOrderUpdate(incoming)
 				return nil
 			} else if !isKVConflict(err) {
 				return err
@@ -803,6 +807,7 @@ func (p *projector) updateOrder(incoming storefront.OrderView) error {
 		}
 		if _, err := p.orders.Update(key, encoded, entry.Revision()); err == nil {
 			p.recordProjected(next.UpdatedAt)
+			p.publishOrderUpdate(next)
 			return nil
 		} else if !isKVConflict(err) {
 			return err
@@ -810,6 +815,42 @@ func (p *projector) updateOrder(incoming storefront.OrderView) error {
 		p.recordConflict(attempt)
 	}
 	return fmt.Errorf("order KV update conflicted too many times for %s", key)
+}
+
+func (p *projector) publishOrderUpdate(order storefront.OrderView) {
+	if p.publishLive == nil {
+		return
+	}
+	subject, err := liveOperationSubject(order.OrderID)
+	if err != nil {
+		log.Printf("order live update skipped order_id=%q error=%v", order.OrderID, err)
+		return
+	}
+	encoded, err := json.Marshal(order)
+	if err != nil {
+		log.Printf("order live update encoding failed order_id=%q error=%v", order.OrderID, err)
+		return
+	}
+	if err := p.publishLive(subject, encoded); err != nil {
+		// The KV projection remains authoritative. SSE clients reconnect through
+		// the query endpoint, so a best-effort live notification must never make
+		// the durable projection event fail or redeliver.
+		log.Printf("order live update failed order_id=%q error=%v", order.OrderID, err)
+	}
+}
+
+func liveOperationSubject(operationID string) (string, error) {
+	if operationID == "" {
+		return "", errors.New("operation ID is empty")
+	}
+	for _, character := range operationID {
+		if (character < 'a' || character > 'z') &&
+			(character < 'A' || character > 'Z') &&
+			(character < '0' || character > '9') && character != '-' && character != '_' {
+			return "", errors.New("operation ID is not a safe NATS subject token")
+		}
+	}
+	return liveOperationPrefix + operationID, nil
 }
 
 func mergeOrder(current, incoming storefront.OrderView) storefront.OrderView {
@@ -891,6 +932,7 @@ func (p *projector) updateOrderSettlement(
 			}
 			if _, err := p.orders.Create(key, encoded); err == nil {
 				p.recordProjected(view.UpdatedAt)
+				p.publishOrderUpdate(view)
 				return nil
 			} else if !isKVConflict(err) {
 				return err
@@ -924,6 +966,7 @@ func (p *projector) updateOrderSettlement(
 		}
 		if _, err := p.orders.Update(key, encoded, entry.Revision()); err == nil {
 			p.recordProjected(current.UpdatedAt)
+			p.publishOrderUpdate(current)
 			return nil
 		} else if !isKVConflict(err) {
 			return err

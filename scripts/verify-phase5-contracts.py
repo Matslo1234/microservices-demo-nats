@@ -28,7 +28,13 @@ frontend = "\n".join(item.read_text() for item in frontend_files)
 forbid(ROOT / "src/frontend", frontend, "NewCheckoutServiceClient", "checkoutSvcConn", "checkoutSvcAddr")
 require(ROOT / "src/frontend", frontend,
         "boutique.qry.payment.tokenize.v1", "boutique.cmd.order.submit.v1",
-        '"/orders/{id}"', "http.StatusAccepted", "PaymentToken:")
+        '"/orders/{id}"', '"/orders/{id}/events"', "http.StatusAccepted",
+        '"text/event-stream"', "PaymentToken:")
+order_template_path, order_template = source(
+    "src", "frontend", "templates", "order.html")
+require(order_template_path, order_template,
+        "new EventSource", "orderEventsUrl")
+forbid(order_template_path, order_template, "setTimeout", "fetch(")
 
 checkout_files = [
     item for item in (ROOT / "src/checkoutservice").glob("*.go")
@@ -84,7 +90,20 @@ projection_files = list((ROOT / "src/storefrontprojectionservice").glob("*.go"))
 projection = "\n".join(item.read_text() for item in projection_files)
 require(ROOT / "src/storefrontprojectionservice", projection,
         'js.KeyValue("STOREFRONT_ORDERS")', '"boutique.evt.order.completed.v1"',
-        '"boutique.evt.order.manual-review-required.v1"', '"order":', "orderQuery")
+        '"boutique.evt.order.manual-review-required.v1"', '"order":', "orderQuery",
+        '"boutique.live.operation."', "publishOrderUpdate")
+
+nats_config_path, nats_config = source(
+    "kubernetes-manifests", "nats", "base", "config.yaml")
+require(nats_config_path, nats_config,
+        'subscribe: ["_INBOX.>", "boutique.live.operation.>"]',
+        '"boutique.live.operation.>"')
+
+nats_verification_path, nats_verification = source(
+    "kubernetes-manifests", "nats", "verification-job.yaml")
+require(nats_verification_path, nats_verification,
+        "nats_frontend sub", "nats_projection pub",
+        "projection live updates reach frontend SSE subscriptions")
 
 checkout_manifest_path, checkout_manifest = source(
     "kubernetes-manifests", "checkoutservice.yaml")
@@ -131,6 +150,18 @@ loadgen_path, loadgen = source("src", "loadgenerator", "locustfile.py")
 require(loadgen_path, loadgen,
         'name="/cart/checkout"', 'name="/orders/[id]"', "Idempotency-Key",
         "order.get('status') == 'COMPLETED'", "MANUAL_REVIEW")
+
+benchmark_path, benchmark = source(
+    "src", "benchmarkservice", "locustfile.py")
+require(benchmark_path, benchmark,
+        'headers=self.headers("text/event-stream")',
+        '"/orders/[id]/events"', "iter_received_orders",
+        '"outcome_transport": "SSE"',
+        'receipt_context(\n                    context,\n                    "outcome"',
+        "record_received_failure(context, error)")
+forbid(benchmark_path, benchmark,
+       'name="/orders/[id]"', 'name="/orders/[id] [settlement]"',
+       "outcome_latency_ms(")
 
 commands_path, commands = source("protos", "commands", "v1", "commands.proto")
 require(commands_path, commands, "string payment_token = 11;")

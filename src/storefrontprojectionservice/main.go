@@ -137,6 +137,7 @@ func initializeProjectionRuntime(ready *atomic.Bool) (*projectionRuntime, error)
 		nc.Close()
 		return nil, err
 	}
+	projector.publishLive = nc.Publish
 	subscription, rebuilding, err := projector.subscribe()
 	if err != nil {
 		projector.close()

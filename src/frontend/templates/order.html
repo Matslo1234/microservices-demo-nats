@@ -2,7 +2,12 @@
 {{ define "order" }}
 {{ template "header" . }}
 <main role="main" class="order">
-  <section class="container order-complete-section">
+  <section class="container order-complete-section"
+           id="order-status"
+           data-order-status="{{ .order.Status }}"
+           data-order-stage="{{ .order.Stage }}"
+           data-order-url="{{ .order_url }}"
+           data-order-events-url="{{ .order_events_url }}">
     <div class="row"><div class="col-12 text-center">
       {{ if eq .order.Status "COMPLETED" }}
         <h3>Your order is complete!</h3>
@@ -14,7 +19,7 @@
       {{ else if eq .order.Status "MANUAL_REVIEW" }}
         <h3>Your order needs review</h3><p>No additional payment or shipment action will be attempted automatically.</p>
       {{ else }}
-        <h3>We're processing your order</h3><p>Current stage: {{ .order.Stage }}</p>
+        <h3>We're processing your order</h3><p id="order-stage">Current stage: {{ .order.Stage }}</p>
       {{ end }}
     </div></div>
     <div class="row border-bottom-solid padding-y-24">
@@ -40,9 +45,23 @@
 </main>
 {{ if or (eq .order.Status "QUEUED") (eq .order.Status "PROCESSING") }}
 <script>
-setTimeout(function () {
-  window.location.replace({{ .order_url }});
-}, 1000);
+(() => {
+  const container = document.getElementById("order-status");
+  const stage = document.getElementById("order-stage");
+  const events = new EventSource(container.dataset.orderEventsUrl);
+
+  events.addEventListener("order", event => {
+    const order = JSON.parse(event.data);
+    if (order.status === "QUEUED" || order.status === "PROCESSING") {
+      container.dataset.orderStatus = order.status;
+      container.dataset.orderStage = order.stage || order.status;
+      stage.textContent = `Current stage: ${container.dataset.orderStage}`;
+      return;
+    }
+    events.close();
+    window.location.replace(container.dataset.orderUrl);
+  });
+})();
 </script>
 {{ end }}
 {{ template "footer" . }}

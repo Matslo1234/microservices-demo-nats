@@ -28,6 +28,15 @@ the failure.
   Submission scheduling is independent of completion tracking, so slow
   outcomes do not reduce the requested arrival rate.
 
+For NATS runs, accepted checkouts are followed through the order SSE endpoint.
+`checkout_to_outcome` ends when the terminal order event is received by the
+benchmark worker, and the same stream continues through notification and cart
+clear settlement. The business artifacts include UTC/epoch receipt times and
+SSE event IDs for the outcome and settlement events. Failed order events also
+retain `failure_code`, `safe_message`, `failure_message`, and
+`failure_received_at`; notification and cart-clear failures have their own
+receipt-time fields.
+
 Open-loop runs use one worker for every 100 requested orders/s. Closed-loop
 runs use one worker for every 1,000 users, and divide the requested user spawn
 rate evenly across those workers. Worker start times are synchronized. Worker

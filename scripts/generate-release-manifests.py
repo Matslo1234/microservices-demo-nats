@@ -39,18 +39,18 @@ SERVICES = (
 )
 DEFAULT_IMAGE_DIGESTS = {
     "adservice": "793686df2852e1c7932ef56a51030bcbf2b6a200da7e604f62db8b3a7f7581ae",
-    "benchmarkservice": "ea3905c2a87fd9230f3ae67d3115f2405a2f9c5155d2c8155b6a6a0923da96f0",
+    "benchmarkservice": "ff16cd2f0e927a1241fc4f7dae72945c365855eb7e04faf311a2e8955b105e93",
     "cartservice": "1b972fde4595139f9d77b1d1c09ff8154e359e86ead9b46d874f8703de61b33e",
     "checkoutservice": "bc111e2ab6b35bd66b6dfa7d4d6781d509bf66e05e2a316e39b4aa02edb03a04",
     "currencyservice": "aadcaa314fcc6591d38e91720fc870fd55aeff7c6fdcb26322e6aa89b2c289ab",
     "emailservice": "5594fc462d81611fecfee6048c07f9483040916e7171c9bf9769a017cb954d20",
-    "frontend": "0a84e385b5382aeb19c634e1a7c33f6410e50f2ad9b590fc39e56b3e3cf6df14",
+    "frontend": "fc733170d78ff5bb8d17d930b72712e84b634e13cb0326a987266660fa83bc5a",
     "loadgenerator": "c66a188ecf8bf7507bd3982a5fa50ae3e9497f3239248dd48b275fc2aee0adb3",
     "paymentservice": "9a6c36bb850627bfd0b9ab86e9b3c05bf3ce9dcb4c25967877a4ec106c954519",
     "productcatalogservice": "77716d929c9fe2d662c61d9865afe8fb8c0e77bf43458386e328d4e5e1bbece8",
     "recommendationservice": "d0adcd103cba195421e44713447a90ecca2a01e1fd938d9920539c964969baf4",
     "shippingservice": "b5ae14bc9920d3a3f5b2eb973005d98ca384a534d1f6f6753015f805df1a6af5",
-    "storefrontprojectionservice": "87306446db89abfcb6aaaee80939dd1e1999e115a9970eced9bda93df598698e",
+    "storefrontprojectionservice": "e2936cd35fb0067c75cd5d7f61ca642d95153a9079870d583c4eb664e4625483",
 }
 
 

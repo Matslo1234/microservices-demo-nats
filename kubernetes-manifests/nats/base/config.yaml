@@ -90,7 +90,7 @@ data:
                 "boutique.qry.payment.tokenize.v1", "$JS.API.INFO",
                 "$JS.API.STREAM.INFO.*"
               ],
-              subscribe: ["_INBOX.>"]
+              subscribe: ["_INBOX.>", "boutique.live.operation.>"]
             }
           },
           {
@@ -100,7 +100,8 @@ data:
                 "$JS.API.>", "$JS.ACK.>", "$JS.FC.>", "_INBOX.>",
                 "$KV.STOREFRONT_PRODUCTS.>", "$KV.STOREFRONT_CARTS.>",
                 "$KV.STOREFRONT_CONTEXT.>", "$KV.STOREFRONT_ORDERS.>",
-                "$KV.STOREFRONT_OPERATIONS.>", "$KV.STOREFRONT_ASSISTANT.>"
+                "$KV.STOREFRONT_OPERATIONS.>", "$KV.STOREFRONT_ASSISTANT.>",
+                "boutique.live.operation.>"
               ],
               subscribe: ["_INBOX.>", "$SRV.>", "boutique.evt.>", "boutique.qry.storefront.>"]
             }

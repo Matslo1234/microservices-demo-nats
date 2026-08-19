@@ -11,16 +11,19 @@ The goal of the project is to explore how NATS can be used for event-driven arch
 
 Online Boutique is composed of microservices written in Go, C#, Node.js,
 Python, and Java. Deployed business interactions use NATS commands, events,
-bounded queries, storefront projections, and durable checkout processing. HTTP
-is used at the frontend edge and for pod-local health/metrics only.
+bounded queries, storefront projections, durable checkout processing, and
+best-effort live order notifications. The frontend exposes those live updates
+as session-scoped Server-Sent Events (SSE). HTTP remains confined to the
+frontend edge and pod-local health/metrics.
 
 ```mermaid
 flowchart LR
-    User[Browser or API client] -->|HTTP| FE[frontend]
+    User[Browser or API client] -->|HTTP / order SSE| FE[frontend]
     Load[loadgenerator] -->|HTTP| FE
     Benchmark[benchmarkservice] -->|manually triggered HTTP load| FE
 
     FE -->|Core NATS projected queries| Projection[storefront projection]
+    Projection -->|Core NATS live order updates| FE
     FE -->|JetStream cart/order commands| NATS[(NATS JetStream)]
     FE -->|Core NATS tokenization query| Payment[payment]
 

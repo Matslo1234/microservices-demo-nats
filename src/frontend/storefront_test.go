@@ -13,6 +13,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	commonv1 "github.com/GoogleCloudPlatform/microservices-demo/protos/common/v1"
 	"github.com/sirupsen/logrus"
@@ -84,6 +85,20 @@ func TestLogHandlerOnlyWrapsResponsesForDebugAccounting(t *testing.T) {
 				t.Fatalf("response wrapped = %t, want %t", wrapped, test.wantWrapped)
 			}
 		})
+	}
+}
+
+func TestResponseRecorderPreservesStreamingFlush(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	wrapper := &responseRecorder{w: recorder}
+	if _, err := wrapper.Write([]byte("event: order\n\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := http.NewResponseController(wrapper).Flush(); err != nil {
+		t.Fatalf("flush through response recorder failed: %v", err)
+	}
+	if !recorder.Flushed {
+		t.Fatal("response recorder did not flush the underlying SSE writer")
 	}
 }
 
@@ -348,15 +363,21 @@ func TestOrderProgressPageNavigatesToGetResource(t *testing.T) {
 	order := &orderStatus{OrderID: "order-3", Status: "PROCESSING", Stage: "WAITING_FOR_QUOTE"}
 
 	if err := templates.ExecuteTemplate(recorder, "order", injectCommonTemplateData(request, map[string]interface{}{
-		"show_currency": false,
-		"order":         order,
-		"order_url":     "/orders/order-3",
+		"show_currency":    false,
+		"order":            order,
+		"order_url":        "/orders/order-3",
+		"order_events_url": "/orders/order-3/events",
 	})); err != nil {
 		t.Fatal(err)
 	}
 
 	body := recorder.Body.String()
-	for _, expected := range []string{"Current stage: WAITING_FOR_QUOTE", `window.location.replace("/orders/order-3");`} {
+	for _, expected := range []string{
+		"Current stage: WAITING_FOR_QUOTE",
+		`data-order-events-url="/orders/order-3/events"`,
+		"new EventSource(container.dataset.orderEventsUrl)",
+		"window.location.replace(container.dataset.orderUrl)",
+	} {
 		if !strings.Contains(body, expected) {
 			t.Fatalf("order progress page is missing %q", expected)
 		}
@@ -366,6 +387,46 @@ func TestOrderProgressPageNavigatesToGetResource(t *testing.T) {
 	}
 	if strings.Contains(body, "location.reload") {
 		t.Fatal("order progress page can still reload the checkout POST response")
+	}
+	if strings.Contains(body, "setTimeout") || strings.Contains(body, "fetch(") {
+		t.Fatal("order progress page can still poll for updates")
+	}
+}
+
+func TestOrderSSEEventContainsNamedJSONUpdate(t *testing.T) {
+	updatedAt := time.Date(2026, time.August, 19, 12, 30, 0, 123, time.UTC)
+	order := &orderStatus{
+		OrderID: "order-3", UserID: "user-1", Status: "PROCESSING",
+		Stage: "WAITING_FOR_QUOTE", UpdatedAt: updatedAt,
+	}
+	recorder := httptest.NewRecorder()
+
+	if err := writeOrderSSE(recorder, order); err != nil {
+		t.Fatal(err)
+	}
+	body := recorder.Body.String()
+	for _, expected := range []string{
+		"event: order\n",
+		"id: " + updatedAt.Format(time.RFC3339Nano) + "\n",
+		`"order_id":"order-3"`,
+		`"stage":"WAITING_FOR_QUOTE"`,
+		"\n\n",
+	} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("SSE event is missing %q: %q", expected, body)
+		}
+	}
+}
+
+func TestLiveOperationSubjectRejectsNATSWildcards(t *testing.T) {
+	subject, err := liveOperationSubject("order-3")
+	if err != nil || subject != "boutique.live.operation.order-3" {
+		t.Fatalf("unexpected live subject %q: %v", subject, err)
+	}
+	for _, operationID := range []string{"", "order.*", "order.>", "order 3"} {
+		if _, err := liveOperationSubject(operationID); err == nil {
+			t.Fatalf("unsafe operation ID %q was accepted", operationID)
+		}
 	}
 }
 
