@@ -28,6 +28,7 @@ import (
 	"time"
 
 	commonv1 "github.com/GoogleCloudPlatform/microservices-demo/protos/common/v1"
+	telemetry "github.com/GoogleCloudPlatform/microservices-demo/src/shared/telemetry/go"
 	"github.com/gorilla/mux"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
@@ -179,6 +180,7 @@ func (fe *frontendServer) addToCartHandler(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	log = log.WithField("correlation_id", operationID)
+	telemetry.SetCorrelationID(r.Context(), operationID)
 	view, err := fe.storefrontQuery(r.Context(), "product", storefrontQueryRequest{
 		ProductID: payload.ProductID, UserID: sessionID(r), CurrencyCode: currentCurrency(r),
 		CorrelationID: operationID,
@@ -233,6 +235,7 @@ func (fe *frontendServer) emptyCartHandler(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	log = log.WithField("correlation_id", operationID)
+	telemetry.SetCorrelationID(r.Context(), operationID)
 	view, err := fe.storefrontQuery(r.Context(), "cart", storefrontQueryRequest{
 		UserID: sessionID(r), CurrencyCode: currentCurrency(r), CorrelationID: operationID,
 	})
@@ -349,6 +352,7 @@ func (fe *frontendServer) placeOrderHandler(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	log = log.WithField("correlation_id", orderID)
+	telemetry.SetCorrelationID(r.Context(), orderID)
 	view, err := fe.storefrontQuery(r.Context(), "cart", storefrontQueryRequest{
 		UserID: sessionID(r), CurrencyCode: currentCurrency(r), CorrelationID: orderID,
 	})

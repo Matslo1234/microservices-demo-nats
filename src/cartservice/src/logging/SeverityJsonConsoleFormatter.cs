@@ -19,6 +19,7 @@ using System.Globalization;
 using System.IO;
 using System.Text;
 using System.Text.Json;
+using System.Diagnostics;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Logging.Console;
@@ -63,6 +64,11 @@ namespace cartservice.logging
                 writer.WriteString("severity", Severity(logEntry.LogLevel));
                 writer.WriteString("name", logEntry.Category);
                 writer.WriteString("message", message);
+                if (Activity.Current is { } activity)
+                {
+                    writer.WriteString("trace_id", activity.TraceId.ToHexString());
+                    writer.WriteString("span_id", activity.SpanId.ToHexString());
+                }
 
                 if (logEntry.EventId.Id != 0)
                 {

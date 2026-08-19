@@ -21,6 +21,7 @@ from nats.js.errors import ServiceUnavailableError
 from logger import getJSONLogger
 from protos.common.v1 import message_pb2
 from protos.events.v1 import events_pb2
+from telemetry import consumer_span, inject_envelope
 
 logger = getJSONLogger("emailservice-nats")
 ORDER_SUBJECT = "boutique.evt.order.completed.v1"
@@ -169,32 +170,34 @@ async def _process_message(message, js, failure_mode):
     envelope = message_pb2.MessageEnvelope.FromString(message.data)
     correlation_id = envelope.correlation_id or "unknown"
     source_event_id = envelope.message_id or "unknown"
-    if logger.isEnabledFor(logging.DEBUG):
-      logger.debug(
-          "NATS event received",
-          extra={
-              "topic": message.subject,
-              "message_kind": "event",
-              "message_id": source_event_id,
-              "correlation_id": correlation_id,
-          })
-    outcome = _build_outcome(envelope, failure_mode)
-    await js.publish(
-        outcome["subject"],
-        outcome["data"],
-        headers={"Nats-Msg-Id": outcome["message_id"]})
-    if logger.isEnabledFor(logging.DEBUG):
-      logger.debug(
-          "NATS event sent",
-          extra={
-              "topic": outcome["subject"],
-              "message_kind": "event",
-              "message_id": outcome["message_id"],
-              "correlation_id": correlation_id,
-              "provider_idempotency_key":
-                  outcome["provider_idempotency_key"],
-          })
-    await message.ack()
+    with consumer_span(envelope, message.subject):
+      inject_envelope(envelope)
+      if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "NATS event received",
+            extra={
+                "topic": message.subject,
+                "message_kind": "event",
+                "message_id": source_event_id,
+                "correlation_id": correlation_id,
+            })
+      outcome = _build_outcome(envelope, failure_mode)
+      await js.publish(
+          outcome["subject"],
+          outcome["data"],
+          headers={"Nats-Msg-Id": outcome["message_id"]})
+      if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "NATS event sent",
+            extra={
+                "topic": outcome["subject"],
+                "message_kind": "event",
+                "message_id": outcome["message_id"],
+                "correlation_id": correlation_id,
+                "provider_idempotency_key":
+                    outcome["provider_idempotency_key"],
+            })
+      await message.ack()
   except Exception:
     logger.exception(
         "Order confirmation event processing failed",

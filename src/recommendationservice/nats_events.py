@@ -29,6 +29,7 @@ from catalog_kv import (
 from logger import getJSONLogger
 from protos.common.v1 import message_pb2
 from protos.events.v1 import events_pb2
+from telemetry import consumer_span, inject_envelope
 
 
 logger = getJSONLogger("recommendationservice-nats")
@@ -139,6 +140,7 @@ async def _publish_result(js, catalog_store, envelope, session_id, excluded):
         tracestate=envelope.tracestate,
         data=wrapped,
     )
+    inject_envelope(result)
     await js.publish(RESULT_SUBJECT, result.SerializeToString(), headers={"Nats-Msg-Id": message_id})
     logger.debug(
         "NATS event sent",
@@ -269,8 +271,10 @@ async def _handle_trigger(js, catalog_store, message):
 
 async def _process_message(message, handler):
     try:
-        await handler(message)
-        await message.ack()
+        envelope = message_pb2.MessageEnvelope.FromString(message.data)
+        with consumer_span(envelope, message.subject):
+            await handler(message)
+            await message.ack()
     except Exception:
         correlation_id, message_id = _message_context(message)
         logger.exception(

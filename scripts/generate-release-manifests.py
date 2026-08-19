@@ -38,19 +38,19 @@ SERVICES = (
     "storefrontprojectionservice",
 )
 DEFAULT_IMAGE_DIGESTS = {
-    "adservice": "793686df2852e1c7932ef56a51030bcbf2b6a200da7e604f62db8b3a7f7581ae",
+    "adservice": "bad60d4429a32419d11cec3ac2e8ba7b857cf34b50aaafa7c27ddf2cf907302b",
     "benchmarkservice": "ff16cd2f0e927a1241fc4f7dae72945c365855eb7e04faf311a2e8955b105e93",
-    "cartservice": "1b972fde4595139f9d77b1d1c09ff8154e359e86ead9b46d874f8703de61b33e",
-    "checkoutservice": "bc111e2ab6b35bd66b6dfa7d4d6781d509bf66e05e2a316e39b4aa02edb03a04",
-    "currencyservice": "aadcaa314fcc6591d38e91720fc870fd55aeff7c6fdcb26322e6aa89b2c289ab",
-    "emailservice": "5594fc462d81611fecfee6048c07f9483040916e7171c9bf9769a017cb954d20",
-    "frontend": "fc733170d78ff5bb8d17d930b72712e84b634e13cb0326a987266660fa83bc5a",
+    "cartservice": "8661c991a570f340f36eae4cd270395be5c0739afe6a870b23b423fed7b9b5e5",
+    "checkoutservice": "949a6a98bd4b24156e39fc60bf0bc1fdd4f9a5d7e381b1eef0ff7ed11c7e74fb",
+    "currencyservice": "9f4da55ff3ed85f2bea630cc2983ad6677cdd300870cc844fb460e2b00111fae",
+    "emailservice": "bd6ae1930f8cd96a201830910f513595e1c4c47fec228a9a9c75241fab84698d",
+    "frontend": "8dec4a2df305470cfa7ff4f7718b59a4c89ac03477772a4975ab0b2abe8a691a",
     "loadgenerator": "c66a188ecf8bf7507bd3982a5fa50ae3e9497f3239248dd48b275fc2aee0adb3",
-    "paymentservice": "9a6c36bb850627bfd0b9ab86e9b3c05bf3ce9dcb4c25967877a4ec106c954519",
-    "productcatalogservice": "77716d929c9fe2d662c61d9865afe8fb8c0e77bf43458386e328d4e5e1bbece8",
-    "recommendationservice": "d0adcd103cba195421e44713447a90ecca2a01e1fd938d9920539c964969baf4",
-    "shippingservice": "b5ae14bc9920d3a3f5b2eb973005d98ca384a534d1f6f6753015f805df1a6af5",
-    "storefrontprojectionservice": "e2936cd35fb0067c75cd5d7f61ca642d95153a9079870d583c4eb664e4625483",
+    "paymentservice": "71365cbd3a4621470b016ba6c3dc9523bb2ee882a073aa1a6c748b66ad5527fb",
+    "productcatalogservice": "9721c7972d03c4c4b035c872f3b879c856f3016989f317a4b965878f547ecc41",
+    "recommendationservice": "2f10eb25d40828c218dea63ae1ad323579d6204e5c49ace71c61b2bc84f9eabf",
+    "shippingservice": "31edd6da1380d281f3b8c009191ada7bf230f66c3384fbd976701a4cb23e0453",
+    "storefrontprojectionservice": "ca046da94f8c8da01622179dabb5cb24d1d7d9719b27cbb73ab383575335a469",
 }
 
 

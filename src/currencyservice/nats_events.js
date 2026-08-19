@@ -23,6 +23,7 @@ const { Kvm } = require('@nats-io/kv');
 const { connect } = require('@nats-io/transport-node');
 const { jetstream } = require('@nats-io/jetstream');
 const { ensureBootstrap } = require('./bootstrap_claim');
+const { injectEnvelope, withProducerSpan } = require('./telemetry');
 
 const SUBJECT = 'boutique.evt.currency.rates-updated.v1';
 const MESSAGE_TYPE = 'boutique.currency.RatesUpdated.v1';
@@ -173,29 +174,39 @@ async function connectAndPublish(currencyData, logger) {
       now: () => Date.now(),
       wait: milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds)),
     }, async () => {
-      let lastError;
-      for (let attempt = 1; attempt <= 3; attempt++) {
-        try {
-          await js.publish(SUBJECT, snapshot.data, { msgID: snapshot.messageId });
-          logger.debug({
-            topic: SUBJECT,
-            message_kind: 'event',
-            message_id: snapshot.messageId,
-            correlation_id: snapshot.correlationId,
-          }, 'NATS event sent');
-          return;
-        } catch (err) {
-          lastError = err;
-          logger.warn({
-            err,
-            attempt,
-            topic: SUBJECT,
-            message_id: snapshot.messageId,
-            correlation_id: snapshot.correlationId,
-          }, 'JetStream rate snapshot publish failed; retrying with the same message ID');
+      return withProducerSpan({
+        subject: SUBJECT,
+        kind: 'event',
+        messageId: snapshot.messageId,
+        correlationId: snapshot.correlationId,
+      }, async () => {
+        const Envelope = contractsRoot().lookupType('boutique.common.v1.MessageEnvelope');
+        const tracedEnvelope = injectEnvelope(Envelope.decode(snapshot.data));
+        const tracedData = Envelope.encode(tracedEnvelope).finish();
+        let lastError;
+        for (let attempt = 1; attempt <= 3; attempt++) {
+          try {
+            await js.publish(SUBJECT, tracedData, { msgID: snapshot.messageId });
+            logger.debug({
+              topic: SUBJECT,
+              message_kind: 'event',
+              message_id: snapshot.messageId,
+              correlation_id: snapshot.correlationId,
+            }, 'NATS event sent');
+            return;
+          } catch (err) {
+            lastError = err;
+            logger.warn({
+              err,
+              attempt,
+              topic: SUBJECT,
+              message_id: snapshot.messageId,
+              correlation_id: snapshot.correlationId,
+            }, 'JetStream rate snapshot publish failed; retrying with the same message ID');
+          }
         }
-      }
-      throw lastError;
+        throw lastError;
+      });
     });
     return nc;
   } catch (error) {

@@ -69,6 +69,54 @@ patches:
               labelSelector: {}
               matchLabelKeys:
               - app
+- target:
+    group: apps
+    version: v1
+    kind: Deployment
+    name: adservice|cartservice|checkoutservice|currencyservice|emailservice|frontend|paymentservice|productcatalogservice|recommendationservice|shippingservice|storefrontprojectionservice
+  patch: |-
+    - op: add
+      path: /spec/template/spec/containers/0/env/-
+      value:
+        name: ENABLE_TRACING
+        value: "1"
+    - op: add
+      path: /spec/template/spec/containers/0/env/-
+      value:
+        name: COLLECTOR_SERVICE_ADDR
+        value: alloy.observability.svc.cluster.local:4317
+    - op: add
+      path: /spec/template/spec/containers/0/env/-
+      value:
+        name: OTEL_EXPORTER_OTLP_ENDPOINT
+        value: http://alloy.observability.svc.cluster.local:4317
+    - op: add
+      path: /spec/template/spec/containers/0/env/-
+      value:
+        name: OTEL_EXPORTER_OTLP_PROTOCOL
+        value: grpc
+    - op: add
+      path: /spec/template/spec/containers/0/env/-
+      value:
+        name: OTEL_TRACES_EXPORTER
+        value: otlp
+    - op: add
+      path: /spec/template/spec/containers/0/env/-
+      value:
+        name: OTEL_METRICS_EXPORTER
+        value: none
+    - op: add
+      path: /spec/template/spec/containers/0/env/-
+      value:
+        name: OTEL_LOGS_EXPORTER
+        value: none
+    - op: add
+      path: /spec/template/spec/containers/0/env/-
+      value:
+        name: OTEL_SERVICE_NAME
+        valueFrom:
+          fieldRef:
+            fieldPath: metadata.labels['app']
 # components:
 # - ../kustomize/components/cymbal-branding
 # - ../kustomize/components/google-cloud-operations

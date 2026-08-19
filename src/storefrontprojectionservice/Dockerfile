@@ -7,6 +7,7 @@ ARG TARGETOS=linux
 ARG TARGETARCH=amd64
 WORKDIR /workspace/src/storefrontprojectionservice
 COPY src/storefrontprojectionservice/go.mod src/storefrontprojectionservice/go.sum ./
+COPY src/shared/telemetry/go /workspace/src/shared/telemetry/go
 COPY protos /workspace/protos
 RUN go mod download
 COPY src/storefrontprojectionservice .

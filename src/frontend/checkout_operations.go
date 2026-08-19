@@ -14,6 +14,7 @@ import (
 
 	commandsv1 "github.com/GoogleCloudPlatform/microservices-demo/protos/commands/v1"
 	commonv1 "github.com/GoogleCloudPlatform/microservices-demo/protos/common/v1"
+	telemetry "github.com/GoogleCloudPlatform/microservices-demo/src/shared/telemetry/go"
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 	"github.com/nats-io/nats.go"
@@ -71,17 +72,23 @@ func checkoutOrderID(request *http.Request, userID string) (string, error) {
 }
 
 func (fe *frontendServer) tokenizePayment(ctx context.Context, orderID string, card paymentCard) (string, error) {
+	topic := "boutique.qry.payment.tokenize.v1"
+	ctx, span := telemetry.StartProducerSpan(ctx, topic, "query", "", orderID)
+	defer span.End()
+	var traceparent, tracestate string
+	telemetry.Inject(ctx, &traceparent, &tracestate)
 	request := map[string]interface{}{"order_id": orderID, "idempotency_key": orderID,
-		"correlation_id":     orderID,
+		"correlation_id": orderID,
+		"traceparent":    traceparent, "tracestate": tracestate,
 		"credit_card_number": card.Number, "credit_card_expiration_month": card.ExpirationMonth,
 		"credit_card_expiration_year": card.ExpirationYear, "credit_card_cvv": card.CVV}
 	encoded, err := json.Marshal(request)
 	if err != nil {
+		telemetry.RecordError(span, err)
 		return "", err
 	}
 	requestContext, cancel := context.WithTimeout(ctx, fe.natsRequestTimeout)
 	defer cancel()
-	topic := "boutique.qry.payment.tokenize.v1"
 	if fe.log.IsLevelEnabled(logrus.DebugLevel) {
 		fe.log.WithFields(logrus.Fields{
 			"topic":          topic,
@@ -91,10 +98,12 @@ func (fe *frontendServer) tokenizePayment(ctx context.Context, orderID string, c
 	}
 	message, err := fe.natsConn.RequestWithContext(requestContext, topic, encoded)
 	if err != nil {
+		telemetry.RecordError(span, err)
 		return "", fmt.Errorf("payment tokenization unavailable: %w", err)
 	}
 	var response paymentTokenResponse
 	if err := json.Unmarshal(message.Data, &response); err != nil {
+		telemetry.RecordError(span, err)
 		return "", err
 	}
 	if response.Error != "" || response.PaymentToken == "" {

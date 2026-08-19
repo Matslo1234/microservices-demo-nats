@@ -24,18 +24,11 @@ import (
 	"time"
 
 	"cloud.google.com/go/profiler"
+	telemetry "github.com/GoogleCloudPlatform/microservices-demo/src/shared/telemetry/go"
 	"github.com/gorilla/mux"
 	"github.com/nats-io/nats.go"
-	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
-	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
-	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
-	"go.opentelemetry.io/otel/propagation"
-	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 )
 
 const (
@@ -73,9 +66,6 @@ type frontendServer struct {
 	log                      *logrus.Logger
 	shutdown                 chan struct{}
 
-	collectorAddr string
-	collectorConn *grpc.ClientConn
-
 	shoppingAssistantSvcAddr string
 }
 
@@ -86,16 +76,23 @@ func main() {
 
 	svc := &frontendServer{log: log, tracingEnabled: tracingEnabled, shutdown: make(chan struct{})}
 	initializePlatform(log)
-
-	otel.SetTextMapPropagator(
-		propagation.NewCompositeTextMapPropagator(
-			propagation.TraceContext{}, propagation.Baggage{}))
+	shutdownTracing, err := telemetry.Init(ctx, "frontend")
+	if err != nil {
+		log.WithError(err).Warn("tracing initialization failed")
+	} else {
+		defer func() {
+			shutdownContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := shutdownTracing(shutdownContext); err != nil {
+				log.WithError(err).Warn("tracing shutdown failed")
+			}
+		}()
+	}
 
 	baseUrl = os.Getenv("BASE_URL")
 
 	if tracingEnabled {
 		log.Info("Tracing enabled.")
-		initTracing(log, ctx, svc)
 	} else {
 		log.Info("Tracing disabled.")
 	}
@@ -116,7 +113,6 @@ func main() {
 	// legacy HTTP integration dormant unless an operator explicitly configures it.
 	svc.shoppingAssistantSvcAddr = os.Getenv("SHOPPING_ASSISTANT_SERVICE_ADDR")
 
-	var err error
 	svc.natsConn, svc.natsJS, svc.natsRequestTimeout, svc.natsPublishTimeout, err = connectFrontendNATS()
 	if err != nil {
 		log.Fatal(err)
@@ -218,23 +214,6 @@ func initStats(log logrus.FieldLogger) {
 	// TODO(arbrown) Implement OpenTelemtry stats
 }
 
-func initTracing(log logrus.FieldLogger, ctx context.Context, svc *frontendServer) (*sdktrace.TracerProvider, error) {
-	mustMapEnv(&svc.collectorAddr, "COLLECTOR_SERVICE_ADDR")
-	mustConnGRPC(ctx, &svc.collectorConn, svc.collectorAddr)
-	exporter, err := otlptracegrpc.New(
-		ctx,
-		otlptracegrpc.WithGRPCConn(svc.collectorConn))
-	if err != nil {
-		log.Warnf("warn: Failed to create trace exporter: %v", err)
-	}
-	tp := sdktrace.NewTracerProvider(
-		sdktrace.WithBatcher(exporter),
-		sdktrace.WithSampler(sdktrace.AlwaysSample()))
-	otel.SetTracerProvider(tp)
-
-	return tp, err
-}
-
 func initProfiling(log logrus.FieldLogger, service, version string) {
 	// TODO(ahmetb) this method is duplicated in other microservices using Go
 	// since they are not sharing packages.
@@ -256,24 +235,4 @@ func initProfiling(log logrus.FieldLogger, service, version string) {
 		time.Sleep(d)
 	}
 	log.Warn("warning: could not initialize Stackdriver profiler after retrying, giving up")
-}
-
-func mustMapEnv(target *string, envKey string) {
-	v := os.Getenv(envKey)
-	if v == "" {
-		panic(fmt.Sprintf("environment variable %q not set", envKey))
-	}
-	*target = v
-}
-
-func mustConnGRPC(ctx context.Context, conn **grpc.ClientConn, addr string) {
-	var err error
-	_, cancel := context.WithTimeout(ctx, time.Second*3)
-	defer cancel()
-	*conn, err = grpc.NewClient(addr,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithStatsHandler(otelgrpc.NewClientHandler()))
-	if err != nil {
-		panic(errors.Wrapf(err, "grpc: failed to connect %s", addr))
-	}
 }

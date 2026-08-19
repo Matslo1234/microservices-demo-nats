@@ -16,6 +16,7 @@ import (
 	"time"
 
 	stateless "github.com/GoogleCloudPlatform/microservices-demo/src/shared/stateless/go"
+	telemetry "github.com/GoogleCloudPlatform/microservices-demo/src/shared/telemetry/go"
 	"github.com/sirupsen/logrus"
 )
 
@@ -115,6 +116,18 @@ func (runtime *checkoutRuntime) Close() error {
 }
 
 func main() {
+	shutdownTracing, tracingErr := telemetry.Init(context.Background(), "checkoutservice")
+	if tracingErr != nil {
+		log.WithError(tracingErr).Warn("tracing initialization failed")
+	} else {
+		defer func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := shutdownTracing(ctx); err != nil {
+				log.WithError(err).Warn("tracing shutdown failed")
+			}
+		}()
+	}
 	redisAddress := os.Getenv("CHECKOUT_REDIS_ADDR")
 	redisPrefix := os.Getenv("CHECKOUT_REDIS_PREFIX")
 	if redisPrefix == "" {

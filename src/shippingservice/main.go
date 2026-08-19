@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"cloud.google.com/go/profiler"
+	telemetry "github.com/GoogleCloudPlatform/microservices-demo/src/shared/telemetry/go"
 	"github.com/sirupsen/logrus"
 )
 
@@ -103,6 +104,18 @@ func init() {
 }
 
 func main() {
+	shutdownTracing, tracingErr := telemetry.Init(context.Background(), "shippingservice")
+	if tracingErr != nil {
+		log.WithError(tracingErr).Warn("tracing initialization failed")
+	} else {
+		defer func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := shutdownTracing(ctx); err != nil {
+				log.WithError(err).Warn("tracing shutdown failed")
+			}
+		}()
+	}
 	if os.Getenv("DISABLE_PROFILER") == "" {
 		log.Info("Profiling enabled.")
 		go initProfiling("shippingservice", "1.0.0")

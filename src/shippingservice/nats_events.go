@@ -4,6 +4,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -15,6 +16,7 @@ import (
 	commonv1 "github.com/GoogleCloudPlatform/microservices-demo/protos/common/v1"
 	eventsv1 "github.com/GoogleCloudPlatform/microservices-demo/protos/events/v1"
 	stateless "github.com/GoogleCloudPlatform/microservices-demo/src/shared/stateless/go"
+	telemetry "github.com/GoogleCloudPlatform/microservices-demo/src/shared/telemetry/go"
 	"github.com/nats-io/nats.go"
 	"github.com/sirupsen/logrus"
 	"google.golang.org/protobuf/proto"
@@ -175,7 +177,12 @@ func (worker *shippingEventWorker) runCommands() {
 func (worker *shippingEventWorker) processCommandMessage(message *nats.Msg) {
 	entry := shippingMessageLog(message, "command")
 	entry.Debug("NATS command received")
-	if err := worker.handleCommand(message); err != nil {
+	correlationID, messageID, traceparent, tracestate := shippingEnvelopeTelemetry(message.Data)
+	ctx, span := telemetry.StartConsumerSpan(context.Background(), message.Subject, "command",
+		messageID, correlationID, traceparent, tracestate)
+	defer span.End()
+	if err := worker.handleCommandWithContext(ctx, message); err != nil {
+		telemetry.RecordError(span, err)
 		entry.WithError(err).Error("shipping command processing failed")
 		_ = message.NakWithDelay(time.Second)
 		return
@@ -248,15 +255,23 @@ func (worker *shippingEventWorker) run() {
 		for message := range batch.Messages() {
 			entry := shippingMessageLog(message, "event")
 			entry.Debug("NATS event received")
-			if err := worker.handle(message); err != nil {
+			correlationID, messageID, traceparent, tracestate := shippingEnvelopeTelemetry(message.Data)
+			ctx, span := telemetry.StartConsumerSpan(context.Background(), message.Subject, "event",
+				messageID, correlationID, traceparent, tracestate)
+			if err := worker.handle(ctx, message); err != nil {
+				telemetry.RecordError(span, err)
 				entry.WithError(err).Error("shipping cart event processing failed")
 				_ = message.NakWithDelay(time.Second)
+				span.End()
 				continue
 			}
 			if err := message.Ack(); err != nil {
+				telemetry.RecordError(span, err)
 				entry.WithError(err).Error("shipping cart event acknowledgement failed")
+				span.End()
 				continue
 			}
+			span.End()
 		}
 		if err := batch.Error(); err != nil && !shippingConsumerStopped(err) {
 			log.Errorf("shipping cart event stream failed: %v", err)
@@ -283,6 +298,11 @@ func shippingMessageLog(message *nats.Msg, kind string) *logrus.Entry {
 }
 
 func shippingEnvelopeContext(data []byte) (string, string) {
+	correlationID, messageID, _, _ := shippingEnvelopeTelemetry(data)
+	return correlationID, messageID
+}
+
+func shippingEnvelopeTelemetry(data []byte) (string, string, string, string) {
 	correlationID, messageID := "unknown", "unknown"
 	envelope := &commonv1.MessageEnvelope{}
 	if err := proto.Unmarshal(data, envelope); err == nil {
@@ -292,15 +312,17 @@ func shippingEnvelopeContext(data []byte) (string, string) {
 		if envelope.MessageId != "" {
 			messageID = envelope.MessageId
 		}
+		return correlationID, messageID, envelope.Traceparent, envelope.Tracestate
 	}
-	return correlationID, messageID
+	return correlationID, messageID, "", ""
 }
 
-func (worker *shippingEventWorker) handle(message *nats.Msg) error {
+func (worker *shippingEventWorker) handle(ctx context.Context, message *nats.Msg) error {
 	envelope := &commonv1.MessageEnvelope{}
 	if err := proto.Unmarshal(message.Data, envelope); err != nil {
 		return fmt.Errorf("decode cart envelope: %w", err)
 	}
+	telemetry.Inject(ctx, &envelope.Traceparent, &envelope.Tracestate)
 	var cart *commonv1.CartSnapshot
 	switch message.Subject {
 	case "boutique.evt.cart.item-added.v1":
@@ -325,7 +347,7 @@ func (worker *shippingEventWorker) handle(message *nats.Msg) error {
 	if err != nil {
 		return err
 	}
-	return worker.publishOutcome(outcome)
+	return worker.publishOutcome(ctx, outcome)
 }
 
 func buildShippingCartOutcome(

@@ -17,6 +17,7 @@ import (
 	commonv1 "github.com/GoogleCloudPlatform/microservices-demo/protos/common/v1"
 	eventsv1 "github.com/GoogleCloudPlatform/microservices-demo/protos/events/v1"
 	stateless "github.com/GoogleCloudPlatform/microservices-demo/src/shared/stateless/go"
+	telemetry "github.com/GoogleCloudPlatform/microservices-demo/src/shared/telemetry/go"
 	"github.com/nats-io/nats.go"
 	"github.com/sirupsen/logrus"
 	"google.golang.org/protobuf/proto"
@@ -448,11 +449,27 @@ func checkoutMessageLane(envelope *commonv1.MessageEnvelope, lanes int) int {
 }
 
 func (worker *checkoutWorker) processMessage(message checkoutStreamMessage, handler checkoutMessageHandler) {
+	correlationID, messageID, traceparent, tracestate := "unknown", "unknown", "", ""
+	if message.envelope != nil {
+		correlationID = message.envelope.CorrelationId
+		messageID = message.envelope.MessageId
+		traceparent = message.envelope.Traceparent
+		tracestate = message.envelope.Tracestate
+	}
+	ctx, span := telemetry.StartConsumerSpan(context.Background(), message.message.Subject,
+		checkoutMessageKind(message.message.Subject), messageID, correlationID, traceparent, tracestate)
+	defer span.End()
+	if message.envelope != nil {
+		// Result envelopes copy these fields, so downstream consumers become
+		// children of this processing span instead of siblings of it.
+		telemetry.Inject(ctx, &message.envelope.Traceparent, &message.envelope.Tracestate)
+	}
 	err := message.err
 	if err == nil {
 		err = handler(message.message, message.envelope)
 	}
 	if err != nil {
+		telemetry.RecordError(span, err)
 		entry := checkoutMessageLog(message.message, message.envelope)
 		if errors.Is(err, errCheckoutProjectionLag) {
 			entry.WithError(err).Debug("checkout command is waiting for its projections")

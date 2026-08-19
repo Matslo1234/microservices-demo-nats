@@ -17,6 +17,7 @@
 'use strict';
 
 const logger = require('./logger')
+let tracingSdk;
 
 if (process.env.DISABLE_PROFILER) {
   logger.info("Profiler disabled.")
@@ -45,14 +46,14 @@ if (process.env.ENABLE_TRACING == "1") {
   const collectorUrl = process.env.COLLECTOR_SERVICE_ADDR;
   const traceExporter = new OTLPTraceExporter({url: collectorUrl});
 
-  const sdk = new opentelemetry.NodeSDK({
+  tracingSdk = new opentelemetry.NodeSDK({
     resource: resourceFromAttributes({
       [ATTR_SERVICE_NAME]: process.env.OTEL_SERVICE_NAME || 'paymentservice',
     }),
     traceExporter: traceExporter,
   });
 
-  sdk.start()
+  tracingSdk.start()
 } else {
   logger.info("Tracing disabled.")
 }
@@ -72,7 +73,10 @@ async function main() {
       messaging.markNotReady();
       await server.close();
       await messaging.nc.drain();
-    } finally { process.exit(0); }
+    } finally {
+      if (tracingSdk) await tracingSdk.shutdown();
+      process.exit(0);
+    }
   };
   process.on('SIGTERM', shutdown);
   process.on('SIGINT', shutdown);

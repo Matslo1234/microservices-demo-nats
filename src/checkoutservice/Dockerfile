@@ -23,6 +23,7 @@ WORKDIR /src
 # restore dependencies
 COPY src/checkoutservice/go.mod src/checkoutservice/go.sum ./
 COPY src/shared/stateless/go /shared/stateless/go
+COPY src/shared/telemetry/go /shared/telemetry/go
 COPY protos /protos
 RUN go mod download
 

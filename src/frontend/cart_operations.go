@@ -15,11 +15,11 @@ import (
 	commandsv1 "github.com/GoogleCloudPlatform/microservices-demo/protos/commands/v1"
 	commonv1 "github.com/GoogleCloudPlatform/microservices-demo/protos/common/v1"
 	eventsv1 "github.com/GoogleCloudPlatform/microservices-demo/protos/events/v1"
+	telemetry "github.com/GoogleCloudPlatform/microservices-demo/src/shared/telemetry/go"
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 	"github.com/nats-io/nats.go"
 	"github.com/sirupsen/logrus"
-	"go.opentelemetry.io/otel"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -98,6 +98,9 @@ func (fe *frontendServer) publishCartCommand(ctx context.Context, subject, messa
 }
 
 func (fe *frontendServer) publishOperationAccepted(publishContext, traceContext context.Context, operationID, commandID, kind, userID string, now time.Time) error {
+	// Keep the request span as the producer parent while allowing this optional
+	// audit event to finish after the HTTP request is cancelled.
+	publishContext = context.WithoutCancel(traceContext)
 	acceptedID := uuid.NewSHA1(uuid.NameSpaceURL, []byte("boutique/operation-accepted/"+operationID)).String()
 	acceptedPayload := &eventsv1.StorefrontOperationAcceptedEvent{
 		OperationId: operationID, CommandId: commandID, OperationKind: kind,
@@ -122,8 +125,12 @@ func (fe *frontendServer) publishOperationAccepted(publishContext, traceContext 
 
 func (fe *frontendServer) publishEnvelope(ctx context.Context, subject, messageID string,
 	envelope *commonv1.MessageEnvelope) error {
+	ctx, span := telemetry.StartProducerSpan(ctx, subject, messageKind(subject), messageID, envelope.CorrelationId)
+	defer span.End()
+	telemetry.Inject(ctx, &envelope.Traceparent, &envelope.Tracestate)
 	encoded, err := proto.Marshal(envelope)
 	if err != nil {
+		telemetry.RecordError(span, err)
 		return err
 	}
 	publishContext, cancel := context.WithTimeout(ctx, fe.natsPublishTimeout)
@@ -133,10 +140,13 @@ func (fe *frontendServer) publishEnvelope(ctx context.Context, subject, messageI
 	message.Header.Set("Content-Type", "application/protobuf")
 	ack, err := fe.natsJS.PublishMsg(message, nats.Context(publishContext), nats.MsgId(messageID))
 	if err != nil {
+		telemetry.RecordError(span, err)
 		return err
 	}
 	if ack == nil {
-		return fmt.Errorf("JetStream did not acknowledge %s", subject)
+		err := fmt.Errorf("JetStream did not acknowledge %s", subject)
+		telemetry.RecordError(span, err)
+		return err
 	}
 	if fe.log.IsLevelEnabled(logrus.DebugLevel) {
 		kind := messageKind(subject)
@@ -171,10 +181,7 @@ func (fe *frontendServer) setEnvelopeTrace(ctx context.Context, envelope *common
 	if !fe.tracingEnabled {
 		return
 	}
-	headers := nats.Header{}
-	otel.GetTextMapPropagator().Inject(ctx, natsHeaderCarrier(headers))
-	envelope.Traceparent = headers.Get("traceparent")
-	envelope.Tracestate = headers.Get("tracestate")
+	telemetry.Inject(ctx, &envelope.Traceparent, &envelope.Tracestate)
 }
 
 func (fe *frontendServer) waitForCartOperation(ctx context.Context, operationID, userID string) (*cartOperation, error) {

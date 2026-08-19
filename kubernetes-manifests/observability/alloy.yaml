@@ -13,6 +13,31 @@ data:
       format = "logfmt"
     }
 
+    otelcol.receiver.otlp "applications" {
+      grpc {
+        endpoint = "0.0.0.0:4317"
+      }
+
+      output {
+        traces = [otelcol.processor.batch.traces.input]
+      }
+    }
+
+    otelcol.processor.batch "traces" {
+      output {
+        traces = [otelcol.exporter.otlp.tempo.input]
+      }
+    }
+
+    otelcol.exporter.otlp "tempo" {
+      client {
+        endpoint = "tempo.observability.svc.cluster.local:4317"
+        tls {
+          insecure = true
+        }
+      }
+    }
+
     discovery.kubernetes "pods" {
       role = "pod"
 
@@ -102,6 +127,22 @@ data:
       }
     }
 ---
+apiVersion: v1
+kind: Service
+metadata:
+  name: alloy
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: alloy
+    app.kubernetes.io/part-of: online-boutique-observability
+spec:
+  selector:
+    app.kubernetes.io/name: alloy
+  ports:
+  - name: otlp-grpc
+    port: 4317
+    targetPort: otlp-grpc
+---
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -151,6 +192,8 @@ spec:
         ports:
         - name: http
           containerPort: 12345
+        - name: otlp-grpc
+          containerPort: 4317
         readinessProbe:
           httpGet:
             path: /-/ready

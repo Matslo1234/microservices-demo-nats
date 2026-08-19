@@ -23,6 +23,7 @@ using NATS.Client.Core;
 using NATS.Client.JetStream;
 using NATS.Client.JetStream.Models;
 using NATS.Net;
+using System.Diagnostics;
 
 namespace cartservice.messaging;
 
@@ -250,6 +251,11 @@ public sealed class NatsCartCommandWorker : BackgroundService, ICartMessagingHea
         var messageId = string.IsNullOrWhiteSpace(envelope.MessageId)
             ? "unknown"
             : envelope.MessageId;
+        using var activity = CartTelemetry.StartConsumer(
+            envelope,
+            command.Subject,
+            "command");
+        CartTelemetry.Inject(envelope);
         if (_logger.IsEnabled(LogLevel.Debug))
         {
             _logger.LogDebug(
@@ -311,6 +317,7 @@ public sealed class NatsCartCommandWorker : BackgroundService, ICartMessagingHea
         }
         catch (Exception exception)
         {
+            activity?.SetStatus(ActivityStatusCode.Error, "operation failed");
             _logger.LogError(
                 exception,
                 "Cart command processing failed for {Topic} ({MessageId}, correlation_id={CorrelationId}); requesting redelivery",
@@ -344,9 +351,15 @@ public sealed class NatsCartCommandWorker : BackgroundService, ICartMessagingHea
         string correlationId,
         CancellationToken stoppingToken)
     {
+        using var activity = CartTelemetry.StartProducer(
+            result.Subject,
+            result.MessageId,
+            correlationId);
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
         timeout.CancelAfter(Duration("NATS_PUBLISH_TIMEOUT", TimeSpan.FromSeconds(5)));
-        var data = result.Data.ToArray();
+        var envelope = MessageEnvelope.Parser.ParseFrom(result.Data.ToArray());
+        CartTelemetry.Inject(envelope);
+        var data = envelope.ToByteArray();
         var acknowledgement = await jetStream.PublishAsync(
             subject: result.Subject,
             data: data,

@@ -22,6 +22,7 @@ WORKDIR /src
 
 # restore dependencies
 COPY src/frontend/go.mod src/frontend/go.sum ./
+COPY src/shared/telemetry/go /shared/telemetry/go
 COPY protos /protos
 RUN go mod download
 COPY src/frontend .

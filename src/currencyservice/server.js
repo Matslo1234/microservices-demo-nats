@@ -6,6 +6,7 @@
 const http = require('http');
 const pino = require('pino');
 const { connectAndPublish } = require('./nats_events');
+let tracingSdk = null;
 
 const logger = pino({
   name: 'currencyservice-server',
@@ -28,13 +29,13 @@ if (process.env.ENABLE_TRACING === '1') {
   const { ATTR_SERVICE_NAME } = require('@opentelemetry/semantic-conventions');
   const opentelemetry = require('@opentelemetry/sdk-node');
   const { OTLPTraceExporter } = require('@opentelemetry/exporter-otlp-grpc');
-  const sdk = new opentelemetry.NodeSDK({
+  tracingSdk = new opentelemetry.NodeSDK({
     resource: resourceFromAttributes({
       [ATTR_SERVICE_NAME]: process.env.OTEL_SERVICE_NAME || 'currencyservice'
     }),
     traceExporter: new OTLPTraceExporter({ url: process.env.COLLECTOR_SERVICE_ADDR })
   });
-  sdk.start();
+  tracingSdk.start();
 } else {
   logger.info('Tracing disabled.');
 }
@@ -104,6 +105,7 @@ async function shutdown () {
   natsReady = false;
   if (healthServer) await new Promise(resolve => healthServer.close(resolve));
   if (natsConnection) await natsConnection.drain();
+  if (tracingSdk) await tracingSdk.shutdown();
 }
 
 for (const signal of ['SIGTERM', 'SIGINT']) {

@@ -177,6 +177,8 @@ final class NatsEventWorker implements AutoCloseable {
               message.getSubject(),
               ThreadContext.get("message_id"),
               ThreadContext.get("correlation_id"));
+          Telemetry.MessageSpan telemetry =
+              Telemetry.consumer(source, message.getSubject(), "event");
           try {
             if (decodeException != null) {
               throw decodeException;
@@ -184,6 +186,7 @@ final class NatsEventWorker implements AutoCloseable {
             handle(jetStream, source);
             message.ack();
           } catch (Exception exception) {
+            telemetry.recordError(exception);
             logger.warn(
                 "page-view event processing failed topic={} message_id={} correlation_id={}",
                 message.getSubject(),
@@ -192,6 +195,7 @@ final class NatsEventWorker implements AutoCloseable {
                 exception);
             message.nakWithDelay(Duration.ofSeconds(1));
           } finally {
+            telemetry.close();
             ThreadContext.remove("correlation_id");
             ThreadContext.remove("message_id");
           }
@@ -243,7 +247,7 @@ final class NatsEventWorker implements AutoCloseable {
                         + CONFIG_REVISION)
                     .getBytes(StandardCharsets.UTF_8))
             .toString();
-    MessageEnvelope result =
+    MessageEnvelope.Builder result =
         MessageEnvelope.newBuilder()
             .setMessageId(messageId)
             .setMessageType("boutique.ad.SelectionGenerated.v1")
@@ -257,11 +261,11 @@ final class NatsEventWorker implements AutoCloseable {
             .setCausationId(source.getMessageId())
             .setTraceparent(source.getTraceparent())
             .setTracestate(source.getTracestate())
-            .setData(Any.pack(payload.build()))
-            .build();
+            .setData(Any.pack(payload.build()));
+    Telemetry.inject(result);
     jetStream.publish(
         RESULT_SUBJECT,
-        result.toByteArray(),
+        result.build().toByteArray(),
         PublishOptions.builder().messageId(messageId).build());
     logger.debug(
         "NATS event sent topic={} message_id={} correlation_id={}",

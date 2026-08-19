@@ -18,6 +18,7 @@ import (
 
 	commonv1 "github.com/GoogleCloudPlatform/microservices-demo/protos/common/v1"
 	eventsv1 "github.com/GoogleCloudPlatform/microservices-demo/protos/events/v1"
+	telemetry "github.com/GoogleCloudPlatform/microservices-demo/src/shared/telemetry/go"
 	"github.com/GoogleCloudPlatform/microservices-demo/src/storefrontprojectionservice/internal/storefront"
 	"github.com/nats-io/nats.go"
 	"google.golang.org/protobuf/proto"
@@ -303,12 +304,20 @@ func decodeProjectionMessage(message *nats.Msg) projectionMessage {
 }
 
 func (p *projector) applyMessage(item projectionMessage) {
+	correlationID, messageID := projectionMessageContext(item.envelope)
+	traceparent, tracestate := "", ""
+	if item.envelope != nil {
+		traceparent, tracestate = item.envelope.Traceparent, item.envelope.Tracestate
+	}
+	_, span := telemetry.StartConsumerSpan(context.Background(), item.message.Subject, "event",
+		messageID, correlationID, traceparent, tracestate)
+	defer span.End()
 	err := item.decodeErr
 	if err == nil {
 		err = p.applyEnvelope(item.message.Subject, item.envelope, item.publishedAt)
 	}
 	if err != nil {
-		correlationID, messageID := projectionMessageContext(item.envelope)
+		telemetry.RecordError(span, err)
 		log.Printf("projection event processing failed topic=%q message_id=%q correlation_id=%q error=%v",
 			item.message.Subject, messageID, correlationID, err)
 		if nakErr := item.message.NakWithDelay(time.Second); nakErr != nil {
@@ -318,7 +327,7 @@ func (p *projector) applyMessage(item projectionMessage) {
 		return
 	}
 	if err := item.message.Ack(); err != nil {
-		correlationID, messageID := projectionMessageContext(item.envelope)
+		telemetry.RecordError(span, err)
 		log.Printf("projection event acknowledgement failed topic=%q message_id=%q correlation_id=%q error=%v",
 			item.message.Subject, messageID, correlationID, err)
 	}

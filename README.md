@@ -41,10 +41,13 @@ flowchart LR
     Checkout -->|Redis protocol| CheckoutRedis[(redis-checkout)]
 
     Apps[All domain workloads] -.->|HTTP health and metrics :8080| Prometheus
+    Apps -.->|OTLP/gRPC traces| Alloy
     Kubernetes[Kubernetes pod logs] -.->|Kubernetes API| Alloy
     Alloy --> Loki
+    Alloy --> Tempo
     Prometheus --> Grafana
     Loki --> Grafana
+    Tempo --> Grafana
     Operator[Operator browser] --> Grafana
 ```
 
@@ -140,11 +143,12 @@ Once the deploy finishes you can access the application via the ip of the LoadBa
 kubectl get service frontend-external
 ```
 
-### 4. Add logs and metrics
+### 4. Add logs, metrics, and traces
 
-An optional, standalone observability stack captures Kubernetes container logs
-and scrapes the application's existing metrics endpoints. It runs entirely in
-the `observability` namespace and provides a preconfigured Grafana frontend:
+An optional, standalone observability stack captures Kubernetes container
+logs, scrapes the application's metrics endpoints, and receives OpenTelemetry
+traces. It runs entirely in the `observability` namespace and provides a
+preconfigured Grafana frontend:
 
 ```sh
 kubectl apply -k kubernetes-manifests/observability

@@ -56,9 +56,12 @@ def configure_tracing():
   from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
   from opentelemetry.sdk.trace import TracerProvider
   from opentelemetry.sdk.trace.export import BatchSpanProcessor
+  from opentelemetry.sdk.resources import Resource
 
   endpoint = os.getenv("COLLECTOR_SERVICE_ADDR", "localhost:4317")
-  trace.set_tracer_provider(TracerProvider())
+  trace.set_tracer_provider(TracerProvider(resource=Resource.create({
+      "service.name": os.getenv("OTEL_SERVICE_NAME", "emailservice")
+  })))
   trace.get_tracer_provider().add_span_processor(
       BatchSpanProcessor(OTLPSpanExporter(endpoint=endpoint, insecure=True)))
 

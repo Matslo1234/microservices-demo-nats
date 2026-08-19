@@ -30,6 +30,7 @@ import (
 	eventsv1 "github.com/GoogleCloudPlatform/microservices-demo/protos/events/v1"
 	pb "github.com/GoogleCloudPlatform/microservices-demo/src/productcatalogservice/genproto"
 	stateless "github.com/GoogleCloudPlatform/microservices-demo/src/shared/stateless/go"
+	telemetry "github.com/GoogleCloudPlatform/microservices-demo/src/shared/telemetry/go"
 	"github.com/nats-io/nats.go"
 	"github.com/sirupsen/logrus"
 	"google.golang.org/protobuf/proto"
@@ -239,8 +240,12 @@ func deterministicMessageID(parts ...string) string {
 }
 
 func (p *catalogEventPublisher) publish(subject string, envelope *commonv1.MessageEnvelope) error {
+	ctx, span := telemetry.StartProducerSpan(context.Background(), subject, "event", envelope.MessageId, envelope.CorrelationId)
+	defer span.End()
+	telemetry.Inject(ctx, &envelope.Traceparent, &envelope.Tracestate)
 	encoded, err := proto.Marshal(envelope)
 	if err != nil {
+		telemetry.RecordError(span, err)
 		return fmt.Errorf("marshal %s envelope: %w", subject, err)
 	}
 	message := &nats.Msg{Subject: subject, Data: encoded, Header: nats.Header{}}
@@ -254,8 +259,8 @@ func (p *catalogEventPublisher) publish(subject string, envelope *commonv1.Messa
 
 	var publishErr error
 	for attempt := 1; attempt <= 3; attempt++ {
-		ctx, cancel := context.WithTimeout(context.Background(), p.publishTimeout)
-		_, publishErr = p.js.PublishMsg(message, nats.Context(ctx))
+		publishContext, cancel := context.WithTimeout(ctx, p.publishTimeout)
+		_, publishErr = p.js.PublishMsg(message, nats.Context(publishContext))
 		cancel()
 		if publishErr == nil {
 			log.WithFields(logrus.Fields{
@@ -272,6 +277,7 @@ func (p *catalogEventPublisher) publish(subject string, envelope *commonv1.Messa
 			"correlation_id": correlationID(envelope.CorrelationId),
 		}).Warnf("JetStream publish attempt %d failed: %v", attempt, publishErr)
 	}
+	telemetry.RecordError(span, publishErr)
 	return fmt.Errorf("publish %s after retries: %w", subject, publishErr)
 }
 

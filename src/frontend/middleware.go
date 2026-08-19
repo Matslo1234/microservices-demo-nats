@@ -25,6 +25,7 @@ import (
 	"sync"
 	"time"
 
+	telemetry "github.com/GoogleCloudPlatform/microservices-demo/src/shared/telemetry/go"
 	"github.com/google/uuid"
 	"github.com/sirupsen/logrus"
 )
@@ -73,6 +74,7 @@ func (lh *logHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	requestID := uuid.NewString()
 	ctx = context.WithValue(ctx, ctxKeyRequestID{}, requestID)
+	telemetry.SetCorrelationID(ctx, requestID)
 
 	log := lh.log.WithFields(logrus.Fields{
 		"http.req.path":   r.URL.Path,

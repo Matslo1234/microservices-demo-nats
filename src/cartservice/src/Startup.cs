@@ -11,6 +11,8 @@ using cartservice.cartstore;
 using Boutique.Stateless;
 using StackExchange.Redis;
 using cartservice.messaging;
+using OpenTelemetry.Resources;
+using OpenTelemetry.Trace;
 
 namespace cartservice
 {
@@ -30,6 +32,24 @@ namespace cartservice
         public void ConfigureServices(IServiceCollection services)
         {
             services.AddRouting();
+
+            if (Configuration["ENABLE_TRACING"] == "1")
+            {
+                var collector = Configuration["COLLECTOR_SERVICE_ADDR"]
+                    ?? "localhost:4317";
+                if (!collector.StartsWith("http://", StringComparison.OrdinalIgnoreCase) &&
+                    !collector.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+                {
+                    collector = "http://" + collector;
+                }
+                services.AddOpenTelemetry()
+                    .WithTracing(tracing => tracing
+                        .SetResourceBuilder(ResourceBuilder.CreateDefault().AddService(
+                            Configuration["OTEL_SERVICE_NAME"] ?? "cartservice"))
+                        .AddSource(CartTelemetry.SourceName)
+                        .AddOtlpExporter(exporter =>
+                            exporter.Endpoint = new Uri(collector)));
+            }
 
             var redisAddress = Configuration["REDIS_ADDR"];
             if (string.IsNullOrWhiteSpace(redisAddress))

@@ -27,11 +27,8 @@ import (
 
 	"cloud.google.com/go/profiler"
 	pb "github.com/GoogleCloudPlatform/microservices-demo/src/productcatalogservice/genproto"
+	telemetry "github.com/GoogleCloudPlatform/microservices-demo/src/shared/telemetry/go"
 	"github.com/sirupsen/logrus"
-	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
-	"go.opentelemetry.io/otel/propagation"
-	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
 
 var (
@@ -54,10 +51,20 @@ func init() {
 }
 
 func main() {
+	shutdownTracing, tracingErr := telemetry.Init(context.Background(), "productcatalogservice")
+	if tracingErr != nil {
+		log.Warnf("failed to start tracer: %+v", tracingErr)
+	} else {
+		defer func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := shutdownTracing(ctx); err != nil {
+				log.Warnf("failed to shut down tracer: %+v", err)
+			}
+		}()
+	}
 	if os.Getenv("ENABLE_TRACING") == "1" {
-		if err := initTracing(); err != nil {
-			log.Warnf("failed to start tracer: %+v", err)
-		}
+		log.Info("Tracing enabled.")
 	} else {
 		log.Info("Tracing disabled.")
 	}
@@ -69,8 +76,6 @@ func main() {
 		log.Info("Profiling disabled.")
 	}
 
-	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
-		propagation.TraceContext{}, propagation.Baggage{}))
 	catalog := &pb.ListProductsResponse{}
 	if err := loadCatalog(catalog); err != nil {
 		log.Fatalf("could not parse product catalog: %v", err)
@@ -171,22 +176,6 @@ func initializeCatalogPublisher(
 		case <-timer.C:
 		}
 	}
-}
-
-func initTracing() error {
-	collectorAddr := os.Getenv("COLLECTOR_SERVICE_ADDR")
-	if collectorAddr == "" {
-		return fmt.Errorf("COLLECTOR_SERVICE_ADDR is required when tracing is enabled")
-	}
-	ctx := context.Background()
-	exporter, err := otlptracegrpc.New(ctx,
-		otlptracegrpc.WithEndpoint(collectorAddr), otlptracegrpc.WithInsecure())
-	if err != nil {
-		return err
-	}
-	otel.SetTracerProvider(sdktrace.NewTracerProvider(
-		sdktrace.WithBatcher(exporter), sdktrace.WithSampler(sdktrace.AlwaysSample())))
-	return nil
 }
 
 func initProfiling(service, version string) {

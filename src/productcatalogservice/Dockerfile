@@ -23,6 +23,7 @@ WORKDIR /workspace/src/productcatalogservice
 # restore dependencies
 COPY src/productcatalogservice/go.mod src/productcatalogservice/go.sum ./
 COPY src/shared/stateless/go/go.mod src/shared/stateless/go/go.sum /workspace/src/shared/stateless/go/
+COPY src/shared/telemetry/go /workspace/src/shared/telemetry/go
 COPY protos /workspace/protos
 RUN go mod download
 COPY src/productcatalogservice .

@@ -4,6 +4,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -16,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	telemetry "github.com/GoogleCloudPlatform/microservices-demo/src/shared/telemetry/go"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/micro"
 )
@@ -26,6 +28,18 @@ func main() {
 		logLevel = slog.LevelDebug
 	}
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: logLevel})))
+	shutdownTracing, tracingErr := telemetry.Init(context.Background(), "storefrontprojectionservice")
+	if tracingErr != nil {
+		slog.Warn("tracing initialization failed", "error", tracingErr)
+	} else {
+		defer func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := shutdownTracing(ctx); err != nil {
+				slog.Warn("tracing shutdown failed", "error", err)
+			}
+		}()
+	}
 
 	var ready atomic.Bool
 	var activeProjector atomic.Pointer[projector]

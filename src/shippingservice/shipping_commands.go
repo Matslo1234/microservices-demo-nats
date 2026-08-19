@@ -16,6 +16,7 @@ import (
 	commonv1 "github.com/GoogleCloudPlatform/microservices-demo/protos/common/v1"
 	eventsv1 "github.com/GoogleCloudPlatform/microservices-demo/protos/events/v1"
 	stateless "github.com/GoogleCloudPlatform/microservices-demo/src/shared/stateless/go"
+	telemetry "github.com/GoogleCloudPlatform/microservices-demo/src/shared/telemetry/go"
 	"github.com/nats-io/nats.go"
 	"github.com/sirupsen/logrus"
 	"google.golang.org/protobuf/proto"
@@ -72,7 +73,20 @@ func (provider *shippingProvider) trackingID(idempotencyKey string) string {
 }
 
 func (worker *shippingEventWorker) handleCommand(message *nats.Msg) error {
-	return worker.handleCommandBatch([]*nats.Msg{message})[0]
+	return worker.handleCommandWithContext(context.Background(), message)
+}
+
+func (worker *shippingEventWorker) handleCommandWithContext(ctx context.Context, message *nats.Msg) error {
+	envelope := &commonv1.MessageEnvelope{}
+	if err := proto.Unmarshal(message.Data, envelope); err != nil {
+		return err
+	}
+	telemetry.Inject(ctx, &envelope.Traceparent, &envelope.Tracestate)
+	outcome, err := buildShippingOutcome(message.Subject, envelope, worker.provider, worker.failureMode)
+	if err != nil {
+		return err
+	}
+	return worker.publishOutcome(ctx, outcome)
 }
 
 func (worker *shippingEventWorker) handleCommandBatch(messages []*nats.Msg) []error {
@@ -106,7 +120,7 @@ func (worker *shippingEventWorker) handleCommandBatch(messages []*nats.Msg) []er
 		publish.Add(1)
 		go func(index int) {
 			defer publish.Done()
-			results[index] = worker.publishOutcome(outcomes[index])
+			results[index] = worker.publishOutcome(context.Background(), outcomes[index])
 		}(index)
 	}
 	publish.Wait()
@@ -309,16 +323,26 @@ func newShippingOutcome(
 	return shippingOutcome{MessageID: envelope.MessageId, Subject: subject, Data: encoded}, nil
 }
 
-func (worker *shippingEventWorker) publishOutcome(outcome shippingOutcome) error {
-	ctx, cancel := context.WithTimeout(context.Background(), worker.publishTimeout)
+func (worker *shippingEventWorker) publishOutcome(ctx context.Context, outcome shippingOutcome) error {
+	correlationID := shippingOutcomeCorrelationID(outcome)
+	ctx, span := telemetry.StartProducerSpan(ctx, outcome.Subject, "event", outcome.MessageID, correlationID)
+	defer span.End()
+	envelope := &commonv1.MessageEnvelope{}
+	if err := proto.Unmarshal(outcome.Data, envelope); err == nil {
+		telemetry.Inject(ctx, &envelope.Traceparent, &envelope.Tracestate)
+		if encoded, marshalErr := proto.Marshal(envelope); marshalErr == nil {
+			outcome.Data = encoded
+		}
+	}
+	publishContext, cancel := context.WithTimeout(ctx, worker.publishTimeout)
 	defer cancel()
 	message := &nats.Msg{Subject: outcome.Subject, Data: outcome.Data, Header: nats.Header{}}
 	message.Header.Set("Nats-Msg-Id", outcome.MessageID)
-	_, err := worker.js.PublishMsg(message, nats.Context(ctx), nats.MsgId(outcome.MessageID))
+	_, err := worker.js.PublishMsg(message, nats.Context(publishContext), nats.MsgId(outcome.MessageID))
 	if err != nil {
+		telemetry.RecordError(span, err)
 		return err
 	}
-	correlationID, _ := shippingEnvelopeContext(outcome.Data)
 	log.WithFields(logrus.Fields{
 		"topic":          outcome.Subject,
 		"message_kind":   "event",
@@ -326,4 +350,9 @@ func (worker *shippingEventWorker) publishOutcome(outcome shippingOutcome) error
 		"correlation_id": correlationID,
 	}).Debug("NATS event sent")
 	return nil
+}
+
+func shippingOutcomeCorrelationID(outcome shippingOutcome) string {
+	correlationID, _ := shippingEnvelopeContext(outcome.Data)
+	return correlationID
 }

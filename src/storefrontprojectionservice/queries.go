@@ -16,6 +16,7 @@ import (
 
 	hipstershop "github.com/GoogleCloudPlatform/microservices-demo/hipstershop"
 	commonv1 "github.com/GoogleCloudPlatform/microservices-demo/protos/common/v1"
+	telemetry "github.com/GoogleCloudPlatform/microservices-demo/src/shared/telemetry/go"
 	"github.com/GoogleCloudPlatform/microservices-demo/src/storefrontprojectionservice/internal/storefront"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/micro"
@@ -31,6 +32,8 @@ type queryRequest struct {
 	OperationID   string   `json:"operation_id"`
 	OrderID       string   `json:"order_id"`
 	CorrelationID string   `json:"correlation_id"`
+	Traceparent   string   `json:"traceparent,omitempty"`
+	Tracestate    string   `json:"tracestate,omitempty"`
 }
 
 type localizedProduct struct {
@@ -102,6 +105,9 @@ func (p *projector) registerQueries(nc *nats.Conn) (micro.Service, int, error) {
 			if correlationID == "" {
 				correlationID = "unknown"
 			}
+			_, span := telemetry.StartConsumerSpan(context.Background(), subject, "query", "",
+				correlationID, decoded.Traceparent, decoded.Tracestate)
+			defer span.End()
 			if debugQueries {
 				slog.Debug("NATS query received",
 					"topic", subject,
@@ -109,12 +115,14 @@ func (p *projector) registerQueries(nc *nats.Conn) (micro.Service, int, error) {
 					"correlation_id", correlationID)
 			}
 			if decodeErr != nil {
+				telemetry.RecordError(span, decodeErr)
 				respondErr := request.RespondJSON(queryResponse{Error: "INVALID_QUERY"})
 				log.Printf("storefront query processing failed topic=%q correlation_id=%q error_code=%q error=%v response_error=%v",
 					subject, correlationID, "INVALID_QUERY", decodeErr, respondErr)
 				return
 			}
 			response, err := handler(decoded)
+			telemetry.RecordError(span, err)
 			switch {
 			case errors.Is(err, nats.ErrKeyNotFound):
 				response.Error = "NOT_FOUND"

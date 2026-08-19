@@ -2165,12 +2165,30 @@ spec:
           value: "true"
         - name: NATS_REQUIRED_SUBSCRIPTIONS
           value: ad-page-views-v1
+        - name: ENABLE_TRACING
+          value: "1"
+        - name: COLLECTOR_SERVICE_ADDR
+          value: alloy.observability.svc.cluster.local:4317
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: http://alloy.observability.svc.cluster.local:4317
+        - name: OTEL_EXPORTER_OTLP_PROTOCOL
+          value: grpc
+        - name: OTEL_TRACES_EXPORTER
+          value: otlp
+        - name: OTEL_METRICS_EXPORTER
+          value: none
+        - name: OTEL_LOGS_EXPORTER
+          value: none
+        - name: OTEL_SERVICE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.labels['app']
         envFrom:
         - configMapRef:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-adservice
-        image: matslo123/adservice:v0.4.0@sha256:793686df2852e1c7932ef56a51030bcbf2b6a200da7e604f62db8b3a7f7581ae
+        image: matslo123/adservice:v0.4.0@sha256:bad60d4429a32419d11cec3ac2e8ba7b857cf34b50aaafa7c27ddf2cf907302b
         livenessProbe:
           httpGet:
             path: /healthz
@@ -2372,12 +2390,30 @@ spec:
           value: "true"
         - name: NATS_REQUIRED_SUBSCRIPTIONS
           value: cart-commands-v1
+        - name: ENABLE_TRACING
+          value: "1"
+        - name: COLLECTOR_SERVICE_ADDR
+          value: alloy.observability.svc.cluster.local:4317
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: http://alloy.observability.svc.cluster.local:4317
+        - name: OTEL_EXPORTER_OTLP_PROTOCOL
+          value: grpc
+        - name: OTEL_TRACES_EXPORTER
+          value: otlp
+        - name: OTEL_METRICS_EXPORTER
+          value: none
+        - name: OTEL_LOGS_EXPORTER
+          value: none
+        - name: OTEL_SERVICE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.labels['app']
         envFrom:
         - configMapRef:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-cartservice
-        image: matslo123/cartservice:v0.4.0@sha256:1b972fde4595139f9d77b1d1c09ff8154e359e86ead9b46d874f8703de61b33e
+        image: matslo123/cartservice:v0.4.0@sha256:8661c991a570f340f36eae4cd270395be5c0739afe6a870b23b423fed7b9b5e5
         livenessProbe:
           failureThreshold: 6
           httpGet:
@@ -2491,12 +2527,30 @@ spec:
           value: 10m
         - name: GOMEMLIMIT
           value: 400MiB
+        - name: ENABLE_TRACING
+          value: "1"
+        - name: COLLECTOR_SERVICE_ADDR
+          value: alloy.observability.svc.cluster.local:4317
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: http://alloy.observability.svc.cluster.local:4317
+        - name: OTEL_EXPORTER_OTLP_PROTOCOL
+          value: grpc
+        - name: OTEL_TRACES_EXPORTER
+          value: otlp
+        - name: OTEL_METRICS_EXPORTER
+          value: none
+        - name: OTEL_LOGS_EXPORTER
+          value: none
+        - name: OTEL_SERVICE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.labels['app']
         envFrom:
         - configMapRef:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-checkoutservice
-        image: matslo123/checkoutservice:v0.4.0@sha256:bc111e2ab6b35bd66b6dfa7d4d6781d509bf66e05e2a316e39b4aa02edb03a04
+        image: matslo123/checkoutservice:v0.4.0@sha256:949a6a98bd4b24156e39fc60bf0bc1fdd4f9a5d7e381b1eef0ff7ed11c7e74fb
         livenessProbe:
           httpGet:
             path: /healthz
@@ -2594,12 +2648,30 @@ spec:
           value: "1"
         - name: NATS_REQUIRED
           value: "true"
+        - name: ENABLE_TRACING
+          value: "1"
+        - name: COLLECTOR_SERVICE_ADDR
+          value: alloy.observability.svc.cluster.local:4317
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: http://alloy.observability.svc.cluster.local:4317
+        - name: OTEL_EXPORTER_OTLP_PROTOCOL
+          value: grpc
+        - name: OTEL_TRACES_EXPORTER
+          value: otlp
+        - name: OTEL_METRICS_EXPORTER
+          value: none
+        - name: OTEL_LOGS_EXPORTER
+          value: none
+        - name: OTEL_SERVICE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.labels['app']
         envFrom:
         - configMapRef:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-currencyservice
-        image: matslo123/currencyservice:v0.4.0@sha256:aadcaa314fcc6591d38e91720fc870fd55aeff7c6fdcb26322e6aa89b2c289ab
+        image: matslo123/currencyservice:v0.4.0@sha256:9f4da55ff3ed85f2bea630cc2983ad6677cdd300870cc844fb460e2b00111fae
         livenessProbe:
           httpGet:
             path: /healthz
@@ -2691,12 +2763,30 @@ spec:
           value: "true"
         - name: NATS_REQUIRED_SUBSCRIPTIONS
           value: email-order-completed-v1
+        - name: ENABLE_TRACING
+          value: "1"
+        - name: COLLECTOR_SERVICE_ADDR
+          value: alloy.observability.svc.cluster.local:4317
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: http://alloy.observability.svc.cluster.local:4317
+        - name: OTEL_EXPORTER_OTLP_PROTOCOL
+          value: grpc
+        - name: OTEL_TRACES_EXPORTER
+          value: otlp
+        - name: OTEL_METRICS_EXPORTER
+          value: none
+        - name: OTEL_LOGS_EXPORTER
+          value: none
+        - name: OTEL_SERVICE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.labels['app']
         envFrom:
         - configMapRef:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-emailservice
-        image: matslo123/emailservice:v0.4.0@sha256:5594fc462d81611fecfee6048c07f9483040916e7171c9bf9769a017cb954d20
+        image: matslo123/emailservice:v0.4.0@sha256:bd6ae1930f8cd96a201830910f513595e1c4c47fec228a9a9c75241fab84698d
         livenessProbe:
           httpGet:
             path: /healthz
@@ -2837,12 +2927,30 @@ spec:
           value: 8s
         - name: ENABLE_PROFILER
           value: "0"
+        - name: ENABLE_TRACING
+          value: "1"
+        - name: COLLECTOR_SERVICE_ADDR
+          value: alloy.observability.svc.cluster.local:4317
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: http://alloy.observability.svc.cluster.local:4317
+        - name: OTEL_EXPORTER_OTLP_PROTOCOL
+          value: grpc
+        - name: OTEL_TRACES_EXPORTER
+          value: otlp
+        - name: OTEL_METRICS_EXPORTER
+          value: none
+        - name: OTEL_LOGS_EXPORTER
+          value: none
+        - name: OTEL_SERVICE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.labels['app']
         envFrom:
         - configMapRef:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-frontend
-        image: matslo123/frontend:v0.4.0@sha256:fc733170d78ff5bb8d17d930b72712e84b634e13cb0326a987266660fa83bc5a
+        image: matslo123/frontend:v0.4.0@sha256:8dec4a2df305470cfa7ff4f7718b59a4c89ac03477772a4975ab0b2abe8a691a
         livenessProbe:
           failureThreshold: 6
           httpGet:
@@ -2992,12 +3100,30 @@ spec:
           value: boutique.qry.payment.tokenize.v1,payment-commands-v1
         - name: PAYMENT_SIGNING_KEY_ID
           value: primary-v1
+        - name: ENABLE_TRACING
+          value: "1"
+        - name: COLLECTOR_SERVICE_ADDR
+          value: alloy.observability.svc.cluster.local:4317
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: http://alloy.observability.svc.cluster.local:4317
+        - name: OTEL_EXPORTER_OTLP_PROTOCOL
+          value: grpc
+        - name: OTEL_TRACES_EXPORTER
+          value: otlp
+        - name: OTEL_METRICS_EXPORTER
+          value: none
+        - name: OTEL_LOGS_EXPORTER
+          value: none
+        - name: OTEL_SERVICE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.labels['app']
         envFrom:
         - configMapRef:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-paymentservice
-        image: matslo123/paymentservice:v0.4.0@sha256:9a6c36bb850627bfd0b9ab86e9b3c05bf3ce9dcb4c25967877a4ec106c954519
+        image: matslo123/paymentservice:v0.4.0@sha256:71365cbd3a4621470b016ba6c3dc9523bb2ee882a073aa1a6c748b66ad5527fb
         livenessProbe:
           failureThreshold: 6
           httpGet:
@@ -3091,12 +3217,30 @@ spec:
           value: "1"
         - name: NATS_REQUIRED
           value: "true"
+        - name: ENABLE_TRACING
+          value: "1"
+        - name: COLLECTOR_SERVICE_ADDR
+          value: alloy.observability.svc.cluster.local:4317
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: http://alloy.observability.svc.cluster.local:4317
+        - name: OTEL_EXPORTER_OTLP_PROTOCOL
+          value: grpc
+        - name: OTEL_TRACES_EXPORTER
+          value: otlp
+        - name: OTEL_METRICS_EXPORTER
+          value: none
+        - name: OTEL_LOGS_EXPORTER
+          value: none
+        - name: OTEL_SERVICE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.labels['app']
         envFrom:
         - configMapRef:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-productcatalogservice
-        image: matslo123/productcatalogservice:v0.4.0@sha256:77716d929c9fe2d662c61d9865afe8fb8c0e77bf43458386e328d4e5e1bbece8
+        image: matslo123/productcatalogservice:v0.4.0@sha256:9721c7972d03c4c4b035c872f3b879c856f3016989f317a4b965878f547ecc41
         livenessProbe:
           httpGet:
             path: /healthz
@@ -3190,12 +3334,30 @@ spec:
           value: "true"
         - name: NATS_REQUIRED_SUBSCRIPTIONS
           value: recommendation-catalog-v1,recommendation-cart-v1,recommendation-page-views-v1
+        - name: ENABLE_TRACING
+          value: "1"
+        - name: COLLECTOR_SERVICE_ADDR
+          value: alloy.observability.svc.cluster.local:4317
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: http://alloy.observability.svc.cluster.local:4317
+        - name: OTEL_EXPORTER_OTLP_PROTOCOL
+          value: grpc
+        - name: OTEL_TRACES_EXPORTER
+          value: otlp
+        - name: OTEL_METRICS_EXPORTER
+          value: none
+        - name: OTEL_LOGS_EXPORTER
+          value: none
+        - name: OTEL_SERVICE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.labels['app']
         envFrom:
         - configMapRef:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-recommendationservice
-        image: matslo123/recommendationservice:v0.4.0@sha256:d0adcd103cba195421e44713447a90ecca2a01e1fd938d9920539c964969baf4
+        image: matslo123/recommendationservice:v0.4.0@sha256:2f10eb25d40828c218dea63ae1ad323579d6204e5c49ace71c61b2bc84f9eabf
         livenessProbe:
           failureThreshold: 6
           httpGet:
@@ -3296,12 +3458,30 @@ spec:
           value: "true"
         - name: NATS_REQUIRED_SUBSCRIPTIONS
           value: shipping-cart-quotes-v1,shipping-commands-v1
+        - name: ENABLE_TRACING
+          value: "1"
+        - name: COLLECTOR_SERVICE_ADDR
+          value: alloy.observability.svc.cluster.local:4317
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: http://alloy.observability.svc.cluster.local:4317
+        - name: OTEL_EXPORTER_OTLP_PROTOCOL
+          value: grpc
+        - name: OTEL_TRACES_EXPORTER
+          value: otlp
+        - name: OTEL_METRICS_EXPORTER
+          value: none
+        - name: OTEL_LOGS_EXPORTER
+          value: none
+        - name: OTEL_SERVICE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.labels['app']
         envFrom:
         - configMapRef:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-shippingservice
-        image: matslo123/shippingservice:v0.4.0@sha256:b5ae14bc9920d3a3f5b2eb973005d98ca384a534d1f6f6753015f805df1a6af5
+        image: matslo123/shippingservice:v0.4.0@sha256:31edd6da1380d281f3b8c009191ada7bf230f66c3384fbd976701a4cb23e0453
         livenessProbe:
           failureThreshold: 6
           httpGet:
@@ -3396,12 +3576,30 @@ spec:
           value: storefront-projection-v1,boutique.qry.storefront.home.v1,boutique.qry.storefront.product.v1,boutique.qry.storefront.cart.v1,boutique.qry.storefront.currencies.v1,boutique.qry.storefront.product-meta.v1,boutique.qry.storefront.operation.v1,boutique.qry.storefront.order.v1
         - name: GOMEMLIMIT
           value: 400MiB
+        - name: ENABLE_TRACING
+          value: "1"
+        - name: COLLECTOR_SERVICE_ADDR
+          value: alloy.observability.svc.cluster.local:4317
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: http://alloy.observability.svc.cluster.local:4317
+        - name: OTEL_EXPORTER_OTLP_PROTOCOL
+          value: grpc
+        - name: OTEL_TRACES_EXPORTER
+          value: otlp
+        - name: OTEL_METRICS_EXPORTER
+          value: none
+        - name: OTEL_LOGS_EXPORTER
+          value: none
+        - name: OTEL_SERVICE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.labels['app']
         envFrom:
         - configMapRef:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-storefrontprojectionservice
-        image: matslo123/storefrontprojectionservice:v0.4.0@sha256:e2936cd35fb0067c75cd5d7f61ca642d95153a9079870d583c4eb664e4625483
+        image: matslo123/storefrontprojectionservice:v0.4.0@sha256:ca046da94f8c8da01622179dabb5cb24d1d7d9719b27cbb73ab383575335a469
         livenessProbe:
           failureThreshold: 6
           httpGet:
@@ -4426,9 +4624,12 @@ spec:
     - port: 4317
       protocol: TCP
     to:
-    - podSelector:
+    - namespaceSelector:
         matchLabels:
-          app: opentelemetrycollector
+          kubernetes.io/metadata.name: observability
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: alloy
   ingress:
   - ports:
     - port: 8080
@@ -4810,46 +5011,6 @@ spec:
     matchLabels:
       app: redis-checkout-cluster-bootstrap
   policyTypes:
-  - Egress
----
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: telemetry-collector
-spec:
-  egress:
-  - ports:
-    - port: 53
-      protocol: UDP
-    - port: 53
-      protocol: TCP
-    to:
-    - namespaceSelector:
-        matchLabels:
-          kubernetes.io/metadata.name: kube-system
-      podSelector:
-        matchLabels:
-          k8s-app: kube-dns
-  - ports:
-    - port: 443
-      protocol: TCP
-    to:
-    - ipBlock:
-        cidr: 0.0.0.0/0
-  ingress:
-  - from:
-    - podSelector:
-        matchExpressions:
-        - key: app
-          operator: Exists
-    ports:
-    - port: 4317
-      protocol: TCP
-  podSelector:
-    matchLabels:
-      app: opentelemetrycollector
-  policyTypes:
-  - Ingress
   - Egress
 ---
 apiVersion: v1

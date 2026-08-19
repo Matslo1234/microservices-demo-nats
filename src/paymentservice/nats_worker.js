@@ -9,6 +9,7 @@ const path = require('path');
 const protobuf = require('protobufjs');
 const cardValidator = require('simple-card-validator');
 const { connect, consumerOpts, headers } = require('nats');
+const { injectEnvelope, withConsumerSpan } = require('./telemetry');
 const logger = require('./logger');
 
 const TOKEN_SUBJECT = 'boutique.qry.payment.tokenize.v1';
@@ -276,7 +277,13 @@ function processTokenBatch(entries, keyring) {
   for (const entry of entries) {
     if (entry.error) continue;
     try {
-      entry.result = tokenize(keyring, entry.request);
+      withConsumerSpan(entry.request, {
+        subject: entry.message.subject || TOKEN_SUBJECT,
+        kind: 'query',
+        correlationId: entry.correlationId,
+      }, () => {
+        entry.result = tokenize(keyring, entry.request);
+      });
     } catch (tokenError) {
       entry.error = tokenError;
     }
@@ -458,7 +465,15 @@ async function processCommandBatch(messages, keyring, contracts, js) {
   for (const command of commands) {
     if (command.error) continue;
     try {
-      command.result = processCommand(keyring, contracts, command.message.subject, command.envelope);
+      withConsumerSpan(command.envelope, {
+        subject: command.message.subject,
+        kind: 'command',
+        messageId: command.messageId,
+        correlationId: command.correlationId,
+      }, () => {
+        injectEnvelope(command.envelope);
+        command.result = processCommand(keyring, contracts, command.message.subject, command.envelope);
+      });
     } catch (commandError) {
       command.error = commandError;
     }

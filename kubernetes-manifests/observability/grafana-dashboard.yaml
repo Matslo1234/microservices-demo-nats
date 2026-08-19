@@ -12,7 +12,7 @@ data:
       "annotations": {
         "list": []
       },
-      "description": "Metrics and Kubernetes container logs for Online Boutique and NATS.",
+      "description": "Metrics, Kubernetes container logs, and OpenTelemetry traces for Online Boutique and NATS.",
       "editable": false,
       "fiscalYearStartMonth": 0,
       "graphTooltip": 1,
@@ -499,6 +499,97 @@ data:
           ],
           "title": "Container logs",
           "type": "logs"
+        },
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "tempo"
+          },
+          "description": "Recent OpenTelemetry traces matching the service and correlation-ID filters. Choose View waterfall from a row to render the trace below, or use the trace ID's built-in link to open Explore.",
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "align": "auto",
+                "cellOptions": {
+                  "type": "auto"
+                },
+                "inspect": false
+              },
+              "links": [
+                {
+                  "title": "View waterfall",
+                  "url": "/d/online-boutique-observability/online-boutique-observability?${var-namespace:queryparam}&${var-app:queryparam}&${var-exclude_apps:queryparam}&${var-pod:queryparam}&${var-search:queryparam}&${var-trace_service:queryparam}&${var-correlation_id:queryparam}&var-traceId=${__data.fields[\"traceID\"]}&from=${__from}&to=${__to}"
+                }
+              ]
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 12,
+            "w": 24,
+            "x": 0,
+            "y": 33
+          },
+          "id": 9,
+          "options": {
+            "cellHeight": "sm",
+            "footer": {
+              "countRows": false,
+              "fields": "",
+              "reducer": [
+                "sum"
+              ],
+              "show": false
+            },
+            "showHeader": true
+          },
+          "pluginVersion": "13.1.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "tempo",
+                "uid": "tempo"
+              },
+              "filters": [],
+              "limit": 50,
+              "query": "{ resource.service.name =~ \"${trace_service:raw}\" && span.correlation.id =~ \"${correlation_id:raw}\" }",
+              "queryType": "traceql",
+              "refId": "A",
+              "tableType": "traces"
+            }
+          ],
+          "title": "OpenTelemetry traces",
+          "type": "table"
+        },
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "tempo"
+          },
+          "description": "Waterfall timeline for the selected trace. Choose View waterfall from a row in the trace table or paste a trace ID into the Selected trace ID field.",
+          "gridPos": {
+            "h": 18,
+            "w": 24,
+            "x": 0,
+            "y": 45
+          },
+          "id": 10,
+          "options": {},
+          "pluginVersion": "13.1.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "tempo",
+                "uid": "tempo"
+              },
+              "query": "${traceId}",
+              "queryType": "traceql",
+              "refId": "A",
+              "tableType": "traces"
+            }
+          ],
+          "title": "Selected trace waterfall",
+          "type": "traces"
         }
       ],
       "refresh": "15s",
@@ -507,6 +598,8 @@ data:
         "online-boutique",
         "metrics",
         "logs",
+        "traces",
+        "opentelemetry",
         "nats"
       ],
       "templating": {
@@ -612,6 +705,60 @@ data:
             ],
             "query": ".",
             "type": "textbox"
+          },
+          {
+            "current": {
+              "text": ".*",
+              "value": ".*"
+            },
+            "description": "Regular expression matched against the OpenTelemetry resource.service.name attribute.",
+            "label": "Trace service",
+            "name": "trace_service",
+            "options": [
+              {
+                "selected": true,
+                "text": ".*",
+                "value": ".*"
+              }
+            ],
+            "query": ".*",
+            "type": "textbox"
+          },
+          {
+            "current": {
+              "text": ".*",
+              "value": ".*"
+            },
+            "description": "Exact correlation ID or regular expression matched against span.correlation.id.",
+            "label": "Correlation ID",
+            "name": "correlation_id",
+            "options": [
+              {
+                "selected": true,
+                "text": ".*",
+                "value": ".*"
+              }
+            ],
+            "query": ".*",
+            "type": "textbox"
+          },
+          {
+            "current": {
+              "text": "",
+              "value": ""
+            },
+            "description": "Trace ID rendered in the waterfall panel. Populate it from the trace table's View waterfall link or paste a 32-character OpenTelemetry trace ID.",
+            "label": "Selected trace ID",
+            "name": "traceId",
+            "options": [
+              {
+                "selected": true,
+                "text": "",
+                "value": ""
+              }
+            ],
+            "query": "",
+            "type": "textbox"
           }
         ]
       },
@@ -623,6 +770,6 @@ data:
       "timezone": "browser",
       "title": "Online Boutique Observability",
       "uid": "online-boutique-observability",
-      "version": 6,
+      "version": 8,
       "weekStart": ""
     }

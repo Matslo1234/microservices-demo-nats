@@ -140,6 +140,7 @@ public final class AdService {
   }
 
   public static void main(String[] args) throws IOException, InterruptedException {
+    Telemetry.initialize();
     logger.info("AdService NATS worker starting.");
     service.start();
     new CountDownLatch(1).await();

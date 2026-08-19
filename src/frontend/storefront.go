@@ -15,10 +15,10 @@ import (
 	commonv1 "github.com/GoogleCloudPlatform/microservices-demo/protos/common/v1"
 	eventsv1 "github.com/GoogleCloudPlatform/microservices-demo/protos/events/v1"
 	pb "github.com/GoogleCloudPlatform/microservices-demo/src/frontend/genproto"
+	telemetry "github.com/GoogleCloudPlatform/microservices-demo/src/shared/telemetry/go"
 	"github.com/google/uuid"
 	"github.com/nats-io/nats.go"
 	"github.com/sirupsen/logrus"
-	"go.opentelemetry.io/otel"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -40,6 +40,8 @@ type storefrontQueryRequest struct {
 	OperationID   string   `json:"operation_id,omitempty"`
 	OrderID       string   `json:"order_id,omitempty"`
 	CorrelationID string   `json:"correlation_id,omitempty"`
+	Traceparent   string   `json:"traceparent,omitempty"`
+	Tracestate    string   `json:"tracestate,omitempty"`
 }
 
 type storefrontProductView struct {
@@ -72,18 +74,6 @@ type storefrontQueryResponse struct {
 	Operation       *cartOperation           `json:"operation"`
 	Order           *orderStatus             `json:"order"`
 	Error           string                   `json:"error"`
-}
-
-type natsHeaderCarrier nats.Header
-
-func (carrier natsHeaderCarrier) Get(key string) string { return nats.Header(carrier).Get(key) }
-func (carrier natsHeaderCarrier) Set(key, value string) { nats.Header(carrier).Set(key, value) }
-func (carrier natsHeaderCarrier) Keys() []string {
-	keys := make([]string, 0, len(carrier))
-	for key := range carrier {
-		keys = append(keys, key)
-	}
-	return keys
 }
 
 func connectFrontendNATS() (*nats.Conn, nats.JetStreamContext, time.Duration, time.Duration, error) {
@@ -164,8 +154,12 @@ func (fe *frontendServer) storefrontQuery(ctx context.Context, view string, requ
 		request.CorrelationID = requestID(ctx)
 	}
 	topic := "boutique.qry.storefront." + view + ".v1"
+	ctx, span := telemetry.StartProducerSpan(ctx, topic, "query", "", request.CorrelationID)
+	defer span.End()
+	telemetry.Inject(ctx, &request.Traceparent, &request.Tracestate)
 	encoded, err := json.Marshal(request)
 	if err != nil {
+		telemetry.RecordError(span, err)
 		return nil, err
 	}
 	queryContext, cancel := context.WithTimeout(ctx, fe.natsRequestTimeout)
@@ -179,6 +173,7 @@ func (fe *frontendServer) storefrontQuery(ctx context.Context, view string, requ
 	}
 	message, err := fe.natsConn.RequestWithContext(queryContext, topic, encoded)
 	if err != nil {
+		telemetry.RecordError(span, err)
 		if errors.Is(err, nats.ErrNoResponders) || errors.Is(err, nats.ErrTimeout) || errors.Is(err, context.DeadlineExceeded) {
 			return nil, fmt.Errorf("%w: %v", errProjectionUnavailable, err)
 		}
@@ -186,6 +181,7 @@ func (fe *frontendServer) storefrontQuery(ctx context.Context, view string, requ
 	}
 	var response storefrontQueryResponse
 	if err := json.Unmarshal(message.Data, &response); err != nil {
+		telemetry.RecordError(span, err)
 		return nil, fmt.Errorf("decode storefront response: %w", err)
 	}
 	switch response.Error {
@@ -228,23 +224,22 @@ func (fe *frontendServer) publishPageView(ctx context.Context, session, pageType
 		AggregateType: "storefront-session", AggregateId: session, AggregateVersion: version,
 		CorrelationId: requestID(ctx), Data: wrapped,
 	}
-	if fe.tracingEnabled {
-		headers := nats.Header{}
-		otel.GetTextMapPropagator().Inject(ctx, natsHeaderCarrier(headers))
-		envelope.Traceparent = headers.Get("traceparent")
-		envelope.Tracestate = headers.Get("tracestate")
-	}
+	ctx, span := telemetry.StartProducerSpan(ctx, pageViewedSubject, "event", messageID, envelope.CorrelationId)
+	defer span.End()
+	telemetry.Inject(ctx, &envelope.Traceparent, &envelope.Tracestate)
 	encoded, err := proto.Marshal(envelope)
 	if err != nil {
+		telemetry.RecordError(span, err)
 		return err
 	}
-	publishContext, cancel := context.WithTimeout(context.Background(), fe.natsPublishTimeout)
+	publishContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), fe.natsPublishTimeout)
 	defer cancel()
 	message := &nats.Msg{Subject: pageViewedSubject, Data: encoded, Header: nats.Header{}}
 	message.Header.Set("Nats-Msg-Id", messageID)
 	message.Header.Set("Content-Type", "application/protobuf")
 	_, err = fe.natsJS.PublishMsg(message, nats.Context(publishContext), nats.MsgId(messageID))
 	if err != nil {
+		telemetry.RecordError(span, err)
 		return err
 	}
 	if fe.log.IsLevelEnabled(logrus.DebugLevel) {

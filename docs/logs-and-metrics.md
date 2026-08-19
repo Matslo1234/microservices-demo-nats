@@ -1,12 +1,13 @@
-# Logging and metrics
+# Logging, metrics, and tracing
 
 The repository implements observability in two layers:
 
-1. Every deployed domain service writes container logs and exposes a small
-   Prometheus text endpoint on port `8080`.
+1. Every deployed domain service writes container logs, exposes a small
+   Prometheus text endpoint on port `8080`, and exports OpenTelemetry traces.
 2. An optional, standalone stack in
    [`kubernetes-manifests/observability`](../kubernetes-manifests/observability)
-   collects those signals with Grafana Alloy, Loki, Prometheus, and Grafana.
+   collects those signals with Grafana Alloy, Tempo, Loki, Prometheus, and
+   Grafana.
 
 The observability stack is not part of the main application kustomization or
 release manifest. It is installed separately:
@@ -97,6 +98,40 @@ Boutique Observability** dashboard. Its log panels provide:
 The error count is a text heuristic, not a parsed severity query. For example,
 an error word in a non-error message can match, while an error line without one
 of the searched words can be missed.
+
+## Tracing
+
+Application deployments enable OTLP/gRPC tracing and send spans to the Alloy
+Service in the `observability` namespace. Alloy batches and forwards traces to
+a single filesystem-backed Tempo instance. Grafana provisions Tempo as a data
+source, including TraceQL search and trace-to-log navigation. The default
+dashboard includes an **OpenTelemetry traces** table for the selected time
+range. Its **Trace service** and **Correlation ID** text boxes accept regular
+expressions and filter `resource.service.name` and `span.correlation.id`,
+respectively. The table's **View waterfall** link loads the selected trace into
+an embedded span timeline; the **Selected trace ID** text box also accepts a
+trace ID directly. The trace ID's built-in link opens the complete trace for
+span inspection and related-log navigation in Explore.
+
+The frontend creates the initial HTTP server span. NATS publishers inject W3C
+`traceparent` and `tracestate` values into message envelopes, and consumers
+extract those values before starting `producer` and `consumer` spans. This
+keeps the trace causal chain intact across durable delivery, retries, and
+language boundaries.
+
+Every operation span also has `correlation.id`, using the same value written as
+`correlation_id` in logs. Correlation IDs remain stable request or business
+identifiers; they are not converted into OpenTelemetry trace IDs. This lets an
+operator search logs by `correlation_id` and traces with a TraceQL selector
+such as:
+
+```traceql
+{ span.correlation.id = "<correlation-id>" }
+```
+
+Trace export is deliberately non-blocking. If the optional observability stack
+is absent, application work continues while SDK exporters retry or drop spans
+according to their bounded queues.
 
 ## Metrics
 
@@ -226,14 +261,14 @@ kubectl -n observability port-forward service/grafana 3000:3000
 The stack is sized for development and modest demo traffic, not high
 availability:
 
-- Prometheus and Loki are single replicas with node-bound `ReadWriteOnce`
+- Prometheus, Loki, and Tempo are single replicas with node-bound `ReadWriteOnce`
   storage.
-- Loki uses the local filesystem rather than object storage.
+- Loki and Tempo use the local filesystem rather than object storage.
 - Grafana state and Alloy working data use `emptyDir`; durable configuration
   comes from provisioned ConfigMaps.
-- A default dynamic `StorageClass` is required for the Prometheus and Loki
+- A default dynamic `StorageClass` is required for the Prometheus, Loki, and Tempo
   claims.
 
-The stack covers logs and metrics only. Although several services contain
-optional OpenTelemetry trace exporters, this observability kustomization does
-not deploy a trace backend or display traces.
+The bundled trace path is intended for development and modest demo traffic;
+production deployments should use durable object storage, authentication,
+TLS, and a scaled collector/backend topology.

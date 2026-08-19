@@ -12,6 +12,7 @@ from opentelemetry import trace
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.sdk.resources import Resource
 
 from logger import getJSONLogger
 from nats_events import messaging_ready, start_event_worker, stop_event_worker
@@ -53,7 +54,9 @@ def configure_tracing():
   if os.getenv("ENABLE_TRACING") != "1":
     logger.info("Tracing disabled.")
     return
-  trace.set_tracer_provider(TracerProvider())
+  trace.set_tracer_provider(TracerProvider(resource=Resource.create({
+      "service.name": os.getenv("OTEL_SERVICE_NAME", "recommendationservice")
+  })))
   trace.get_tracer_provider().add_span_processor(BatchSpanProcessor(OTLPSpanExporter(
       endpoint=os.getenv("COLLECTOR_SERVICE_ADDR", "localhost:4317"), insecure=True)))
 
