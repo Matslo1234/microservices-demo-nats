@@ -1,8 +1,23 @@
 # Benchmark service
 
-`benchmarkservice` is a horizontally scalable API for manually triggered
-Locust comparisons. API replicas retain no run, lease, process, log, or
-artifact state in their pods:
+The benchmark supports two execution modes. `standalone.py` runs Locust on a
+workstation, VM, or a Job in a separate cluster and writes artifacts locally.
+This is the preferred mode because load generation does not consume resources
+in the cluster being measured. `benchmarkservice` remains available as a
+horizontally scalable API that creates disposable Jobs in the cluster where
+that API is deployed.
+
+Every run requires two explicit URLs:
+
+- `target_url` (or standalone `--url`) is the externally reachable frontend;
+- `metrics_url` is the tested cluster's `/snapshot` endpoint.
+
+The target URL is part of the run configuration; there is no implicit
+`frontend` Service default. This prevents a remotely deployed runner from
+silently benchmarking its own cluster.
+
+API replicas retain no run, lease, process, log, or artifact state in their
+pods:
 
 - run definitions, status, heartbeats, summaries, and the expiring
   one-active-run lease are stored in the replicated `BENCHMARK_RUNS`
@@ -47,11 +62,68 @@ Locust CSVs and logs remain in the complete artifact archive for diagnostics.
 Warm-up samples remain in raw artifacts but are excluded from summaries. After
 the steady interval, submission stops for the configured drain period.
 
-## Configuration
+## Running outside the target cluster
 
-The Deployment supplies `APPLICATION_TYPE`, `FRONTEND_ADDR`, the standard
-`NATS_*` connection settings, and NATS credentials. Optional bucket overrides
-are `BENCHMARK_RUN_BUCKET` and `BENCHMARK_ARTIFACT_BUCKET`.
+The NATS benchmark bundles deploy `benchmarkmetrics`, a small metrics gateway,
+and expose it through the `benchmarkmetrics-external` LoadBalancer Service.
+It reads kubelet summaries and local NATS exporter endpoints in the tested
+cluster. Locust only performs HTTP requests to the supplied frontend and
+metrics URLs.
+
+After applying a benchmark bundle, obtain both external addresses:
+
+```sh
+kubectl get service frontend-external benchmarkmetrics-external
+```
+
+Run from a checkout with the Python requirements installed:
+
+```sh
+python src/benchmarkservice/standalone.py \
+  --application-type NATS \
+  --url http://FRONTEND_EXTERNAL_IP \
+  --metrics-url http://BENCHMARKMETRICS_EXTERNAL_IP/snapshot \
+  --workload closed \
+  --users 100 \
+  --spawn-rate 10 \
+  --output ./benchmark-results
+```
+
+The same image can run as a Job in a separate cluster. A Kubernetes `command`
+of `python standalone.py` replaces the image's API entrypoint; pass the same
+arguments shown above. The standalone runner starts multiple synchronized
+Locust processes automatically above 100 open-loop orders/s or 1,000
+closed-loop users.
+
+For the original GRPC application, deploy its metrics gateway separately:
+
+```sh
+kubectl apply -k benchmark/manifests/target-metrics-grpc
+```
+
+For clusters without a LoadBalancer implementation, port-forwarding is enough
+for a runner on the operator's host:
+
+```sh
+kubectl port-forward service/benchmarkmetrics-external 18080:80
+```
+
+Then use `--metrics-url http://127.0.0.1:18080/snapshot`.
+
+The gateway can require a bearer token. Create a Secret named
+`benchmark-metrics-auth` with the key `BENCHMARK_METRICS_TOKEN` in the target
+cluster, restart `benchmarkmetrics`, and set the same environment variable on
+the standalone runner or in the cluster hosting benchmark Jobs. The generated
+bundles leave authentication optional so they remain self-contained; restrict
+the LoadBalancer's source ranges or enable the token before using it on an
+untrusted network.
+
+## API configuration
+
+The Deployment supplies `APPLICATION_TYPE`, the standard `NATS_*` connection
+settings, and NATS credentials. `target_url` and `metrics_url` are required in
+each `POST /api/runs` request and in the web form. Optional bucket overrides are
+`BENCHMARK_RUN_BUCKET` and `BENCHMARK_ARTIFACT_BUCKET`.
 
 The API discovers its own immutable container image through the Kubernetes API
 and uses that exact image for Jobs. This keeps Job and controller code at the
@@ -82,6 +154,8 @@ Before it exits it uploads:
 - diagnostic `locust_*.csv` files; and
 - one ZIP archive containing the complete run.
 
-The embedded collector samples kubelet summary statistics and NATS exporter
-metrics. API pod restarts do not affect active Jobs, run visibility, or
-completed artifacts.
+The remote collector fetches kubelet summary statistics and NATS exporter
+metrics from the tested cluster's metrics gateway. It does not use the
+Kubernetes API or NATS exporter endpoints of the cluster hosting the worker.
+API pod restarts do not affect active Jobs, run visibility, or completed
+artifacts.

@@ -91,7 +91,15 @@ class FakeJobs:
 
 class BenchmarkControlTest(unittest.TestCase):
     def manager(self, store, jobs, clock=lambda: 1000.0):
-        return BenchmarkManager(store, jobs, "NATS", "frontend:80", clock)
+        return BenchmarkManager(store, jobs, "NATS", clock)
+
+    @staticmethod
+    def request(**values):
+        return {
+            "target_url": "https://shop.example",
+            "metrics_url": "https://metrics.example/snapshot",
+            **values,
+        }
 
     def test_concurrent_api_replicas_submit_only_one_job(self):
         store, jobs = MemoryStore(), FakeJobs()
@@ -102,7 +110,7 @@ class BenchmarkControlTest(unittest.TestCase):
         def submit(manager):
             barrier.wait()
             try:
-                results.append(manager.start({}))
+                results.append(manager.start(self.request()))
             except RunConflict as error:
                 errors.append(error)
 
@@ -122,7 +130,7 @@ class BenchmarkControlTest(unittest.TestCase):
     def test_another_replica_observes_and_stops_run(self):
         store, jobs = MemoryStore(), FakeJobs()
         first, second = self.manager(store, jobs), self.manager(store, jobs)
-        started = first.start({})
+        started = first.start(self.request())
         run_id = started["status"]["run_id"]
 
         self.assertEqual("submitted", second.details(run_id)["status"]["state"])
@@ -130,7 +138,7 @@ class BenchmarkControlTest(unittest.TestCase):
 
         self.assertEqual("stopped", stopped["status"]["state"])
         self.assertEqual(1, len(jobs.deleted))
-        third = second.start({})
+        third = second.start(self.request())
         self.assertNotEqual(run_id, third["status"]["run_id"])
 
     def test_parallel_worker_count_is_given_to_kubernetes_job(self):
@@ -138,7 +146,7 @@ class BenchmarkControlTest(unittest.TestCase):
         manager = self.manager(store, jobs)
 
         result = manager.start(
-            {"workload": "open", "arrival_rate": 250}
+            self.request(workload="open", arrival_rate=250)
         )
 
         self.assertEqual([3], jobs.worker_counts)
@@ -148,10 +156,12 @@ class BenchmarkControlTest(unittest.TestCase):
         now = [1000.0]
         store, jobs = MemoryStore(), FakeJobs()
         first = self.manager(store, jobs, lambda: now[0])
-        original = first.start({})
+        original = first.start(self.request())
         now[0] += 100_000
 
-        replacement = self.manager(store, jobs, lambda: now[0]).start({})
+        replacement = self.manager(store, jobs, lambda: now[0]).start(
+            self.request()
+        )
 
         self.assertNotEqual(
             original["status"]["run_id"],
@@ -161,7 +171,7 @@ class BenchmarkControlTest(unittest.TestCase):
     def test_artifact_is_read_from_shared_object_store(self):
         store, jobs = MemoryStore(), FakeJobs()
         manager = self.manager(store, jobs)
-        run_id = manager.start({})["status"]["run_id"]
+        run_id = manager.start(self.request())["status"]["run_id"]
         record = store.get("run." + run_id)
         value = record.value
         value["artifacts"] = {
@@ -180,7 +190,7 @@ class BenchmarkControlTest(unittest.TestCase):
         manager = self.manager(store, jobs)
         run_ids = []
         for number in range(2):
-            run_id = manager.start({})["status"]["run_id"]
+            run_id = manager.start(self.request())["status"]["run_id"]
             run_ids.append(run_id)
             record = store.get("run." + run_id)
             value = record.value

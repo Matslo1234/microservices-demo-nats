@@ -95,25 +95,6 @@ rules:
   - delete
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: online-boutique-benchmark-runner
-rules:
-- apiGroups:
-  - ""
-  resources:
-  - nodes
-  verbs:
-  - get
-  - list
-- apiGroups:
-  - ""
-  resources:
-  - nodes/proxy
-  verbs:
-  - get
----
-apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: benchmarkservice-jobs
@@ -124,19 +105,6 @@ roleRef:
 subjects:
 - kind: ServiceAccount
   name: benchmarkservice
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: online-boutique-benchmark-runner
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: online-boutique-benchmark-runner
-subjects:
-- kind: ServiceAccount
-  name: benchmark-runner
-  namespace: default
 ---
 apiVersion: v1
 data:
@@ -521,8 +489,6 @@ spec:
           value: "8080"
         - name: APPLICATION_TYPE
           value: NATS
-        - name: FRONTEND_ADDR
-          value: frontend:80
         - name: POD_NAMESPACE
           valueFrom:
             fieldRef:
@@ -3005,8 +2971,6 @@ spec:
   - ports:
     - port: 4222
       protocol: TCP
-    - port: 7777
-      protocol: TCP
     to:
     - namespaceSelector:
         matchLabels:
@@ -3015,9 +2979,11 @@ spec:
         matchLabels:
           app.kubernetes.io/name: nats
   - ports:
+    - port: 80
+      protocol: TCP
     - port: 443
       protocol: TCP
-    - port: 6443
+    - port: 8080
       protocol: TCP
     to:
     - ipBlock:

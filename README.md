@@ -20,7 +20,8 @@ frontend edge and pod-local health/metrics.
 flowchart LR
     User[Browser or API client] -->|HTTP / order SSE| FE[frontend]
     Load[loadgenerator] -->|HTTP| FE
-    Benchmark[benchmarkservice] -->|manually triggered HTTP load| FE
+    Benchmark[remote benchmark runner] -->|HTTP load through external URL| FE
+    Metrics[benchmark metrics gateway] -.->|target-cluster samples| Benchmark
 
     FE -->|Core NATS projected queries| Projection[storefront projection]
     Projection -->|Core NATS live order updates| FE
@@ -55,7 +56,7 @@ flowchart LR
 | Service | Language | Description |
 | --- | --- | --- |
 | [frontend](src/frontend) | Go | Browser-facing web application. |
-| [benchmarkservice](src/benchmarkservice) | Python | Manually triggered parity and capacity benchmarks. |
+| [benchmarkservice](src/benchmarkservice) | Python | Remote parity and capacity benchmarks plus the target-cluster metrics gateway. |
 | [cartservice](src/cartservice) | C# | Shopping cart storage and cart commands. |
 | [productcatalogservice](src/productcatalogservice) | Go | Product catalogue. |
 | [currencyservice](src/currencyservice) | Node.js | Currency conversion. |

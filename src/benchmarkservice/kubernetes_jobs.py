@@ -177,6 +177,12 @@ class KubernetesJobClient:
                                             )
                                         }
                                     },
+                                    {
+                                        "secretRef": {
+                                            "name": "benchmark-metrics-auth",
+                                            "optional": True,
+                                        }
+                                    },
                                 ],
                                 "resources": {
                                     "requests": {

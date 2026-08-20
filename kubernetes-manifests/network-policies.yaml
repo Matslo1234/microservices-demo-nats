@@ -402,15 +402,14 @@ spec:
     ports:
     - protocol: TCP
       port: 4222
-    - protocol: TCP
-      port: 7777
-  # Resource sampling reads the Kubernetes API. API endpoints are not
-  # consistently selectable with labels across CNI implementations.
+  # The target and its metrics gateway may be outside this cluster.
   - to:
     - ipBlock:
         cidr: 0.0.0.0/0
     ports:
     - protocol: TCP
+      port: 80
+    - protocol: TCP
       port: 443
     - protocol: TCP
-      port: 6443
+      port: 8080

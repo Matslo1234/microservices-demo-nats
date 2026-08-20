@@ -127,18 +127,27 @@ def main() -> None:
     nats = render("kubernetes-manifests/nats/fresh-cluster")
     hpa_application = render("benchmark/manifests/hpa-application")
     hpa_dependencies = render("benchmark/manifests/hpa-dependencies")
+    target_metrics = render("benchmark/manifests/target-metrics")
     single_replica_application = render(
         "benchmark/manifests/single-replica",
         allow_external_resources=True,
     )
-    single_replica_benchmark = nats + "---\n" + single_replica_application
-    benchmark = nats + "---\n" + application
+    single_replica_benchmark = (
+        nats
+        + "---\n"
+        + single_replica_application
+        + "---\n"
+        + target_metrics
+    )
+    benchmark = nats + "---\n" + application + "---\n" + target_metrics
     hpa_benchmark = (
         nats
         + "---\n"
         + hpa_application
         + "---\n"
         + hpa_dependencies
+        + "---\n"
+        + target_metrics
     )
     benchmark_variants = {
         "benchmark-nats-single-replica.yaml": (
@@ -146,9 +155,9 @@ def main() -> None:
             "environment.",
             (
                 "Every application and Redis store runs as one fixed replica.",
-                "NATS retains its replicated topology. Benchmark workloads run",
-                "as disposable Jobs; run state and artifacts are held in",
-                "replicated JetStream KV/Object Store buckets.",
+                "NATS retains its replicated topology. Run Locust on a separate cluster",
+                "or host and point it at the external frontend and benchmarkmetrics URLs.",
+                "The small in-cluster metrics gateway reports target-cluster resources.",
             ),
             single_replica_benchmark,
         ),
@@ -158,9 +167,8 @@ def main() -> None:
                 "The application Deployments start with multiple rolling replicas and are",
                 "governed by CPU and JetStream-lag HPAs. The bundle includes metrics-server,",
                 "a benchmark Prometheus, recording rules, and Prometheus Adapter, so no",
-                "cluster monitoring stack is required. Benchmark workloads run as disposable",
-                "Jobs; run state and artifacts are held in replicated JetStream KV/Object Store",
-                "buckets.",
+                "cluster monitoring stack is required. Run Locust outside this cluster and use",
+                "the external benchmarkmetrics URL to retain target-cluster resource samples.",
             ),
             hpa_benchmark,
         ),
@@ -169,9 +177,9 @@ def main() -> None:
             "environment.",
             (
                 "The application Deployments start with multiple rolling replicas and are",
-                "governed by Phase 6 HPAs and disruption budgets. Benchmark workloads run as",
-                "disposable Jobs; run state and artifacts are held in replicated JetStream",
-                "KV/Object Store buckets.",
+                "governed by Phase 6 HPAs and disruption budgets. Run Locust outside this",
+                "cluster and use the external benchmarkmetrics URL to retain target-cluster",
+                "resource samples.",
             ),
             benchmark,
         ),

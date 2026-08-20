@@ -91,7 +91,12 @@ def verify_benchmark() -> None:
     job = (BENCHMARK / "job.py").read_text()
     store = (BENCHMARK / "shared_store.py").read_text()
     jobs = (BENCHMARK / "kubernetes_jobs.py").read_text()
-    all_sources = "\n".join((app, control, job, store, jobs))
+    runtime = (BENCHMARK / "runtime.py").read_text()
+    standalone = (BENCHMARK / "standalone.py").read_text()
+    metrics_server = (BENCHMARK / "metrics_server.py").read_text()
+    all_sources = "\n".join(
+        (app, control, job, store, jobs, runtime, standalone, metrics_server)
+    )
     require(
         all_sources,
         'RUN_BUCKET = "BENCHMARK_RUNS"',
@@ -106,6 +111,10 @@ def verify_benchmark() -> None:
         "store.get_object",
         "ttlSecondsAfterFinished",
         "build_report(run_directory)",
+        "target_url",
+        "metrics_url",
+        "RemoteMetricsClient",
+        "ClusterMetricsCollector",
     )
     forbid(
         app + control,
@@ -197,7 +206,14 @@ def verify_manifests() -> str:
     )
     require(runner, "name: benchmark-runner")
     policy = document(rendered, "NetworkPolicy", "benchmark-runner-egress")
-    require(policy, "app: benchmark-runner", "port: 4222", "port: 7777")
+    require(
+        policy,
+        "app: benchmark-runner",
+        "port: 4222",
+        "port: 80",
+        "port: 443",
+        "port: 8080",
+    )
     nats_policy = document(
         run(
             [
@@ -301,6 +317,18 @@ def verify_release_manifests() -> None:
             "name: redis-checkout-cluster",
             "name: nats-bootstrap",
             "ensure_kv BENCHMARK_RUNS 10",
+            "name: benchmarkmetrics-external",
+            "type: LoadBalancer",
+            "python",
+            "metrics_server.py",
+        )
+        metrics = document(content, "Deployment", "benchmarkmetrics")
+        require(
+            metrics,
+            "name: APPLICATION_TYPE",
+            "value: NATS",
+            "name: BENCHMARK_METRICS_TOKEN",
+            "name: benchmark-metrics-auth",
         )
         single_replica = path.name == "benchmark-nats-single-replica.yaml"
         for application in APPLICATIONS:

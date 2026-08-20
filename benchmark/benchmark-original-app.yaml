@@ -1080,31 +1080,6 @@ subjects:
 - kind: ServiceAccount
   name: benchmarkservice
 ---
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: online-boutique-benchmark-runner
-rules:
-- apiGroups: [""]
-  resources: ["nodes"]
-  verbs: ["get", "list"]
-- apiGroups: [""]
-  resources: ["nodes/proxy"]
-  verbs: ["get"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: online-boutique-benchmark-runner
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: online-boutique-benchmark-runner
-subjects:
-- kind: ServiceAccount
-  name: benchmark-runner
-  namespace: default
----
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -1149,8 +1124,6 @@ spec:
           value: "8080"
         - name: APPLICATION_TYPE
           value: "GRPC"
-        - name: FRONTEND_ADDR
-          value: "frontend:80"
         - name: POD_NAMESPACE
           valueFrom:
             fieldRef:

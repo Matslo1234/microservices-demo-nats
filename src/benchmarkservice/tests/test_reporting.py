@@ -26,12 +26,13 @@ class ReportingTest(unittest.TestCase):
             run = Path(temporary)
             config = BenchmarkConfig.from_request(
                 {
+                    "target_url": "http://frontend",
+                    "metrics_url": "http://benchmarkmetrics/snapshot",
                     "warmup_seconds": 1,
                     "duration_seconds": 10,
                     "drain_seconds": 2,
                 },
                 "NATS",
-                "frontend:80",
             )
             (run / "config.json").write_text(
                 json.dumps(config.as_dict()), encoding="utf-8"
@@ -147,7 +148,12 @@ class ReportingTest(unittest.TestCase):
         saturated["context"]["scheduled_at"] = 1
         business = business_summary([saturated], 10)
         config = BenchmarkConfig.from_request(
-            {"workload": "open"}, "GRPC", "frontend:80"
+            {
+                "target_url": "http://frontend",
+                "metrics_url": "http://benchmarkmetrics/snapshot",
+                "workload": "open",
+            },
+            "GRPC",
         )
 
         assessment = capacity_assessment(

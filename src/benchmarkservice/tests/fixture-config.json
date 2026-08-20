@@ -1,6 +1,7 @@
 {
   "application_type": "NATS",
   "target_url": "http://frontend:80",
+  "metrics_url": null,
   "workload": "closed",
   "warmup_seconds": 1,
   "duration_seconds": 1,

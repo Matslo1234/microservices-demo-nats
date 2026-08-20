@@ -76,6 +76,9 @@ class KubernetesJobClientTest(unittest.TestCase):
             ["nats-ca", "work", "tmp"],
             [volume["name"] for volume in pod["volumes"]],
         )
+        metrics_secret = pod["containers"][0]["envFrom"][2]["secretRef"]
+        self.assertEqual("benchmark-metrics-auth", metrics_secret["name"])
+        self.assertTrue(metrics_secret["optional"])
 
     def test_job_name_is_dns_safe_and_bounded(self):
         name = job_name("20260727T120000Z-ABCDEF12")

@@ -12,9 +12,9 @@
 #   kubectl apply -f <this-file>
 #
 # The application Deployments start with multiple rolling replicas and are
-# governed by Phase 6 HPAs and disruption budgets. Benchmark workloads run as
-# disposable Jobs; run state and artifacts are held in replicated JetStream
-# KV/Object Store buckets.
+# governed by Phase 6 HPAs and disruption budgets. Run Locust outside this
+# cluster and use the external benchmarkmetrics URL to retain target-cluster
+# resource samples.
 ---
 apiVersion: v1
 kind: Namespace
@@ -1696,6 +1696,7 @@ spec:
           operator: In
           values:
           - benchmark-runner
+          - benchmarkmetrics
           - benchmarkservice
     ports:
     - port: 7777
@@ -1850,25 +1851,6 @@ rules:
   - delete
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: online-boutique-benchmark-runner
-rules:
-- apiGroups:
-  - ""
-  resources:
-  - nodes
-  verbs:
-  - get
-  - list
-- apiGroups:
-  - ""
-  resources:
-  - nodes/proxy
-  verbs:
-  - get
----
-apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: benchmarkservice-jobs
@@ -1879,19 +1861,6 @@ roleRef:
 subjects:
 - kind: ServiceAccount
   name: benchmarkservice
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: online-boutique-benchmark-runner
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: online-boutique-benchmark-runner
-subjects:
-- kind: ServiceAccount
-  name: benchmark-runner
-  namespace: default
 ---
 apiVersion: v1
 data:
@@ -2276,8 +2245,6 @@ spec:
           value: "8080"
         - name: APPLICATION_TYPE
           value: NATS
-        - name: FRONTEND_ADDR
-          value: frontend:80
         - name: POD_NAMESPACE
           valueFrom:
             fieldRef:
@@ -4760,8 +4727,6 @@ spec:
   - ports:
     - port: 4222
       protocol: TCP
-    - port: 7777
-      protocol: TCP
     to:
     - namespaceSelector:
         matchLabels:
@@ -4770,9 +4735,11 @@ spec:
         matchLabels:
           app.kubernetes.io/name: nats
   - ports:
+    - port: 80
+      protocol: TCP
     - port: 443
       protocol: TCP
-    - port: 6443
+    - port: 8080
       protocol: TCP
     to:
     - ipBlock:
@@ -5089,4 +5056,174 @@ spec:
     matchLabels:
       app: redis-checkout-cluster-bootstrap
   policyTypes:
+  - Egress
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: benchmarkmetrics
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: online-boutique-benchmarkmetrics
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - nodes
+  verbs:
+  - get
+  - list
+- apiGroups:
+  - ""
+  resources:
+  - nodes/proxy
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: online-boutique-benchmarkmetrics
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: online-boutique-benchmarkmetrics
+subjects:
+- kind: ServiceAccount
+  name: benchmarkmetrics
+  namespace: default
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: benchmarkmetrics
+  name: benchmarkmetrics-external
+spec:
+  ports:
+  - name: http
+    port: 80
+    targetPort: http
+  selector:
+    app: benchmarkmetrics
+  type: LoadBalancer
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: benchmarkmetrics
+  name: benchmarkmetrics
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: benchmarkmetrics
+  template:
+    metadata:
+      labels:
+        app: benchmarkmetrics
+    spec:
+      containers:
+      - command:
+        - python
+        - metrics_server.py
+        env:
+        - name: PORT
+          value: "8080"
+        - name: APPLICATION_TYPE
+          value: NATS
+        - name: BENCHMARK_METRICS_TOKEN
+          valueFrom:
+            secretKeyRef:
+              key: BENCHMARK_METRICS_TOKEN
+              name: benchmark-metrics-auth
+              optional: true
+        image: matslo123/benchmarkservice:v0.4.0@sha256:ff16cd2f0e927a1241fc4f7dae72945c365855eb7e04faf311a2e8955b105e93
+        imagePullPolicy: IfNotPresent
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: http
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        name: server
+        ports:
+        - containerPort: 8080
+          name: http
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: http
+          initialDelaySeconds: 2
+          periodSeconds: 5
+        resources:
+          limits:
+            cpu: 200m
+            memory: 128Mi
+          requests:
+            cpu: 25m
+            memory: 48Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+      securityContext:
+        runAsGroup: 1000
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      serviceAccountName: benchmarkmetrics
+      terminationGracePeriodSeconds: 10
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: benchmarkmetrics-access-and-collection
+spec:
+  egress:
+  - ports:
+    - port: 53
+      protocol: UDP
+    - port: 53
+      protocol: TCP
+    to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+  - ports:
+    - port: 7777
+      protocol: TCP
+    to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: nats
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: nats
+  - ports:
+    - port: 443
+      protocol: TCP
+    - port: 6443
+      protocol: TCP
+    to:
+    - ipBlock:
+        cidr: 0.0.0.0/0
+  ingress:
+  - ports:
+    - port: 8080
+      protocol: TCP
+  podSelector:
+    matchLabels:
+      app: benchmarkmetrics
+  policyTypes:
+  - Ingress
   - Egress

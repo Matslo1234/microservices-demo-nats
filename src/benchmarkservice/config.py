@@ -70,22 +70,29 @@ def _boolean(values: Mapping[str, Any], name: str, default: bool) -> bool:
     raise ConfigError(f"{name} must be a boolean")
 
 
-def normalize_target_url(value: str) -> str:
+def normalize_http_url(value: str, name: str) -> str:
     candidate = value.strip()
-    if "://" not in candidate:
-        candidate = "http://" + candidate
+    if not candidate:
+        raise ConfigError(f"{name} is required")
     parsed = urlparse(candidate)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise ConfigError("FRONTEND_ADDR must be an HTTP(S) address")
+        raise ConfigError(f"{name} must be an absolute HTTP(S) URL")
     if parsed.username or parsed.password or parsed.query or parsed.fragment:
-        raise ConfigError("FRONTEND_ADDR must not contain credentials, a query, or a fragment")
+        raise ConfigError(
+            f"{name} must not contain credentials, a query, or a fragment"
+        )
     return candidate.rstrip("/")
+
+
+def normalize_target_url(value: str) -> str:
+    return normalize_http_url(value, "target_url")
 
 
 @dataclass(frozen=True)
 class BenchmarkConfig:
     application_type: str
     target_url: str
+    metrics_url: str | None
     workload: str
     warmup_seconds: int
     duration_seconds: int
@@ -105,12 +112,10 @@ class BenchmarkConfig:
         cls,
         values: Mapping[str, Any],
         application_type: str,
-        target_url: str,
     ) -> "BenchmarkConfig":
         return cls._from_values(
             values,
             application_type,
-            target_url,
             minimum_spawn_rate=0.01,
         )
 
@@ -119,7 +124,6 @@ class BenchmarkConfig:
         cls,
         values: Mapping[str, Any],
         application_type: str,
-        target_url: str,
         minimum_spawn_rate: float,
     ) -> "BenchmarkConfig":
         app_type = application_type.strip().upper()
@@ -129,10 +133,29 @@ class BenchmarkConfig:
         workload = str(values.get("workload", "closed")).strip().lower()
         if workload not in WORKLOADS:
             raise ConfigError("workload must be closed or open")
+        target_url = normalize_target_url(
+            str(values.get("target_url", ""))
+        )
+
+        collect_resources = _boolean(values, "collect_resources", True)
+        collect_nats_metrics = app_type == "NATS" and _boolean(
+            values, "collect_nats_metrics", True
+        )
+        raw_metrics_url = str(values.get("metrics_url") or "")
+        metrics_url = (
+            normalize_http_url(raw_metrics_url, "metrics_url")
+            if raw_metrics_url.strip()
+            else None
+        )
+        if (collect_resources or collect_nats_metrics) and metrics_url is None:
+            raise ConfigError(
+                "metrics_url is required when metrics collection is enabled"
+            )
 
         return cls(
             application_type=app_type,
-            target_url=normalize_target_url(target_url),
+            target_url=target_url,
+            metrics_url=metrics_url,
             workload=workload,
             warmup_seconds=_integer(values, "warmup_seconds", 30, 0, 3600),
             duration_seconds=_integer(values, "duration_seconds", 120, 1, 3600),
@@ -156,9 +179,8 @@ class BenchmarkConfig:
                 values, "resource_sample_interval_seconds", 5.0, 1.0, 60.0
             ),
             seed=_integer(values, "seed", 1, 0, 2_147_483_647),
-            collect_resources=_boolean(values, "collect_resources", True),
-            collect_nats_metrics=app_type == "NATS"
-            and _boolean(values, "collect_nats_metrics", True),
+            collect_resources=collect_resources,
+            collect_nats_metrics=collect_nats_metrics,
         )
 
     @classmethod
@@ -166,7 +188,6 @@ class BenchmarkConfig:
         return cls.from_request(
             values,
             str(values.get("application_type", "")),
-            str(values.get("target_url", "")),
         )
 
     @classmethod
@@ -176,7 +197,6 @@ class BenchmarkConfig:
         return cls._from_values(
             values,
             str(values.get("application_type", "")),
-            str(values.get("target_url", "")),
             minimum_spawn_rate=0.001,
         )
 

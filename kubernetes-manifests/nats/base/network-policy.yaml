@@ -74,6 +74,7 @@ spec:
           operator: In
           values:
           - benchmark-runner
+          - benchmarkmetrics
           - benchmarkservice
     ports:
     - protocol: TCP

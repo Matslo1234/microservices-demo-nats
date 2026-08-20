@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import PurePosixPath
 from typing import Any, Callable
 
-from config import BenchmarkConfig, ConfigError, normalize_target_url
+from config import BenchmarkConfig, ConfigError
 from kubernetes_jobs import JobNotFound
 from shared_store import (
     RecordNotFound,
@@ -58,7 +58,6 @@ class BenchmarkManager:
         store: Any,
         jobs: Any,
         application_type: str,
-        target_url: str,
         clock: Callable[[], float] = time.time,
     ) -> None:
         self.store = store
@@ -66,7 +65,6 @@ class BenchmarkManager:
         self.application_type = application_type.strip().upper()
         if self.application_type not in {"GRPC", "NATS"}:
             raise ConfigError("APPLICATION_TYPE must be GRPC or NATS")
-        self.target_url = normalize_target_url(target_url)
         self.clock = clock
 
     def _acquire_lease(self, run_id: str, duration: int) -> None:
@@ -149,7 +147,7 @@ class BenchmarkManager:
 
     def start(self, values: dict[str, Any]) -> dict[str, Any]:
         config = BenchmarkConfig.from_request(
-            values, self.application_type, self.target_url
+            values, self.application_type
         )
         run_id = new_run_id()
         maximum_seconds = config.run_seconds + 300
@@ -163,6 +161,7 @@ class BenchmarkManager:
                 "state": "submitted",
                 "created_at": utc_now(),
                 "application_type": config.application_type,
+                "target_url": config.target_url,
                 "workload": config.workload,
                 "lease_until": self.clock() + maximum_seconds,
             },

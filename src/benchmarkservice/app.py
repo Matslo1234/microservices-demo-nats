@@ -49,10 +49,14 @@ HTML = r"""<!doctype html>
 </head>
 <body><main>
   <h1>Online Boutique benchmark</h1>
-  <p class="muted">Target: <strong id="application"></strong> at <code id="target"></code>.
-    Runs are shared across every API replica and execute in disposable Kubernetes Jobs.</p>
+  <p class="muted">Application type: <strong id="application"></strong>. Each run targets
+    an explicit application URL and reads metrics from the cluster being tested.</p>
   <section class="card"><h2>New run</h2>
     <form id="run-form"><div class="grid">
+      <label>Target application URL<input name="target_url" type="url"
+        placeholder="https://shop.example.com" required></label>
+      <label>Target metrics URL<input name="metrics_url" type="url"
+        placeholder="https://metrics.example.com/snapshot" required></label>
       <label>Workload<select name="workload"><option value="closed">Closed-loop users</option>
         <option value="open">Open-loop capacity</option></select></label>
       <label>Warm-up (seconds)<input name="warmup_seconds" type="number" min="0" value="30"></label>
@@ -173,13 +177,13 @@ async function advanceRepeatPlan(runs) {
 }
 async function refreshPage() {
   const info=await api("/api/info"); document.querySelector("#application").textContent=info.application_type;
-  document.querySelector("#target").textContent=info.target_url; const runs=await api("/api/runs");
+  const runs=await api("/api/runs");
   activeRun=runs.find(run=>ACTIVE_STATES.has(run.state))?.run_id||null;
   await advanceRepeatPlan(runs); updateControls();
   downloadAllButton.disabled=!runs.some(run=>run.artifacts_available);
   document.querySelector("#runs").innerHTML=runs.length?`<table><thead><tr><th>Run</th>
-    <th>Workload</th><th>Status</th><th>Completed</th><th>p95</th><th></th></tr></thead>
-    <tbody>${runs.map(run=>`<tr><td><code>${esc(run.run_id)}</code></td><td>${esc(run.workload)}</td>
+    <th>Target</th><th>Workload</th><th>Status</th><th>Completed</th><th>p95</th><th></th></tr></thead>
+    <tbody>${runs.map(run=>`<tr><td><code>${esc(run.run_id)}</code></td><td>${esc(run.target_url)}</td><td>${esc(run.workload)}</td>
     <td><span class="pill">${esc(run.state)}</span></td><td>${esc(run.completed_orders)}</td>
     <td>${run.p95_ms==null?"":esc(run.p95_ms)+" ms"}</td><td><button
     onclick="showRun('${esc(run.run_id)}')">View</button></td></tr>`).join("")}</tbody></table>`:
@@ -201,7 +205,8 @@ async function showRun(id) {
 }
 document.querySelector("#run-form").addEventListener("submit",async event=>{
   event.preventDefault(); setMessage("Submitting Job…"); const form=new FormData(event.target);
-  const payload={workload:form.get("workload"),collect_resources:form.has("collect_resources")};
+  const payload={target_url:form.get("target_url"),metrics_url:form.get("metrics_url"),
+    workload:form.get("workload"),collect_resources:form.has("collect_resources")};
   fields.forEach(name=>payload[name]=form.get(name));
   const additionalRuns=Number(form.get("rerun_count")||0),
     delaySeconds=Number(form.get("rerun_delay_seconds")||0);
@@ -312,7 +317,6 @@ class BenchmarkHandler(BaseHTTPRequestHandler):
                     HTTPStatus.OK,
                     {
                         "application_type": self.manager.application_type,
-                        "target_url": self.manager.target_url,
                     },
                 )
             elif parts == ["api", "runs"]:
@@ -382,7 +386,6 @@ def main() -> None:
         store,
         KubernetesJobClient(),
         os.environ.get("APPLICATION_TYPE", ""),
-        os.environ.get("FRONTEND_ADDR", "frontend:80"),
     )
     BenchmarkHandler.manager = manager
     port = int(os.environ.get("PORT", "8080"))
@@ -395,7 +398,6 @@ def main() -> None:
                 "message": "stateless benchmark API listening",
                 "port": port,
                 "application_type": manager.application_type,
-                "target_url": manager.target_url,
             }
         ),
         flush=True,

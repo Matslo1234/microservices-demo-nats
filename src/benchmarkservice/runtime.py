@@ -5,8 +5,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
-import ssl
 import threading
 import time
 from pathlib import Path
@@ -160,154 +158,32 @@ class ArtifactRecorder:
 RECORDER = ArtifactRecorder()
 
 
-DEFAULT_SERVICES = (
-    "storefrontprojectionservice",
-    "productcatalogservice",
-    "recommendationservice",
-    "checkoutservice",
-    "currencyservice",
-    "shippingservice",
-    "paymentservice",
-    "emailservice",
-    "cartservice",
-    "adservice",
-    "redis-cart",
-    "frontend",
-)
+class RemoteMetricsClient:
+    def __init__(self, url: str) -> None:
+        self.url = url
+        self.token = os.environ.get("BENCHMARK_METRICS_TOKEN", "")
 
-
-def service_for_pod(namespace: str, pod_name: str) -> str | None:
-    if namespace == "nats":
-        if re.fullmatch(r"nats-[0-9]+", pod_name):
-            return "nats"
-        return None
-    if namespace != "default" or pod_name.startswith("benchmarkservice-"):
-        return None
-    for service in DEFAULT_SERVICES:
-        if pod_name == service or pod_name.startswith(service + "-"):
-            if (
-                service == "storefrontprojectionservice"
-                and CONFIG.application_type == "GRPC"
-            ):
-                return None
-            return service
-    return None
-
-
-class KubernetesSummaryClient:
-    def __init__(self) -> None:
-        host = os.environ.get("KUBERNETES_SERVICE_HOST")
-        port = os.environ.get("KUBERNETES_SERVICE_PORT_HTTPS", "443")
-        if not host:
-            raise RuntimeError("Kubernetes service environment is unavailable")
-        self.base_url = f"https://{host}:{port}"
-        token_path = Path(
-            "/var/run/secrets/kubernetes.io/serviceaccount/token"
-        )
-        ca_path = Path("/var/run/secrets/kubernetes.io/serviceaccount/ca.crt")
-        self.token = token_path.read_text(encoding="utf-8").strip()
-        self.context = ssl.create_default_context(cafile=str(ca_path))
-        self.nodes = self._node_names()
-
-    def _get(self, path: str) -> dict[str, Any]:
-        request = Request(
-            self.base_url + path,
-            headers={"Authorization": f"Bearer {self.token}"},
-        )
-        with urlopen(request, timeout=3, context=self.context) as response:
+    def sample(self) -> dict[str, Any]:
+        headers = {"Accept": "application/json"}
+        if self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
+        request = Request(self.url, headers=headers)
+        with urlopen(request, timeout=5) as response:
             value = json.load(response)
         if not isinstance(value, dict):
-            raise RuntimeError(f"Kubernetes endpoint {path} returned non-object JSON")
-        return value
-
-    def _node_names(self) -> list[str]:
-        value = self._get("/api/v1/nodes")
-        return [
-            str(item.get("metadata", {}).get("name"))
-            for item in value.get("items", [])
-            if item.get("metadata", {}).get("name")
-        ]
-
-    def sample(self) -> dict[str, dict[str, Any]]:
-        pods: dict[str, dict[str, Any]] = {}
-        for node in self.nodes:
-            summary = self._get(f"/api/v1/nodes/{node}/proxy/stats/summary")
-            for pod in summary.get("pods", []):
-                reference = pod.get("podRef", {})
-                namespace = str(reference.get("namespace", ""))
-                name = str(reference.get("name", ""))
-                service = service_for_pod(namespace, name)
-                if service is None:
-                    continue
-                network = pod.get("network", {})
-                pods[f"{namespace}/{name}"] = {
-                    "service": service,
-                    "node": node,
-                    "cpu_usage_core_nanoseconds": int(
-                        pod.get("cpu", {}).get("usageCoreNanoSeconds", 0)
-                    ),
-                    "memory_working_set_bytes": int(
-                        pod.get("memory", {}).get("workingSetBytes", 0)
-                    ),
-                    "network_rx_bytes": int(network.get("rxBytes", 0)),
-                    "network_tx_bytes": int(network.get("txBytes", 0)),
-                }
-        return pods
-
-
-PROMETHEUS_LINE = re.compile(
-    r"^(?P<name>[a-zA-Z_:][a-zA-Z0-9_:]*)(?:\{(?P<labels>.*)\})?\s+"
-    r"(?P<value>[-+]?(?:[0-9]*\.?[0-9]+(?:[eE][-+]?[0-9]+)?|Inf|NaN))$"
-)
-PROMETHEUS_LABEL = re.compile(
-    r'(?P<name>[a-zA-Z_][a-zA-Z0-9_]*)="(?P<value>(?:\\.|[^"])*)"(?:,|$)'
-)
-NATS_METRICS = {
-    "jetstream_consumer_num_pending",
-    "jetstream_consumer_num_ack_pending",
-    "jetstream_consumer_num_redelivered",
-    "gnatsd_varz_jetstream_stats_storage",
-}
-
-
-def parse_labels(raw: str) -> dict[str, str]:
-    labels: dict[str, str] = {}
-    for match in PROMETHEUS_LABEL.finditer(raw):
-        value = match.group("value")
-        value = (
-            value.replace(r"\\", "\\")
-            .replace(r"\"", '"')
-            .replace(r"\n", "\n")
-        )
-        labels[match.group("name")] = value
-    return labels
-
-
-def scrape_prometheus(url: str) -> list[dict[str, Any]]:
-    request = Request(url, headers={"Accept": "text/plain"})
-    with urlopen(request, timeout=3) as response:
-        body = response.read().decode("utf-8", errors="replace")
-    metrics: list[dict[str, Any]] = []
-    for line in body.splitlines():
-        if not line or line.startswith("#"):
-            continue
-        match = PROMETHEUS_LINE.match(line)
-        if match is None or match.group("name") not in NATS_METRICS:
-            continue
-        value = match.group("value")
-        try:
-            number = float(value)
-        except ValueError:
-            continue
-        metrics.append(
-            {
-                "name": match.group("name"),
-                "labels": parse_labels(match.group("labels") or ""),
-                "value": number,
-                "endpoint": url,
-            }
-        )
-    return metrics
+            raise RuntimeError("metrics endpoint returned non-object JSON")
+        pods = value.get("pods", {})
+        nats_metrics = value.get("nats_metrics", [])
+        errors = value.get("errors", [])
+        if not isinstance(pods, dict):
+            raise RuntimeError("metrics endpoint returned invalid pods")
+        if not isinstance(nats_metrics, list) or not isinstance(errors, list):
+            raise RuntimeError("metrics endpoint returned invalid metric lists")
+        return {
+            "pods": pods,
+            "nats_metrics": nats_metrics,
+            "errors": [str(error) for error in errors],
+        }
 
 
 class ResourceSampler:
@@ -338,24 +214,8 @@ class ResourceSampler:
         self._greenlet = None
 
     def _run(self) -> None:
-        kubernetes: KubernetesSummaryClient | None = None
-        kubernetes_error: str | None = None
-        if CONFIG.collect_resources:
-            try:
-                kubernetes = KubernetesSummaryClient()
-            except Exception as exc:
-                kubernetes_error = str(exc)
-        urls = [
-            value.strip()
-            for value in os.environ.get(
-                "NATS_METRICS_URLS",
-                ",".join(
-                    f"http://nats-{index}.nats-headless.nats.svc.cluster.local:7777/metrics"
-                    for index in range(3)
-                ),
-            ).split(",")
-            if value.strip()
-        ]
+        assert CONFIG.metrics_url is not None
+        metrics = RemoteMetricsClient(CONFIG.metrics_url)
 
         while True:
             record: dict[str, Any] = {
@@ -366,20 +226,15 @@ class ResourceSampler:
                 "nats_metrics": [],
                 "errors": [],
             }
-            if kubernetes is not None:
-                try:
-                    record["pods"] = kubernetes.sample()
-                except Exception as exc:
-                    record["errors"].append(f"kubernetes: {exc}")
-            elif kubernetes_error:
-                record["errors"].append(f"kubernetes: {kubernetes_error}")
-
-            if CONFIG.collect_nats_metrics:
-                for url in urls:
-                    try:
-                        record["nats_metrics"].extend(scrape_prometheus(url))
-                    except Exception as exc:
-                        record["errors"].append(f"{url}: {exc}")
+            try:
+                snapshot = metrics.sample()
+                if CONFIG.collect_resources:
+                    record["pods"] = snapshot["pods"]
+                if CONFIG.collect_nats_metrics:
+                    record["nats_metrics"] = snapshot["nats_metrics"]
+                record["errors"].extend(snapshot["errors"])
+            except Exception as exc:
+                record["errors"].append(f"metrics endpoint: {exc}")
             if self._target is not None:
                 self._target.write(json.dumps(record, sort_keys=True) + "\n")
                 self._target.flush()

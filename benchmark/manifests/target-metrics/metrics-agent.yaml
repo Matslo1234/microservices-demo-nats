@@ -1,0 +1,160 @@
+# Copyright 2026 Google LLC
+# Licensed under the Apache License, Version 2.0 (the "License");
+
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: benchmarkmetrics
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: online-boutique-benchmarkmetrics
+rules:
+- apiGroups: [""]
+  resources: ["nodes"]
+  verbs: ["get", "list"]
+- apiGroups: [""]
+  resources: ["nodes/proxy"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: online-boutique-benchmarkmetrics
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: online-boutique-benchmarkmetrics
+subjects:
+- kind: ServiceAccount
+  name: benchmarkmetrics
+  namespace: default
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: benchmarkmetrics
+  labels:
+    app: benchmarkmetrics
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: benchmarkmetrics
+  template:
+    metadata:
+      labels:
+        app: benchmarkmetrics
+    spec:
+      serviceAccountName: benchmarkmetrics
+      terminationGracePeriodSeconds: 10
+      securityContext:
+        runAsGroup: 1000
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: server
+        image: benchmarkservice
+        imagePullPolicy: IfNotPresent
+        command: ["python", "metrics_server.py"]
+        env:
+        - name: PORT
+          value: "8080"
+        - name: APPLICATION_TYPE
+          value: "NATS"
+        - name: BENCHMARK_METRICS_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: benchmark-metrics-auth
+              key: BENCHMARK_METRICS_TOKEN
+              optional: true
+        ports:
+        - name: http
+          containerPort: 8080
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: http
+          initialDelaySeconds: 2
+          periodSeconds: 5
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: http
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        resources:
+          requests:
+            cpu: 25m
+            memory: 48Mi
+          limits:
+            cpu: 200m
+            memory: 128Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+          readOnlyRootFilesystem: true
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: benchmarkmetrics-external
+  labels:
+    app: benchmarkmetrics
+spec:
+  type: LoadBalancer
+  selector:
+    app: benchmarkmetrics
+  ports:
+  - name: http
+    port: 80
+    targetPort: http
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: benchmarkmetrics-access-and-collection
+spec:
+  podSelector:
+    matchLabels:
+      app: benchmarkmetrics
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+  - ports:
+    - protocol: TCP
+      port: 8080
+  egress:
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: nats
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: nats
+    ports:
+    - protocol: TCP
+      port: 7777
+  - to:
+    - ipBlock:
+        cidr: 0.0.0.0/0
+    ports:
+    - protocol: TCP
+      port: 443
+    - protocol: TCP
+      port: 6443
