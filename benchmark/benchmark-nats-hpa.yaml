@@ -2053,6 +2053,8 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
   labels:
     app: frontend
   name: frontend-external
@@ -3249,7 +3251,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-paymentservice
-        image: matslo123/paymentservice:v0.4.0@sha256:9f5487e545b7b137e8d48b282894b247070e35766a88797723aff670e95f397f
+        image: matslo123/paymentservice:v0.4.0@sha256:85473a6e3663fdfc9d706812ac84bb5cdbeca9915b1856a3f74e3f62186a020d
         livenessProbe:
           failureThreshold: 6
           httpGet:
@@ -3607,7 +3609,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-shippingservice
-        image: matslo123/shippingservice:v0.4.0@sha256:31edd6da1380d281f3b8c009191ada7bf230f66c3384fbd976701a4cb23e0453
+        image: matslo123/shippingservice:v0.4.0@sha256:fc5433ddfa1b8463e6b253300f790ab66dc31991813cdd8c91e3aabd0008bc73
         livenessProbe:
           failureThreshold: 6
           httpGet:
@@ -6078,6 +6080,8 @@ subjects:
 apiVersion: v1
 kind: Service
 metadata:
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
   labels:
     app: benchmarkmetrics
   name: benchmarkmetrics-external

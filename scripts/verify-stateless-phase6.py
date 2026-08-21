@@ -265,6 +265,7 @@ def verify_release_manifests() -> None:
             "benchmark-nats-single-replica.yaml",
             "benchmark-nats-hpa.yaml",
             "benchmark-nats-multiple-replicas.yaml",
+            "benchmark-nats-with-delay.yaml",
         )
     )
     generated = (full, no_load, *benchmarks)
@@ -368,6 +369,11 @@ def verify_release_manifests() -> None:
                 )
         else:
             require(content, "kind: HorizontalPodAutoscaler")
+        if path.name == "benchmark-nats-with-delay.yaml":
+            payment = document(content, "Deployment", "paymentservice")
+            shipping = document(content, "Deployment", "shippingservice")
+            require(payment, "name: PROCESSING_TIME_MS", 'value: "500"')
+            require(shipping, "name: PROCESSING_TIME_MS", 'value: "200"')
         if path.name == "benchmark-nats-hpa.yaml":
             lag_scaled = {
                 "adservice",
@@ -498,7 +504,18 @@ def verify_release_manifests() -> None:
         "kv add BENCHMARK_RUNS",
         "object add BENCHMARK_ARTIFACTS",
         "name: benchmark-runner",
+        "name: benchmarkmetrics-external",
         "kind: PodDisruptionBudget",
+    )
+    grpc_metrics = document(original, "Deployment", "benchmarkmetrics")
+    require(
+        grpc_metrics,
+        "python",
+        "metrics_server.py",
+        "name: APPLICATION_TYPE",
+        'value: "GRPC"',
+        "name: BENCHMARK_METRICS_TOKEN",
+        "name: benchmark-metrics-auth",
     )
     require(
         grpc_controller,

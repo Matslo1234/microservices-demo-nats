@@ -28,6 +28,20 @@ const COMMAND_PULL_REFRESH_MS = 500;
 const COMMAND_RESTART_DELAY_MS = 1000;
 const TOKEN_BATCH_SIZE = 256;
 const TOKEN_BATCH_DELAY_MS = 20;
+const PAYMENT_AUTHORIZE_SUBJECT = 'boutique.cmd.payment.authorize.v1';
+
+function processingTimeMs(environment = process.env) {
+  const value = environment.PROCESSING_TIME_MS;
+  if (typeof value !== 'string' || value.trim() === '') return 0;
+  const milliseconds = Number(value);
+  return Number.isFinite(milliseconds) && milliseconds > 0 ? milliseconds : 0;
+}
+
+function waitForProcessing(environment = process.env) {
+  const milliseconds = processingTimeMs(environment);
+  if (milliseconds === 0) return Promise.resolve();
+  return new Promise(resolve => setTimeout(resolve, milliseconds));
+}
 
 function stableID(...parts) {
   const digest = crypto.createHash('sha256').update(parts.join('\0')).digest();
@@ -364,7 +378,7 @@ function processCommand(keyring, contracts, subject, envelope) {
   }
   const commandTime = occurredAtMilliseconds(envelope);
   const mode = process.env.PAYMENT_FAILURE_MODE || '';
-  if (subject === 'boutique.cmd.payment.authorize.v1') {
+  if (subject === PAYMENT_AUTHORIZE_SUBJECT) {
     const command = contracts.Authorize.decode(envelope.data.value);
     let verifiedToken;
     try {
@@ -462,22 +476,25 @@ async function processCommandBatch(messages, keyring, contracts, js) {
     batch_size: commands.length,
   }, 'NATS command batch received');
 
-  for (const command of commands) {
-    if (command.error) continue;
+  await Promise.all(commands.map(async command => {
+    if (command.error) return;
     try {
-      withConsumerSpan(command.envelope, {
+      await withConsumerSpan(command.envelope, {
         subject: command.message.subject,
         kind: 'command',
         messageId: command.messageId,
         correlationId: command.correlationId,
-      }, () => {
+      }, async () => {
         injectEnvelope(command.envelope);
         command.result = processCommand(keyring, contracts, command.message.subject, command.envelope);
+        if (command.message.subject === PAYMENT_AUTHORIZE_SUBJECT) {
+          await waitForProcessing();
+        }
       });
     } catch (commandError) {
       command.error = commandError;
     }
-  }
+  }));
 
   await Promise.all(commands.map(async command => {
     if (!command.error) {
@@ -676,5 +693,6 @@ module.exports = {
   startPaymentNATS, stableID, deriveResultMessageID, deriveSigningKey, createSigningKeyring,
   loadSigningKeyring, validateCard, tokenize, verifyPaymentToken, authorizationReference,
   verifyAuthorization, occurredAtMilliseconds, loadContracts,
+  processingTimeMs, waitForProcessing,
   processTokenBatch, processCommand, processCommandBatch, runCommandConsumer, superviseCommandConsumer,
 };

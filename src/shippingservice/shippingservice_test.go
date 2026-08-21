@@ -4,6 +4,7 @@
 package main
 
 import (
+	"context"
 	"regexp"
 	"testing"
 	"time"
@@ -22,6 +23,37 @@ const (
 	testShippingSecret      = "shipping-provider-secret-aaaaaaaaaaaaaaaaaaaaaaaa"
 	otherTestShippingSecret = "shipping-provider-secret-bbbbbbbbbbbbbbbbbbbbbbbb"
 )
+
+func TestShippingProcessingTime(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  time.Duration
+	}{
+		{name: "unset", value: "", want: 0},
+		{name: "not a number", value: "invalid", want: 0},
+		{name: "zero", value: "0", want: 0},
+		{name: "negative", value: "-10", want: 0},
+		{name: "infinite", value: "Inf", want: 0},
+		{name: "milliseconds", value: "12", want: 12 * time.Millisecond},
+		{name: "fractional milliseconds", value: "12.5", want: 12*time.Millisecond + 500*time.Microsecond},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := shippingProcessingTime(test.value); got != test.want {
+				t.Fatalf("shippingProcessingTime(%q) = %s, want %s", test.value, got, test.want)
+			}
+		})
+	}
+
+	startedAt := time.Now()
+	if err := waitForProcessing(context.Background(), 10*time.Millisecond); err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(startedAt); elapsed < 8*time.Millisecond {
+		t.Fatalf("configured shipping processing time was not observed: waited %s", elapsed)
+	}
+}
 
 func shippingTestEnvelope(t *testing.T, messageID, aggregateID string, version uint64, occurredAt time.Time, payload proto.Message) *commonv1.MessageEnvelope {
 	t.Helper()

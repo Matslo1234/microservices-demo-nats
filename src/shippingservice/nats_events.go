@@ -7,8 +7,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -39,6 +41,7 @@ type shippingEventWorker struct {
 	commandSubscription *nats.Subscription
 	provider            *shippingProvider
 	failureMode         string
+	processingTime      time.Duration
 	publishTimeout      time.Duration
 	stop                chan struct{}
 	ready               atomic.Bool
@@ -80,6 +83,7 @@ func startShippingEvents() (*shippingEventWorker, error) {
 	worker := &shippingEventWorker{
 		publishTimeout: publishTimeout,
 		failureMode:    os.Getenv("SHIPPING_FAILURE_MODE"),
+		processingTime: shippingProcessingTime(os.Getenv("PROCESSING_TIME_MS")),
 		stop:           make(chan struct{}),
 	}
 	worker.provider, err = newShippingProvider(os.Getenv("SHIPPING_PROVIDER_SECRET"))
@@ -427,4 +431,13 @@ func shippingInt(name string, fallback int) (int, error) {
 		return parsed, nil
 	}
 	return fallback, nil
+}
+
+func shippingProcessingTime(value string) time.Duration {
+	milliseconds, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
+	if err != nil || math.IsNaN(milliseconds) || math.IsInf(milliseconds, 0) ||
+		milliseconds <= 0 || milliseconds > float64(math.MaxInt64)/float64(time.Millisecond) {
+		return 0
+	}
+	return time.Duration(milliseconds * float64(time.Millisecond))
 }

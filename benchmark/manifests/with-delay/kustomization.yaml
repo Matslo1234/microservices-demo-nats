@@ -1,0 +1,44 @@
+# Copyright 2026 Google LLC
+# Licensed under the Apache License, Version 2.0 (the "License");
+
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- ../../../kubernetes-manifests
+patches:
+- target:
+    group: apps
+    version: v1
+    kind: Deployment
+    name: paymentservice
+  patch: |-
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: paymentservice
+    spec:
+      template:
+        spec:
+          containers:
+          - name: server
+            env:
+            - name: PROCESSING_TIME_MS
+              value: "500"
+- target:
+    group: apps
+    version: v1
+    kind: Deployment
+    name: shippingservice
+  patch: |-
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: shippingservice
+    spec:
+      template:
+        spec:
+          containers:
+          - name: server
+            env:
+            - name: PROCESSING_TIME_MS
+              value: "200"

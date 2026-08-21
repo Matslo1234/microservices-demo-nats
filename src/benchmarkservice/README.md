@@ -64,8 +64,9 @@ the steady interval, submission stops for the configured drain period.
 
 ## Running outside the target cluster
 
-The NATS benchmark bundles deploy `benchmarkmetrics`, a small metrics gateway,
-and expose it through the `benchmarkmetrics-external` LoadBalancer Service.
+Every checked-in benchmark bundle deploys `benchmarkmetrics`, a small metrics
+gateway, and exposes it through the `benchmarkmetrics-external` LoadBalancer
+Service.
 It reads kubelet summaries and local NATS exporter endpoints in the tested
 cluster. Locust only performs HTTP requests to the supplied frontend and
 metrics URLs.
@@ -95,7 +96,8 @@ arguments shown above. The standalone runner starts multiple synchronized
 Locust processes automatically above 100 open-loop orders/s or 1,000
 closed-loop users.
 
-For the original GRPC application, deploy its metrics gateway separately:
+When the original GRPC application is deployed separately instead of through
+`benchmark/benchmark-original-app.yaml`, deploy its metrics gateway with:
 
 ```sh
 kubectl apply -k benchmark/manifests/target-metrics-grpc

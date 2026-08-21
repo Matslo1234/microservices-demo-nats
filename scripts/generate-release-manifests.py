@@ -48,10 +48,10 @@ DEFAULT_IMAGE_DIGESTS = {
     "frontend": "9fa9292420bea28f676fa7f237ed22d9949629f1e2c7a9dbf5baf372aaa5914f",
     "loadgenerator": "c66a188ecf8bf7507bd3982a5fa50ae3e9497f3239248dd48b275fc2aee0adb3",
     "messageoperationsservice": "d5661b18a6adf5c4389111f35e796e026910499cad35db1a80d5f89227ffea75",
-    "paymentservice": "9f5487e545b7b137e8d48b282894b247070e35766a88797723aff670e95f397f",
+    "paymentservice": "85473a6e3663fdfc9d706812ac84bb5cdbeca9915b1856a3f74e3f62186a020d",
     "productcatalogservice": "9721c7972d03c4c4b035c872f3b879c856f3016989f317a4b965878f547ecc41",
     "recommendationservice": "2f10eb25d40828c218dea63ae1ad323579d6204e5c49ace71c61b2bc84f9eabf",
-    "shippingservice": "31edd6da1380d281f3b8c009191ada7bf230f66c3384fbd976701a4cb23e0453",
+    "shippingservice": "fc5433ddfa1b8463e6b253300f790ab66dc31991813cdd8c91e3aabd0008bc73",
     "storefrontprojectionservice": "ca046da94f8c8da01622179dabb5cb24d1d7d9719b27cbb73ab383575335a469",
 }
 
@@ -136,6 +136,10 @@ def main() -> None:
         "benchmark/manifests/single-replica",
         allow_external_resources=True,
     )
+    delayed_application = render(
+        "benchmark/manifests/with-delay",
+        allow_external_resources=True,
+    )
     single_replica_benchmark = (
         nats
         + "---\n"
@@ -144,6 +148,9 @@ def main() -> None:
         + target_metrics
     )
     benchmark = nats + "---\n" + application + "---\n" + target_metrics
+    delayed_benchmark = (
+        nats + "---\n" + delayed_application + "---\n" + target_metrics
+    )
     hpa_benchmark = (
         nats
         + "---\n"
@@ -186,6 +193,17 @@ def main() -> None:
                 "resource samples.",
             ),
             benchmark,
+        ),
+        "benchmark-nats-with-delay.yaml": (
+            "Self-contained stateless NATS benchmark environment with "
+            "simulated provider latency.",
+            (
+                "This uses the multiple-replica application topology and adds 500 ms of",
+                "payment authorization latency plus 200 ms of shipment-creation latency.",
+                "Run Locust outside this cluster and use the external benchmarkmetrics URL",
+                "to retain target-cluster resource samples.",
+            ),
+            delayed_benchmark,
         ),
     }
     for filename, (

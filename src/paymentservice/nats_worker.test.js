@@ -5,10 +5,22 @@ const assert = require('assert');
 const {
   createSigningKeyring, deriveResultMessageID, tokenize, verifyPaymentToken,
   loadSigningKeyring, processTokenBatch, loadContracts, processCommand, runCommandConsumer,
-  superviseCommandConsumer,
+  superviseCommandConsumer, processingTimeMs, waitForProcessing,
 } = require('./nats_worker');
 
 async function main() {
+  assert.equal(processingTimeMs({}), 0);
+  assert.equal(processingTimeMs({PROCESSING_TIME_MS: ''}), 0);
+  assert.equal(processingTimeMs({PROCESSING_TIME_MS: 'not-a-number'}), 0);
+  assert.equal(processingTimeMs({PROCESSING_TIME_MS: '0'}), 0);
+  assert.equal(processingTimeMs({PROCESSING_TIME_MS: '-10'}), 0);
+  assert.equal(processingTimeMs({PROCESSING_TIME_MS: 'Infinity'}), 0);
+  assert.equal(processingTimeMs({PROCESSING_TIME_MS: '12.5'}), 12.5);
+  const processingStartedAt = process.hrtime.bigint();
+  await waitForProcessing({PROCESSING_TIME_MS: '10'});
+  const processingElapsedMs = Number(process.hrtime.bigint() - processingStartedAt) / 1e6;
+  assert(processingElapsedMs >= 8, 'configured payment processing time was not observed');
+
   const sharedCredential = 's0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
   const replicaAKeyring = createSigningKeyring('primary-v1', sharedCredential);
   const replicaBKeyring = createSigningKeyring('primary-v1', sharedCredential);

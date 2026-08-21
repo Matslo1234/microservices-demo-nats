@@ -24,9 +24,10 @@ import (
 )
 
 const (
-	shippingOrderQuoteSlot     = "shipping.order-quote"
-	shippingCreateShipmentSlot = "shipping.create-shipment"
-	shippingCancelShipmentSlot = "shipping.cancel-shipment"
+	shippingOrderQuoteSlot        = "shipping.order-quote"
+	shippingCreateShipmentSlot    = "shipping.create-shipment"
+	shippingCancelShipmentSlot    = "shipping.cancel-shipment"
+	shippingCreateShipmentSubject = "boutique.cmd.shipping.create-shipment.v1"
 )
 
 type shippingOutcome struct {
@@ -86,6 +87,11 @@ func (worker *shippingEventWorker) handleCommandWithContext(ctx context.Context,
 	if err != nil {
 		return err
 	}
+	if message.Subject == shippingCreateShipmentSubject {
+		if err := waitForProcessing(ctx, worker.processingTime); err != nil {
+			return err
+		}
+	}
 	return worker.publishOutcome(ctx, outcome)
 }
 
@@ -120,6 +126,12 @@ func (worker *shippingEventWorker) handleCommandBatch(messages []*nats.Msg) []er
 		publish.Add(1)
 		go func(index int) {
 			defer publish.Done()
+			if messages[index].Subject == shippingCreateShipmentSubject {
+				if err := waitForProcessing(context.Background(), worker.processingTime); err != nil {
+					results[index] = err
+					return
+				}
+			}
 			results[index] = worker.publishOutcome(context.Background(), outcomes[index])
 		}(index)
 	}
@@ -194,7 +206,7 @@ func buildShippingOutcome(
 				ExpiresAt: timestamppb.New(inputTime.Add(15 * time.Minute)),
 			},
 		)
-	case "boutique.cmd.shipping.create-shipment.v1":
+	case shippingCreateShipmentSubject:
 		command := &commandsv1.ShippingCreateShipmentCommand{}
 		if err := envelope.Data.UnmarshalTo(command); err != nil {
 			return shippingOutcome{}, err
@@ -279,6 +291,20 @@ func buildShippingOutcome(
 		)
 	default:
 		return shippingOutcome{}, fmt.Errorf("unsupported shipping command %s", subject)
+	}
+}
+
+func waitForProcessing(ctx context.Context, duration time.Duration) error {
+	if duration <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(duration)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
 	}
 }
 
