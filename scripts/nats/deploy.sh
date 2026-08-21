@@ -30,6 +30,7 @@ kubectl --namespace nats rollout status deployment/nats-advisory-watcher --timeo
 application_deployments=(
   benchmarkservice
   frontend
+  messageoperationsservice
   storefrontprojectionservice
   productcatalogservice
   currencyservice

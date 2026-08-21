@@ -31,6 +31,7 @@ SERVICES = (
     "emailservice",
     "frontend",
     "loadgenerator",
+    "messageoperationsservice",
     "paymentservice",
     "productcatalogservice",
     "recommendationservice",
@@ -38,15 +39,16 @@ SERVICES = (
     "storefrontprojectionservice",
 )
 DEFAULT_IMAGE_DIGESTS = {
-    "adservice": "ce4f217a588fed1d74f6a710e9c9ff3b3d9045f8219efe0aebb758eb2a831413",
-    "benchmarkservice": "ff16cd2f0e927a1241fc4f7dae72945c365855eb7e04faf311a2e8955b105e93",
+    "adservice": "016ac2ddf41f7ac7b7fcf0ac04cfa4e59b169a60fe14bd3582c041594b5010d8",
+    "benchmarkservice": "f746fa15e19e2c6b32ca482f97c14bc48f57d7486350ac8c93821b19cddafff5",
     "cartservice": "751cbd6b8fb98199757f722457853775304e51d20a57eae331cb60825dd524e2",
     "checkoutservice": "949a6a98bd4b24156e39fc60bf0bc1fdd4f9a5d7e381b1eef0ff7ed11c7e74fb",
-    "currencyservice": "bcf569c32033a09c30fe9d7c5c6751c68ba43eb8f477dc1d069e1281b7c6100b",
+    "currencyservice": "e83f05d7d0dcfd22b8bbd9e8bb79630e740085bc4118229e4833f34988a647b3",
     "emailservice": "bd6ae1930f8cd96a201830910f513595e1c4c47fec228a9a9c75241fab84698d",
     "frontend": "9fa9292420bea28f676fa7f237ed22d9949629f1e2c7a9dbf5baf372aaa5914f",
     "loadgenerator": "c66a188ecf8bf7507bd3982a5fa50ae3e9497f3239248dd48b275fc2aee0adb3",
-    "paymentservice": "f5d0b3aeb1b032da3a5af9b64afc3a2688308d0818207735d18b51aad9807648",
+    "messageoperationsservice": "d5661b18a6adf5c4389111f35e796e026910499cad35db1a80d5f89227ffea75",
+    "paymentservice": "9f5487e545b7b137e8d48b282894b247070e35766a88797723aff670e95f397f",
     "productcatalogservice": "9721c7972d03c4c4b035c872f3b879c856f3016989f317a4b965878f547ecc41",
     "recommendationservice": "2f10eb25d40828c218dea63ae1ad323579d6204e5c49ace71c61b2bc84f9eabf",
     "shippingservice": "31edd6da1380d281f3b8c009191ada7bf230f66c3384fbd976701a4cb23e0453",
@@ -74,7 +76,9 @@ def qualify_images(content: str) -> str:
     for service in SERVICES:
         reference = f"{namespace}/{service}:{tag}"
         if namespace == "matslo123" and tag == "v0.4.0":
-            reference += f"@sha256:{DEFAULT_IMAGE_DIGESTS[service]}"
+            digest = DEFAULT_IMAGE_DIGESTS.get(service)
+            if digest:
+                reference += f"@sha256:{digest}"
         content = re.sub(
             rf"(?m)^(\s*image:\s*){re.escape(service)}\s*$",
             rf"\g<1>{reference}",

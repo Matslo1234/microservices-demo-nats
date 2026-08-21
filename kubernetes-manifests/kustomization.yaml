@@ -23,6 +23,7 @@ resources:
  - currencyservice.yaml
  - emailservice.yaml
  - frontend.yaml
+ - messageoperationsservice.yaml
 # - loadgenerator.yaml # During development, the loadgenerator module inside skaffold.yaml will be used.
  - paymentservice.yaml
  - productcatalogservice.yaml
@@ -37,7 +38,7 @@ patches:
     group: apps
     version: v1
     kind: Deployment
-    name: adservice|benchmarkservice|cartservice|checkoutservice|currencyservice|emailservice|frontend|paymentservice|productcatalogservice|recommendationservice|shippingservice|storefrontprojectionservice
+    name: adservice|benchmarkservice|cartservice|checkoutservice|currencyservice|emailservice|frontend|messageoperationsservice|paymentservice|productcatalogservice|recommendationservice|shippingservice|storefrontprojectionservice
   patch: |-
     - op: add
       path: /spec/replicas

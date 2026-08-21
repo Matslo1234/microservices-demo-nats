@@ -107,10 +107,31 @@ require(
     "port: 4222",
     "name: cart-to-redis",
     "name: loadgenerator-to-frontend",
+    "name: messageoperationsservice-access",
+)
+
+messageops_path, messageops = read(
+    "kubernetes-manifests", "messageoperationsservice.yaml"
+)
+require(
+    messageops_path,
+    messageops,
+    "name: messageoperationsservice",
+    "nats-credentials-messageoperationsservice",
+    "messageoperations-admin-api",
+    "path: /healthz",
+    "path: /readyz",
+    "prometheus.io/scrape",
 )
 
 nats_policy_path, nats_policy = read("kubernetes-manifests", "nats", "base", "network-policy.yaml")
-require(nats_policy_path, nats_policy, "operator: In", "storefrontprojectionservice")
+require(
+    nats_policy_path,
+    nats_policy,
+    "operator: In",
+    "storefrontprojectionservice",
+    "messageoperationsservice",
+)
 forbid(nats_policy_path, nats_policy, "shoppingassistantservice", "packagingservice")
 
 nats_config_path, nats_config = read("kubernetes-manifests", "nats", "base", "config.yaml")
@@ -121,6 +142,20 @@ require(
     '"boutique.cmd.cart.add-item.v1"',
     '"boutique.cmd.order.submit.v1"',
     '"boutique.evt.order.completed.v1"',
+    'user: "messageoperationsservice"',
+    '"boutique.dlq.>"',
+    '"$KV.DLQ_CASES.>"',
+)
+
+bootstrap_path, bootstrap = read(
+    "kubernetes-manifests", "nats", "base", "bootstrap.yaml"
+)
+require(
+    bootstrap_path,
+    bootstrap,
+    "BOUTIQUE_ADVISORIES.json",
+    '"$JS.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES.>"',
+    "ensure_kv DLQ_CASES",
 )
 
 setup_path, setup = read("kubernetes-manifests", "nats", "base", "setup.yaml")
@@ -149,6 +184,18 @@ require(
     "NatsJetStreamAckBacklog",
     "BoutiqueDependencyUnavailable",
     "boutique_dependency_ready",
+)
+
+prometheus_path, prometheus = read(
+    "kubernetes-manifests", "observability", "prometheus.yaml"
+)
+require(
+    prometheus_path,
+    prometheus,
+    "BoutiqueMessageDeadLettered",
+    "BoutiqueDLQTransferFailing",
+    "boutique_dlq_cases",
+    "boutique_dlq_transfer_errors_total",
 )
 
 load_path, loadgen = read("src", "loadgenerator", "locustfile.py")

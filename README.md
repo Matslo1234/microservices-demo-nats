@@ -38,6 +38,9 @@ flowchart LR
     NATS --> Payment
     NATS --> Email[email]
     NATS --> Projection
+    NATS -->|max-delivery advisory| MessageOps[message operations]
+    MessageOps -->|restricted DLQ / replay| NATS
+    Admin[Website administrator] -->|authenticated admin page| MessageOps
     Cart -->|Redis protocol| CartRedis[(redis-cart)]
     Checkout -->|Redis protocol| CheckoutRedis[(redis-checkout)]
 
@@ -67,6 +70,7 @@ flowchart LR
 | [recommendationservice](src/recommendationservice) | Python | Product recommendations. |
 | [adservice](src/adservice) | Java | Contextual advertisements. |
 | [storefrontprojectionservice](src/storefrontprojectionservice) | Go | NATS-backed storefront read model. |
+| [messageoperationsservice](src/messageoperationsservice) | Go | Restricted dead-letter transfer, alert metrics, administrator review, and replay. |
 
 ## Quickstart
 

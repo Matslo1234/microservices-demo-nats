@@ -49,7 +49,7 @@ data:
     cleanup
 
     nats_admin account info >/dev/null
-    for stream in BOUTIQUE_COMMANDS BOUTIQUE_EVENTS BOUTIQUE_DLQ; do
+    for stream in BOUTIQUE_COMMANDS BOUTIQUE_EVENTS BOUTIQUE_DLQ BOUTIQUE_ADVISORIES; do
       nats_admin stream info "${stream}" --json | grep -q '"num_replicas": 3'
     done
     echo "PASS: account and replicated streams are healthy"

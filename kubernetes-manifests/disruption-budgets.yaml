@@ -74,6 +74,16 @@ spec:
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
+  name: messageoperationsservice
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: messageoperationsservice
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
   name: paymentservice
 spec:
   maxUnavailable: 1

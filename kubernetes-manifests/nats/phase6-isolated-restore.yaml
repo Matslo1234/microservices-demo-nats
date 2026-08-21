@@ -196,6 +196,7 @@ spec:
           nats ${args} stream info BOUTIQUE_EVENTS
           nats ${args} stream info BOUTIQUE_COMMANDS
           nats ${args} stream info BOUTIQUE_DLQ
+          nats ${args} stream info BOUTIQUE_ADVISORIES
           nats ${args} account info
           echo "Isolated account restore and stream inventory verification passed."
         volumeMounts:

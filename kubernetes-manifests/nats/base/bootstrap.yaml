@@ -55,6 +55,7 @@ data:
     ensure_kv STOREFRONT_OPERATIONS 10 24h 805306368
     ensure_kv RECOMMENDATION_CATALOG 5 0s 268435456
     ensure_kv BOOTSTRAP_CLAIMS 5 0s 67108864
+    ensure_kv DLQ_CASES 10 2160h 268435456
 
     ensure_object() {
       bucket="$1"
@@ -113,7 +114,7 @@ data:
   BOUTIQUE_DLQ.json: |
     {
       "name": "BOUTIQUE_DLQ",
-      "description": "Restricted terminal message diagnostics without raw sensitive payloads",
+      "description": "Restricted terminal message records with replay payloads hidden from the admin API",
       "subjects": ["boutique.dlq.>"],
       "retention": "limits",
       "max_consumers": -1,
@@ -121,7 +122,25 @@ data:
       "max_bytes": 536870912,
       "max_age": 7776000000000000,
       "max_msgs_per_subject": -1,
-      "max_msg_size": 262144,
+      "max_msg_size": 524288,
+      "storage": "file",
+      "discard": "old",
+      "num_replicas": 3,
+      "duplicate_window": 120000000000,
+      "allow_direct": false
+    }
+  BOUTIQUE_ADVISORIES.json: |
+    {
+      "name": "BOUTIQUE_ADVISORIES",
+      "description": "Durable capture of JetStream maximum-delivery advisories",
+      "subjects": ["$JS.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES.>"],
+      "retention": "workqueue",
+      "max_consumers": 1,
+      "max_msgs": 1000000,
+      "max_bytes": 67108864,
+      "max_age": 604800000000000,
+      "max_msgs_per_subject": -1,
+      "max_msg_size": 65536,
       "storage": "file",
       "discard": "old",
       "num_replicas": 3,
@@ -192,6 +211,8 @@ spec:
             path: streams/BOUTIQUE_EVENTS.json
           - key: BOUTIQUE_DLQ.json
             path: streams/BOUTIQUE_DLQ.json
+          - key: BOUTIQUE_ADVISORIES.json
+            path: streams/BOUTIQUE_ADVISORIES.json
       - name: ca
         configMap:
           name: nats-ca

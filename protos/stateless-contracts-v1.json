@@ -249,6 +249,12 @@
       "idempotency_contract": "Each simulated retry retains its original business idempotency key and operation ID."
     },
     {
+      "service": "messageoperationsservice",
+      "current_correctness_state": "Immutable replay payload records live in BOUTIQUE_DLQ and administrator-safe case lifecycle metadata lives in DLQ_CASES KV; service pods retain no correctness state.",
+      "target_store": "Replicated JetStream DLQ and KV metadata with compare-and-set lifecycle transitions.",
+      "idempotency_contract": "Source stream, consumer, and stream sequence derive the stable case and DLQ identity; advisory retries converge and each administrator replay attempt has a stable transport identity."
+    },
+    {
       "service": "paymentservice",
       "current_correctness_state": "Replica-shared key-ID-addressed signing sets support an explicit overlap window; provider calculations are deterministic and there is no outcome registry.",
       "target_store": "Identical active signing-key set on every replica; no pod-owned provider state.",

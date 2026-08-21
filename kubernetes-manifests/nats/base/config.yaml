@@ -237,8 +237,14 @@ data:
           {
             user: "messageoperationsservice", password: $MESSAGEOPERATIONSSERVICE_PASSWORD,
             permissions: {
-              publish: ["boutique.dlq.>", "boutique.evt.ops.>", "$JS.API.>", "$JS.ACK.>"],
-              subscribe: ["_INBOX.>", "$JS.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES.>", "boutique.evt.>"]
+              publish: [
+                "boutique.dlq.>", "boutique.cmd.>", "boutique.evt.>",
+                "$JS.API.>", "$JS.ACK.>", "$KV.DLQ_CASES.>"
+              ],
+              subscribe: [
+                "_INBOX.>", "$JS.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES.>",
+                "$KV.DLQ_CASES.>"
+              ]
             }
           }
         ]

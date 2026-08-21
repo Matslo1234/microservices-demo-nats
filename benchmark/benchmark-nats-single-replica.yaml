@@ -139,6 +139,24 @@ metadata:
 ---
 apiVersion: v1
 data:
+  BOUTIQUE_ADVISORIES.json: |
+    {
+      "name": "BOUTIQUE_ADVISORIES",
+      "description": "Durable capture of JetStream maximum-delivery advisories",
+      "subjects": ["$JS.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES.>"],
+      "retention": "workqueue",
+      "max_consumers": 1,
+      "max_msgs": 1000000,
+      "max_bytes": 67108864,
+      "max_age": 604800000000000,
+      "max_msgs_per_subject": -1,
+      "max_msg_size": 65536,
+      "storage": "file",
+      "discard": "old",
+      "num_replicas": 3,
+      "duplicate_window": 120000000000,
+      "allow_direct": false
+    }
   BOUTIQUE_COMMANDS.json: |
     {
       "name": "BOUTIQUE_COMMANDS",
@@ -160,7 +178,7 @@ data:
   BOUTIQUE_DLQ.json: |
     {
       "name": "BOUTIQUE_DLQ",
-      "description": "Restricted terminal message diagnostics without raw sensitive payloads",
+      "description": "Restricted terminal message records with replay payloads hidden from the admin API",
       "subjects": ["boutique.dlq.>"],
       "retention": "limits",
       "max_consumers": -1,
@@ -168,7 +186,7 @@ data:
       "max_bytes": 536870912,
       "max_age": 7776000000000000,
       "max_msgs_per_subject": -1,
-      "max_msg_size": 262144,
+      "max_msg_size": 524288,
       "storage": "file",
       "discard": "old",
       "num_replicas": 3,
@@ -241,6 +259,7 @@ data:
     ensure_kv STOREFRONT_OPERATIONS 10 24h 805306368
     ensure_kv RECOMMENDATION_CATALOG 5 0s 268435456
     ensure_kv BOOTSTRAP_CLAIMS 5 0s 67108864
+    ensure_kv DLQ_CASES 10 2160h 268435456
 
     ensure_object() {
       bucket="$1"
@@ -648,8 +667,14 @@ data:
           {
             user: "messageoperationsservice", password: $MESSAGEOPERATIONSSERVICE_PASSWORD,
             permissions: {
-              publish: ["boutique.dlq.>", "boutique.evt.ops.>", "$JS.API.>", "$JS.ACK.>"],
-              subscribe: ["_INBOX.>", "$JS.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES.>", "boutique.evt.>"]
+              publish: [
+                "boutique.dlq.>", "boutique.cmd.>", "boutique.evt.>",
+                "$JS.API.>", "$JS.ACK.>", "$KV.DLQ_CASES.>"
+              ],
+              subscribe: [
+                "_INBOX.>", "$JS.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES.>",
+                "$KV.DLQ_CASES.>"
+              ]
             }
           }
         ]
@@ -949,6 +974,12 @@ data:
       printf '%s\n' "{\"apiVersion\":\"v1\",\"kind\":\"Secret\",\"metadata\":{\"name\":\"${name}\",\"namespace\":\"${namespace}\",\"labels\":{\"app.kubernetes.io/name\":\"nats\",\"app.kubernetes.io/component\":\"setup\",\"app.kubernetes.io/part-of\":\"online-boutique\"}},\"type\":\"Opaque\",\"data\":{\"NATS_URL\":\"$(b64_text "${nats_url}")\",\"NATS_USER\":\"$(b64_text "${user}")\",\"NATS_PASSWORD\":\"${password}\"${extra_data}}}" > "${output}"
     }
 
+    write_messageoperations_admin_secret() {
+      output=$1
+      admin_api_token=$(random_secret) || return 1
+      printf '%s\n' "{\"apiVersion\":\"v1\",\"kind\":\"Secret\",\"metadata\":{\"name\":\"messageoperations-admin-api\",\"namespace\":\"default\",\"labels\":{\"app.kubernetes.io/name\":\"messageoperationsservice\",\"app.kubernetes.io/component\":\"admin-api\",\"app.kubernetes.io/part-of\":\"online-boutique\"}},\"type\":\"Opaque\",\"data\":{\"ADMIN_USER\":\"$(b64_text admin)\",\"ADMIN_API_TOKEN\":\"$(b64_text "${admin_api_token}")\"}}" > "${output}"
+    }
+
     reconcile() {
       write_auth_secret "${workdir}/auth.json" || return 1
       ensure_from_file secrets nats nats-server-auth "${workdir}/auth.json" || return 1
@@ -993,6 +1024,11 @@ data:
       operations_password=$(secret_data nats nats-server-auth MESSAGEOPERATIONSSERVICE_PASSWORD) || return 1
       write_credentials_secret nats nats-messageoperations-credentials messageoperationsservice "${operations_password}" "${workdir}/operations.json" || return 1
       sync_from_file secrets nats nats-messageoperations-credentials "${workdir}/operations.json" || return 1
+
+      write_messageoperations_admin_secret "${workdir}/messageoperations-admin.json" || return 1
+      ensure_from_file secrets default messageoperations-admin-api "${workdir}/messageoperations-admin.json" || return 1
+      secret_data default messageoperations-admin-api ADMIN_USER >/dev/null || return 1
+      secret_data default messageoperations-admin-api ADMIN_API_TOKEN >/dev/null || return 1
     }
 
     mkdir -p "${workdir}" || exit 1
@@ -1598,6 +1634,8 @@ spec:
             path: streams/BOUTIQUE_EVENTS.json
           - key: BOUTIQUE_DLQ.json
             path: streams/BOUTIQUE_DLQ.json
+          - key: BOUTIQUE_ADVISORIES.json
+            path: streams/BOUTIQUE_ADVISORIES.json
           name: nats-bootstrap
         name: config
       - configMap:
@@ -1657,6 +1695,7 @@ spec:
           - currencyservice
           - emailservice
           - frontend
+          - messageoperationsservice
           - paymentservice
           - productcatalogservice
           - recommendationservice
@@ -1807,6 +1846,11 @@ metadata:
 apiVersion: v1
 kind: ServiceAccount
 metadata:
+  name: messageoperationsservice
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
   name: paymentservice
 ---
 apiVersion: v1
@@ -1905,6 +1949,21 @@ spec:
   selector:
     app: frontend
   type: LoadBalancer
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: messageoperationsservice
+  name: messageoperationsservice
+spec:
+  ports:
+  - name: http
+    port: 80
+    targetPort: http
+  selector:
+    app: messageoperationsservice
+  type: ClusterIP
 ---
 apiVersion: v1
 kind: Service
@@ -2041,7 +2100,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-adservice
-        image: matslo123/adservice:v0.4.0@sha256:ce4f217a588fed1d74f6a710e9c9ff3b3d9045f8219efe0aebb758eb2a831413
+        image: matslo123/adservice:v0.4.0@sha256:016ac2ddf41f7ac7b7fcf0ac04cfa4e59b169a60fe14bd3582c041594b5010d8
         livenessProbe:
           httpGet:
             path: /healthz
@@ -2144,7 +2203,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-benchmarkservice
-        image: matslo123/benchmarkservice:v0.4.0@sha256:ff16cd2f0e927a1241fc4f7dae72945c365855eb7e04faf311a2e8955b105e93
+        image: matslo123/benchmarkservice:v0.4.0@sha256:f746fa15e19e2c6b32ca482f97c14bc48f57d7486350ac8c93821b19cddafff5
         livenessProbe:
           httpGet:
             path: /healthz
@@ -2522,7 +2581,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-currencyservice
-        image: matslo123/currencyservice:v0.4.0@sha256:bcf569c32033a09c30fe9d7c5c6751c68ba43eb8f477dc1d069e1281b7c6100b
+        image: matslo123/currencyservice:v0.4.0@sha256:e83f05d7d0dcfd22b8bbd9e8bb79630e740085bc4118229e4833f34988a647b3
         livenessProbe:
           httpGet:
             path: /healthz
@@ -2907,6 +2966,107 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   labels:
+    app: messageoperationsservice
+  name: messageoperationsservice
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: messageoperationsservice
+  strategy:
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+    type: RollingUpdate
+  template:
+    metadata:
+      annotations:
+        prometheus.io/path: /metrics
+        prometheus.io/port: "8080"
+        prometheus.io/scrape: "true"
+      labels:
+        app: messageoperationsservice
+    spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - podAffinityTerm:
+              labelSelector: {}
+              matchLabelKeys:
+              - app
+              topologyKey: kubernetes.io/hostname
+            weight: 100
+      containers:
+      - env:
+        - name: PORT
+          value: "8080"
+        envFrom:
+        - configMapRef:
+            name: nats-client-config
+        - secretRef:
+            name: nats-credentials-messageoperationsservice
+        - secretRef:
+            name: messageoperations-admin-api
+        image: matslo123/messageoperationsservice:v0.4.0@sha256:d5661b18a6adf5c4389111f35e796e026910499cad35db1a80d5f89227ffea75
+        livenessProbe:
+          failureThreshold: 6
+          httpGet:
+            path: /healthz
+            port: http
+          initialDelaySeconds: 10
+          timeoutSeconds: 3
+        name: server
+        ports:
+        - containerPort: 8080
+          name: http
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: http
+          initialDelaySeconds: 5
+          timeoutSeconds: 3
+        resources:
+          limits:
+            cpu: 500m
+            memory: 256Mi
+          requests:
+            cpu: 50m
+            memory: 64Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+        volumeMounts:
+        - mountPath: /etc/nats-ca
+          name: nats-ca
+          readOnly: true
+      securityContext:
+        fsGroup: 1000
+        runAsGroup: 1000
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      serviceAccountName: messageoperationsservice
+      terminationGracePeriodSeconds: 35
+      topologySpreadConstraints:
+      - labelSelector: {}
+        matchLabelKeys:
+        - app
+        maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: ScheduleAnyway
+      volumes:
+      - configMap:
+          name: nats-ca
+        name: nats-ca
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
     app: paymentservice
   name: paymentservice
 spec:
@@ -2974,7 +3134,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-paymentservice
-        image: matslo123/paymentservice:v0.4.0@sha256:f5d0b3aeb1b032da3a5af9b64afc3a2688308d0818207735d18b51aad9807648
+        image: matslo123/paymentservice:v0.4.0@sha256:9f5487e545b7b137e8d48b282894b247070e35766a88797723aff670e95f397f
         livenessProbe:
           failureThreshold: 6
           httpGet:
@@ -3857,6 +4017,16 @@ spec:
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
+  name: messageoperationsservice
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: messageoperationsservice
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
   name: paymentservice
 spec:
   maxUnavailable: 1
@@ -4180,6 +4350,45 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
+  name: messageoperationsservice-access
+spec:
+  egress:
+  - ports:
+    - port: 53
+      protocol: UDP
+    - port: 53
+      protocol: TCP
+    to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+  - ports:
+    - port: 4222
+      protocol: TCP
+    to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: nats
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: nats
+  ingress:
+  - ports:
+    - port: 8080
+      protocol: TCP
+  podSelector:
+    matchLabels:
+      app: messageoperationsservice
+  policyTypes:
+  - Ingress
+  - Egress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
   name: redis-cart-cluster
 spec:
   egress:
@@ -4366,7 +4575,7 @@ spec:
               key: BENCHMARK_METRICS_TOKEN
               name: benchmark-metrics-auth
               optional: true
-        image: matslo123/benchmarkservice:v0.4.0@sha256:ff16cd2f0e927a1241fc4f7dae72945c365855eb7e04faf311a2e8955b105e93
+        image: matslo123/benchmarkservice:v0.4.0@sha256:f746fa15e19e2c6b32ca482f97c14bc48f57d7486350ac8c93821b19cddafff5
         imagePullPolicy: IfNotPresent
         livenessProbe:
           httpGet:

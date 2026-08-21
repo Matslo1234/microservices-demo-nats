@@ -4,7 +4,6 @@
 package hipstershop;
 
 import boutique.common.v1.MessageEnvelope;
-import io.opentelemetry.api.GlobalOpenTelemetry;
 import io.opentelemetry.api.OpenTelemetry;
 import io.opentelemetry.api.trace.Span;
 import io.opentelemetry.api.trace.SpanKind;
@@ -60,7 +59,6 @@ final class Telemetry {
       return;
     }
     openTelemetry = AutoConfiguredOpenTelemetrySdk.initialize().getOpenTelemetrySdk();
-    GlobalOpenTelemetry.set(openTelemetry);
     tracer = openTelemetry.getTracer("online-boutique/messaging");
   }
 

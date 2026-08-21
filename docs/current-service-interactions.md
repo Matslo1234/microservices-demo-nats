@@ -1,8 +1,10 @@
 # Current service interactions
 
-This document describes the Phase 6 NATS-only runtime produced by
-[`release/kubernetes-manifests.yaml`](../release/kubernetes-manifests.yaml).
-The migration history and its acceptance criteria are in
+This document describes the current NATS-only runtime assembled by
+[`kubernetes-manifests/kustomization.yaml`](../kubernetes-manifests/kustomization.yaml).
+Published release bundles are generated from that source after application
+images have been built and pinned. The migration history and its acceptance
+criteria are in
 [`nats-event-driven-upgrade-plan.md`](nats-event-driven-upgrade-plan.md).
 
 ## Runtime topology
@@ -27,6 +29,9 @@ flowchart LR
     NATS --> Payment
     NATS --> Email[email]
     NATS --> Projection
+    NATS -->|max-delivery advisory| MessageOps[message operations]
+    MessageOps -->|restricted DLQ / replay| NATS
+    Admin[Administrator] -->|authenticated admin page| MessageOps
     Cart -->|Redis protocol| CartRedis[(redis-cart)]
     Checkout -->|Redis protocol| CheckoutRedis[(redis-checkout)]
 
@@ -51,7 +56,7 @@ bucket for either optional workload is present in the release path.
 
 ## Interaction model
 
-The architecture uses four interaction styles:
+The architecture uses five interaction styles:
 
 | Style | Subjects / storage | Purpose |
 | --- | --- | --- |
@@ -59,6 +64,7 @@ The architecture uses four interaction styles:
 | Replayable facts | `boutique.evt.>` in `BOUTIQUE_EVENTS` | Owner snapshots, workflow results, notifications, and storefront inputs |
 | Bounded queries | `boutique.qry.>` over Core NATS | Reads from the storefront projection and payment tokenization |
 | Live notifications | `boutique.live.operation.<order-id>` over Core NATS | Best-effort order updates bridged to active browser SSE connections |
+| Dead-letter operations | `BOUTIQUE_ADVISORIES`, `BOUTIQUE_DLQ`, and `DLQ_CASES` | Durable max-delivery capture, restricted payload storage, administrator review, and replay |
 
 Commands and events use the protobuf envelope and identity conventions in
 [`development/nats-message-conventions.md`](development/nats-message-conventions.md).
@@ -112,6 +118,7 @@ they operate on the complete cart state.
 | `paymentservice` | Tokenization query and payment commands | Key-ID-addressed short-lived tokens, deterministic signed provider references, and payment facts |
 | `emailservice` | Completed-order facts | Order/notification-keyed deterministic provider result and notification facts |
 | `storefrontprojectionservice` | `boutique.evt.>` | Query endpoints, best-effort live order notifications, and five JetStream KV materialized views |
+| `messageoperationsservice` | JetStream max-delivery advisories | Restricted DLQ records, case lifecycle metadata, operational events, alert metrics, and authenticated replay |
 
 The storefront projection stores products, carts, recent page context, orders,
 and operation status in `STOREFRONT_PRODUCTS`, `STOREFRONT_CARTS`,
@@ -127,6 +134,24 @@ Consequently, the pod that processes a shipping result does not need to be the
 pod that processed the preceding payment or order event. Transaction conflicts
 are retried, and duplicate deliveries observe the shared inbox before applying
 another transition.
+
+### Dead-letter and replay flow
+
+JetStream maximum-delivery advisories are retained in `BOUTIQUE_ADVISORIES`, so
+a controller restart does not lose the trigger. `messageoperationsservice`
+copies the exact source bytes and headers to an immutable per-case subject in
+`BOUTIQUE_DLQ`, waits for the publish acknowledgement, stores safe case
+metadata in `DLQ_CASES`, and emits
+`boutique.evt.ops.message-dead-lettered.v1`. Work-queue commands are removed
+from `BOUTIQUE_COMMANDS` only after the copy and case record are durable;
+limits-retention events remain in `BOUTIQUE_EVENTS`.
+
+The authenticated administration page shows case identity and lifecycle data,
+but not the restricted payload. Replaying republishes the exact bytes to the
+original subject with the original business message ID and a unique transport
+replay ID. Command replay returns to the owning work queue. Event replay follows
+normal subject fan-out and may therefore reach every matching durable consumer;
+the existing consumer inboxes and deterministic handlers make that repeat safe.
 
 ## Checkout workflow
 
@@ -180,8 +205,8 @@ All workload liveness probes call local HTTP `/healthz`. Readiness calls local
 a business message. Prometheus scrapes `/metrics`, including
 `boutique_dependency_ready`; NATS exporter metrics cover consumer pending,
 ack-pending, and redelivery counts. Alerts cover consumer lag, acknowledgement
-backlog, unavailable dependencies, storage, server quorum, and max-delivery
-advisories.
+backlog, unavailable dependencies, storage, server quorum, dead-letter cases,
+and failed DLQ transfers.
 
 The default namespace has default-deny ingress and egress. Application pods can
 reach DNS, NATS, optional OTLP, and only their explicit local dependency
@@ -191,15 +216,16 @@ each NATS identity has subject-scoped publish/subscribe grants.
 
 ## Recovery boundaries
 
-JetStream commands, events, and DLQ streams use three replicas. The scheduled
-account backup includes streams and consumers and validates the backup before
-retention cleanup. [`verify-phase6-dr.sh`](../scripts/nats/verify-phase6-dr.sh)
-tests both recovery paths:
+JetStream command, event, DLQ, and advisory streams use three replicas. The
+scheduled account backup includes streams and consumers and validates the
+backup before retention cleanup.
+[`verify-phase6-dr.sh`](../scripts/nats/verify-phase6-dr.sh) tests both recovery
+paths:
 
 - deletes all rebuildable storefront KV state and its durable consumer, then
   verifies a retained-event replay reaches zero pending/ack-pending; and
 - takes a checked account backup, restores it into an isolated three-node
-  JetStream cluster, and verifies all three stream inventories.
+  JetStream cluster, and verifies all four stream inventories.
 
 Exact operating commands and destructive-action gates are documented in
 [`development/nats-phase1-runbook.md`](development/nats-phase1-runbook.md).

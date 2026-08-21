@@ -31,6 +31,7 @@ or completely uniform schema.
 | Go: frontend, product catalog, shipping | Logrus at debug level, with JSON fields renamed to `timestamp`, `severity`, and `message`. |
 | Go: checkout | Logrus JSON at debug level, using Logrus's default field names. |
 | Go: storefront projection | `slog` JSON at debug level for structured event/query records. Some operational and error paths still use the standard `log` package, so this service also emits plain-text lines. |
+| Go: message operations | `slog` JSON at INFO level with case, source stream/sequence, consumer, replay, actor, and safe error metadata; restricted payloads are never logged. |
 | Node.js: currency, payment | Pino JSON at debug level with `message` and `severity` fields. |
 | Python: email, recommendation | `python-json-logger` writes JSON to stdout at INFO level by default and adds `timestamp`, uppercase `severity`, logger `name`, and `message`. Set `LOG_LEVEL=DEBUG` to include per-event debug records. |
 | C#: cart | A custom `SeverityJsonConsoleFormatter` emits `timestamp`, normalized `severity`, logger `name`, `message`, structured state, event metadata, and exceptions. The default level is Information, with debug enabled for the NATS relay. |
@@ -53,9 +54,10 @@ Representative implementations are:
 - [`src/adservice/src/main/resources/log4j2.xml`](../src/adservice/src/main/resources/log4j2.xml)
 - [`src/storefrontprojectionservice/main.go`](../src/storefrontprojectionservice/main.go)
 
-The NATS deployment also runs an advisory watcher which subscribes to
-JetStream max-delivery advisories and prints their raw payloads to its
-container output. Alloy collects these lines like logs from any other pod.
+The NATS deployment also runs an advisory watcher which prints max-delivery
+advisories for low-level diagnostics. The durable handling path is
+`messageoperationsservice`, whose case logs omit source payloads. Alloy collects
+both like logs from any other pod.
 
 ### Collection and storage
 
@@ -166,9 +168,15 @@ The emitted dependencies are:
 | `recommendationservice` | `nats` |
 | `shippingservice` | `nats`, `provider_store` |
 | `storefrontprojectionservice` | `nats`, `kv` |
+| `messageoperationsservice` | `nats` |
 
 `productcatalogservice` additionally exposes `boutique_catalog_products`, the
 number of loaded products.
+
+`messageoperationsservice` also exposes `boutique_dlq_cases{status=...}` and
+transfer, replay, replay-error, and resolution counters. The observability
+rules fire `BoutiqueMessageDeadLettered` for cases requiring action and
+`BoutiqueDLQTransferFailing` when an advisory could not be durably transferred.
 
 These endpoints describe dependency readiness and catalog size only. They do
 not currently expose application request counts, latency histograms, error

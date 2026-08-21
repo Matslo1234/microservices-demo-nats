@@ -1,0 +1,100 @@
+# Copyright 2026 Google LLC
+# Licensed under the Apache License, Version 2.0 (the "License");
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: messageoperationsservice
+  labels:
+    app: messageoperationsservice
+spec:
+  selector:
+    matchLabels:
+      app: messageoperationsservice
+  template:
+    metadata:
+      labels:
+        app: messageoperationsservice
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: /metrics
+    spec:
+      serviceAccountName: messageoperationsservice
+      terminationGracePeriodSeconds: 35
+      securityContext:
+        fsGroup: 1000
+        runAsGroup: 1000
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: server
+        image: messageoperationsservice
+        ports:
+        - name: http
+          containerPort: 8080
+        env:
+        - name: PORT
+          value: "8080"
+        envFrom:
+        - configMapRef:
+            name: nats-client-config
+        - secretRef:
+            name: nats-credentials-messageoperationsservice
+        - secretRef:
+            name: messageoperations-admin-api
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: http
+          initialDelaySeconds: 5
+          timeoutSeconds: 3
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: http
+          initialDelaySeconds: 10
+          timeoutSeconds: 3
+          failureThreshold: 6
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 500m
+            memory: 256Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+          readOnlyRootFilesystem: true
+        volumeMounts:
+        - name: nats-ca
+          mountPath: /etc/nats-ca
+          readOnly: true
+      volumes:
+      - name: nats-ca
+        configMap:
+          name: nats-ca
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: messageoperationsservice
+  labels:
+    app: messageoperationsservice
+spec:
+  type: ClusterIP
+  selector:
+    app: messageoperationsservice
+  ports:
+  - name: http
+    port: 80
+    targetPort: http
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: messageoperationsservice

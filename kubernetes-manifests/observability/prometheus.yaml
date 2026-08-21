@@ -137,6 +137,22 @@ data:
         annotations:
           summary: NATS reports slow consumers
           description: At least one NATS server has reported a slow consumer for five minutes.
+      - alert: BoutiqueMessageDeadLettered
+        expr: max(boutique_dlq_cases{status=~"TRANSFER_IN_PROGRESS|OPEN|REPLAY_IN_PROGRESS|REPLAY_FAILED"}) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: Online Boutique has unresolved dead-letter messages
+          description: "{{ $value }} dead-letter cases require administrator review."
+      - alert: BoutiqueDLQTransferFailing
+        expr: sum(increase(boutique_dlq_transfer_errors_total[5m])) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: Online Boutique DLQ transfer is failing
+          description: The message operations controller could not durably transfer at least one exhausted message.
 ---
 apiVersion: v1
 kind: Service

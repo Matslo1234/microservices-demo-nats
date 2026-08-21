@@ -6,7 +6,7 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/.." && pwd)"
 
 dockerhub_username="${DOCKERHUB_USERNAME:-matslo123}"
-image_tag="${IMAGE_TAG:-v0.6.0}"
+image_tag="${IMAGE_TAG:-v0.7.0}"
 target_platform="${PLATFORM:-linux/amd64}"
 
 builds=(
@@ -18,6 +18,7 @@ builds=(
   "emailservice . src/emailservice/Dockerfile"
   "frontend . src/frontend/Dockerfile"
   "loadgenerator src/loadgenerator src/loadgenerator/Dockerfile"
+  "messageoperationsservice . src/messageoperationsservice/Dockerfile"
   "paymentservice . src/paymentservice/Dockerfile"
   "productcatalogservice . src/productcatalogservice/Dockerfile"
   "recommendationservice src/recommendationservice src/recommendationservice/Dockerfile"

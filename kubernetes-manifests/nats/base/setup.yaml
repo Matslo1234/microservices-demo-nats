@@ -371,6 +371,12 @@ data:
       printf '%s\n' "{\"apiVersion\":\"v1\",\"kind\":\"Secret\",\"metadata\":{\"name\":\"${name}\",\"namespace\":\"${namespace}\",\"labels\":{\"app.kubernetes.io/name\":\"nats\",\"app.kubernetes.io/component\":\"setup\",\"app.kubernetes.io/part-of\":\"online-boutique\"}},\"type\":\"Opaque\",\"data\":{\"NATS_URL\":\"$(b64_text "${nats_url}")\",\"NATS_USER\":\"$(b64_text "${user}")\",\"NATS_PASSWORD\":\"${password}\"${extra_data}}}" > "${output}"
     }
 
+    write_messageoperations_admin_secret() {
+      output=$1
+      admin_api_token=$(random_secret) || return 1
+      printf '%s\n' "{\"apiVersion\":\"v1\",\"kind\":\"Secret\",\"metadata\":{\"name\":\"messageoperations-admin-api\",\"namespace\":\"default\",\"labels\":{\"app.kubernetes.io/name\":\"messageoperationsservice\",\"app.kubernetes.io/component\":\"admin-api\",\"app.kubernetes.io/part-of\":\"online-boutique\"}},\"type\":\"Opaque\",\"data\":{\"ADMIN_USER\":\"$(b64_text admin)\",\"ADMIN_API_TOKEN\":\"$(b64_text "${admin_api_token}")\"}}" > "${output}"
+    }
+
     reconcile() {
       write_auth_secret "${workdir}/auth.json" || return 1
       ensure_from_file secrets nats nats-server-auth "${workdir}/auth.json" || return 1
@@ -415,6 +421,11 @@ data:
       operations_password=$(secret_data nats nats-server-auth MESSAGEOPERATIONSSERVICE_PASSWORD) || return 1
       write_credentials_secret nats nats-messageoperations-credentials messageoperationsservice "${operations_password}" "${workdir}/operations.json" || return 1
       sync_from_file secrets nats nats-messageoperations-credentials "${workdir}/operations.json" || return 1
+
+      write_messageoperations_admin_secret "${workdir}/messageoperations-admin.json" || return 1
+      ensure_from_file secrets default messageoperations-admin-api "${workdir}/messageoperations-admin.json" || return 1
+      secret_data default messageoperations-admin-api ADMIN_USER >/dev/null || return 1
+      secret_data default messageoperations-admin-api ADMIN_API_TOKEN >/dev/null || return 1
     }
 
     mkdir -p "${workdir}" || exit 1

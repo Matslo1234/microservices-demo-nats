@@ -35,6 +35,7 @@ spec:
           - currencyservice
           - emailservice
           - frontend
+          - messageoperationsservice
           - paymentservice
           - productcatalogservice
           - recommendationservice

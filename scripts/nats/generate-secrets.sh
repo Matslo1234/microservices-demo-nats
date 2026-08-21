@@ -10,6 +10,7 @@ if [[ "${rotate}" != "--rotate" ]] && \
    kubectl --namespace nats get secret nats-server-tls >/dev/null 2>&1 && \
    kubectl --namespace nats get secret nats-admin-credentials >/dev/null 2>&1 && \
    kubectl --namespace nats get secret nats-messageoperations-credentials >/dev/null 2>&1 && \
+   kubectl --namespace default get secret messageoperations-admin-api >/dev/null 2>&1 && \
    kubectl --namespace default get configmap nats-ca >/dev/null 2>&1; then
   echo "NATS secrets already exist; use --rotate to replace workload credentials."
   exit 0
@@ -167,5 +168,15 @@ kubectl --namespace nats create secret generic nats-messageoperations-credential
   --from-literal=NATS_USER=messageoperationsservice \
   --from-literal=NATS_PASSWORD="${passwords[messageoperationsservice]}" \
   --dry-run=client -o yaml | kubectl apply -f -
+
+if [[ "${rotate}" != "--rotate" ]] && \
+   kubectl --namespace default get secret messageoperations-admin-api >/dev/null 2>&1; then
+  echo "Preserving existing messageoperations administrator API token."
+else
+  kubectl --namespace default create secret generic messageoperations-admin-api \
+    --from-literal=ADMIN_USER=admin \
+    --from-literal=ADMIN_API_TOKEN="$(random_secret)" \
+    --dry-run=client -o yaml | kubectl apply -f -
+fi
 
 echo "Generated NATS credentials and provider keys without writing private material to the repository; existing TLS, JetStream encryption, payment signing, and shipping provider keys were preserved during credential rotation."
