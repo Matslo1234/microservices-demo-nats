@@ -343,6 +343,44 @@ function createTokenBatcher(keyring) {
   };
 }
 
+async function registerTokenizationService(nc, keyring) {
+  const enqueueTokenization = createTokenBatcher(keyring);
+  const service = await nc.services.add({
+    name: 'PaymentTokenization',
+    version: '1.0.0',
+    description: 'Ephemeral payment card tokenization',
+    queue: 'payment-tokenize-v1',
+  });
+  let endpoint;
+  try {
+    endpoint = service.addEndpoint('tokenize', {
+      subject: TOKEN_SUBJECT,
+      handler: (err, message) => {
+        if (err) return;
+        let correlationId = 'unknown';
+        let request;
+        let parseError;
+        try {
+          request = JSON.parse(message.string());
+          correlationId = request.correlation_id || request.order_id || 'unknown';
+        } catch (error) {
+          parseError = error;
+        }
+        enqueueTokenization({ message, request, correlationId, error: parseError });
+      },
+    });
+    await nc.flush();
+    if (service.isStopped) {
+      const stoppedError = await service.stopped;
+      throw stoppedError || new Error('payment tokenization service stopped during startup');
+    }
+  } catch (error) {
+    await service.stop(error);
+    throw error;
+  }
+  return { service, endpoint };
+}
+
 function anyPayload(type, payload) {
   // protobufjs' bundled google.protobuf.Any descriptor preserves the proto
   // field name (`type_url`) even though application messages use camelCase.
@@ -644,21 +682,8 @@ async function startPaymentNATS() {
   const workerStatus = {
     connectionReady: !nc.isClosed(), consumerReady: false, stopping: false, commandSubscription: undefined,
   };
-  const enqueueTokenization = createTokenBatcher(keyring);
-
-  const tokenSubscription = nc.subscribe(TOKEN_SUBJECT, { queue: 'payment-tokenize-v1', callback: (err, message) => {
-    if (err) return;
-    let correlationId = 'unknown';
-    let request;
-    let parseError;
-    try {
-      request = JSON.parse(message.string());
-      correlationId = request.correlation_id || request.order_id || 'unknown';
-    } catch (error) {
-      parseError = error;
-    }
-    enqueueTokenization({ message, request, correlationId, error: parseError });
-  }});
+  const {service: tokenizationService, endpoint: tokenizationEndpoint} =
+    await registerTokenizationService(nc, keyring);
 
   const commandSubscription = await js.pullSubscribe(COMMAND_SUBJECT, commandConsumerOptions());
   superviseCommandConsumer(nc, js, keyring, contracts, workerStatus, commandSubscription)
@@ -681,9 +706,11 @@ async function startPaymentNATS() {
   }, 'Stateless payment tokenization and durable command handlers are ready');
   return {
     nc,
-    tokenSubscription,
+    tokenizationService,
+    tokenizationEndpoint,
     get commandSubscription() { return workerStatus.commandSubscription; },
-    ready: () => workerStatus.connectionReady && workerStatus.consumerReady && !nc.isClosed(),
+    ready: () => workerStatus.connectionReady && workerStatus.consumerReady &&
+      !tokenizationService.isStopped && !nc.isClosed(),
     markNotReady: () => {
       workerStatus.stopping = true;
       workerStatus.connectionReady = false;
@@ -697,5 +724,6 @@ module.exports = {
   loadSigningKeyring, validateCard, tokenize, verifyPaymentToken, authorizationReference,
   verifyAuthorization, occurredAtMilliseconds, loadContracts,
   processingTimeMs, waitForProcessing,
-  processTokenBatch, processCommand, processCommandBatch, runCommandConsumer, superviseCommandConsumer,
+  processTokenBatch, registerTokenizationService,
+  processCommand, processCommandBatch, runCommandConsumer, superviseCommandConsumer,
 };

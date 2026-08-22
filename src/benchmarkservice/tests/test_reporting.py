@@ -171,6 +171,113 @@ class ReportingTest(unittest.TestCase):
             assessment["reasons"],
         )
 
+    def test_saturation_report_keeps_per_rung_metrics(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            run = Path(temporary)
+            config = BenchmarkConfig.from_request(
+                {
+                    "target_url": "http://frontend",
+                    "metrics_url": "http://benchmarkmetrics/snapshot",
+                    "workload": "saturation",
+                    "warmup_seconds": 0,
+                    "duration_seconds": 30,
+                    "drain_seconds": 2,
+                },
+                "NATS",
+            )
+            (run / "config.json").write_text(
+                json.dumps(config.as_dict()), encoding="utf-8"
+            )
+            business = []
+            for rung, completed in ((0, 1), (1, 2)):
+                for _ in range(completed):
+                    record = self._business(
+                        "steady", "COMPLETED", 100 + rung, True, True
+                    )
+                    record["context"].update(
+                        {
+                            "saturation_rung": rung,
+                            "target_requests_per_second": 10 + rung * 10,
+                            "scheduled_at": 1,
+                        }
+                    )
+                    business.append(record)
+            (run / "business.jsonl").write_text(
+                "".join(json.dumps(record) + "\n" for record in business),
+                encoding="utf-8",
+            )
+            decisions = [
+                self._saturation_decision(0, 10, 0, 10, 1, False, None),
+                self._saturation_decision(
+                    1,
+                    20,
+                    10,
+                    20,
+                    2,
+                    True,
+                    "goodput_stopped_increasing",
+                ),
+            ]
+            (run / "saturation.jsonl").write_text(
+                "".join(json.dumps(record) + "\n" for record in decisions),
+                encoding="utf-8",
+            )
+            resources = [
+                self._resource(1, 1_000_000_000, 100, 10, 20),
+                self._resource(9, 2_000_000_000, 100, 20, 30),
+                self._resource(11, 3_000_000_000, 100, 30, 40),
+                self._resource(19, 4_000_000_000, 100, 40, 50),
+            ]
+            for elapsed, record in zip((1, 9, 11, 19), resources):
+                record["elapsed_seconds"] = elapsed
+            (run / "resources.jsonl").write_text(
+                "".join(json.dumps(record) + "\n" for record in resources),
+                encoding="utf-8",
+            )
+
+            summary = build_report(run)
+
+            saturation = summary["saturation"]
+            self.assertTrue(saturation["saturated"])
+            self.assertEqual(20, saturation["saturation_requests_per_second"])
+            self.assertEqual(
+                10, saturation["highest_sustainable_requests_per_second"]
+            )
+            self.assertEqual(2, len(saturation["rungs"]))
+            self.assertEqual(
+                2, saturation["rungs"][1]["business"]["completed"]
+            )
+            self.assertTrue(
+                saturation["rungs"][0]["resources"]["available"]
+            )
+
+    @staticmethod
+    def _saturation_decision(
+        rung: int,
+        rate: int,
+        started: int,
+        ended: int,
+        completed: int,
+        saturated: bool,
+        reason: str | None,
+    ) -> dict:
+        return {
+            "rung": rung,
+            "target_requests_per_second": rate,
+            "started_elapsed_seconds": started,
+            "ended_elapsed_seconds": ended,
+            "duration_seconds": ended - started,
+            "completed_during_rung": completed,
+            "observed_goodput_orders_per_second": completed / (ended - started),
+            "pending_start": 0,
+            "pending_end": 0,
+            "pending_growth": 0,
+            "pending_growth_per_second": 0,
+            "stop": saturated,
+            "saturated": saturated,
+            "stop_reason": reason,
+        }
+
     @staticmethod
     def _business(
         phase: str,

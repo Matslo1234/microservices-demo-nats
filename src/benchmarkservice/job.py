@@ -22,6 +22,8 @@ from parallel import (
     merge_worker_outputs,
     ready_object,
     result_object,
+    saturation_decision_object,
+    saturation_progress_object,
     start_object,
 )
 from reporting import build_report
@@ -115,11 +117,11 @@ def release_lease(store: NatsSharedStore) -> None:
 def locust_command(config: BenchmarkConfig, run_directory: Path) -> list[str]:
     users = config.users if config.workload == "closed" else 1
     spawn_rate = config.spawn_rate if config.workload == "closed" else 1
-    user_class = (
-        "ClosedLoopUser"
-        if config.workload == "closed"
-        else "OpenLoopDriver"
-    )
+    user_class = {
+        "closed": "ClosedLoopUser",
+        "open": "OpenLoopDriver",
+        "saturation": "SaturationDriver",
+    }[config.workload]
     return [
         sys.executable,
         "-m",
@@ -225,7 +227,9 @@ def coordinate_start(
 
 
 def delete_coordination_objects(
-    store: NatsSharedStore, worker_count: int
+    store: NatsSharedStore,
+    worker_count: int,
+    saturation_steps: int = 0,
 ) -> None:
     names = [
         start_object(RUN_ID),
@@ -235,6 +239,17 @@ def delete_coordination_objects(
             for name in (
                 ready_object(RUN_ID, index),
                 result_object(RUN_ID, index),
+            )
+        ),
+        *(
+            name
+            for rung in range(saturation_steps)
+            for name in (
+                saturation_decision_object(RUN_ID, rung),
+                *(
+                    saturation_progress_object(RUN_ID, rung, index)
+                    for index in range(worker_count)
+                ),
             )
         ),
     ]
@@ -532,7 +547,13 @@ def main() -> int:
         mutate(store, finish)
         release_lease(store)
         if worker_count > 1:
-            delete_coordination_objects(store, worker_count)
+            delete_coordination_objects(
+                store,
+                worker_count,
+                config.saturation_step_count
+                if config.workload == "saturation"
+                else 0,
+            )
         return 0 if state in {"completed", "stopped"} else 1
     except Exception as error:
         if not coordinator and worker_directory is not None:

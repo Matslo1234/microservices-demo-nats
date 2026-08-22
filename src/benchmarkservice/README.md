@@ -42,6 +42,12 @@ the failure.
 - `open` schedules checkout transactions at an absolute arrival rate.
   Submission scheduling is independent of completion tracking, so slow
   outcomes do not reduce the requested arrival rate.
+- `saturation` runs an open-loop load ladder. After the optional warm-up at
+  10 orders/s, it measures 10 orders/s for 10 seconds and adds 10 orders/s
+  every 10 seconds. It stops when observed goodput no longer increases. A NATS
+  run also stops when total application-consumer pending grows by at least 10
+  messages/s during a rung. `saturation_max_rate` and the steady duration are
+  safety bounds rather than fixed target rates.
 
 For NATS runs, accepted checkouts are followed through the order SSE endpoint.
 `checkout_to_outcome` ends when the terminal order event is received by the
@@ -52,15 +58,48 @@ retain `failure_code`, `safe_message`, `failure_message`, and
 `failure_received_at`; notification and cart-clear failures have their own
 receipt-time fields.
 
-Open-loop runs use one worker for every 100 requested orders/s. Closed-loop
-runs use one worker for every 1,000 users, and divide the requested user spawn
-rate evenly across those workers. Worker start times are synchronized. Worker
-zero samples shared application resources once, then merges every worker's
-business and outstanding-order records into the run-level report. Individual
-Locust CSVs and logs remain in the complete artifact archive for diagnostics.
+Open-loop and saturation runs use one worker for every 100 requested orders/s.
+Closed-loop runs use one worker for every 1,000 users, and divide the requested
+user spawn rate evenly across those workers. Worker start times and saturation
+rung decisions are synchronized. Worker zero samples shared application
+resources once, then merges every worker's business and outstanding-order
+records into the run-level report. Individual Locust CSVs and logs remain in
+the complete artifact archive for diagnostics.
 
 Warm-up samples remain in raw artifacts but are excluded from summaries. After
 the steady interval, submission stops for the configured drain period.
+
+## NATS prerequisite
+
+Every checked-in benchmark bundle requires a compatible NATS configuration to
+be installed and ready before the bundle is applied. The benchmark YAML files
+do not create or configure NATS. This applies to the original-GRPC comparison
+bundle too, because the benchmark controller and runner use NATS JetStream for
+shared run state and artifacts.
+
+For a local standalone cluster, install the repository's standard NATS
+configuration with a default dynamic `StorageClass` available, then wait for
+its client resources and benchmark stores:
+
+```sh
+kubectl apply -k kubernetes-manifests/nats/fresh-cluster
+kubectl -n nats rollout status deployment/nats-setup --timeout=5m
+kubectl -n nats rollout status statefulset/nats --timeout=10m
+kubectl -n nats wait --for=condition=complete job/nats-global-bootstrap --timeout=10m
+kubectl -n nats wait --for=condition=complete job/nats-regional-bootstrap --timeout=10m
+```
+
+You can then apply one benchmark bundle, for example:
+
+```sh
+kubectl apply -f benchmark/benchmark-nats-multiple-replicas.yaml
+```
+
+An existing regional or otherwise customized NATS installation is also valid
+when it provides the `nats-client-config` and `nats-ca` ConfigMaps,
+`nats-credentials-*`, `global-application-secrets`, and
+`messageoperations-admin-api` Secrets, plus the configured benchmark KV/Object
+Store buckets expected by the application namespace.
 
 ## Running outside the target cluster
 
@@ -93,8 +132,20 @@ python src/benchmarkservice/standalone.py \
 The same image can run as a Job in a separate cluster. A Kubernetes `command`
 of `python standalone.py` replaces the image's API entrypoint; pass the same
 arguments shown above. The standalone runner starts multiple synchronized
-Locust processes automatically above 100 open-loop orders/s or 1,000
-closed-loop users.
+Locust processes automatically above 100 open-loop/saturation orders/s or
+1,000 closed-loop users. For example, a saturation run can be started with:
+
+```sh
+python src/benchmarkservice/standalone.py \
+  --application-type NATS \
+  --url http://FRONTEND_EXTERNAL_IP \
+  --metrics-url http://BENCHMARKMETRICS_EXTERNAL_IP/snapshot \
+  --workload saturation \
+  --warmup-seconds 0 \
+  --duration-seconds 600 \
+  --saturation-max-rate 1000 \
+  --output ./benchmark-results
+```
 
 When the original GRPC application is deployed separately instead of through
 `benchmark/benchmark-original-app.yaml`, deploy its metrics gateway with:
@@ -116,9 +167,8 @@ The gateway can require a bearer token. Create a Secret named
 `benchmark-metrics-auth` with the key `BENCHMARK_METRICS_TOKEN` in the target
 cluster, restart `benchmarkmetrics`, and set the same environment variable on
 the standalone runner or in the cluster hosting benchmark Jobs. The generated
-bundles leave authentication optional so they remain self-contained; restrict
-the LoadBalancer's source ranges or enable the token before using it on an
-untrusted network.
+bundles leave metrics authentication optional; restrict the LoadBalancer's
+source ranges or enable the token before using it on an untrusted network.
 
 ## API configuration
 
@@ -131,13 +181,14 @@ The API discovers its own immutable container image through the Kubernetes API
 and uses that exact image for Jobs. This keeps Job and controller code at the
 same release without a mutable image environment variable.
 
-For NATS application runs, the standard fresh-cluster bootstrap creates the
-replicated stores. For original-GRPC comparison runs,
-`benchmark/benchmark-original-app.yaml` includes an isolated JetStream
-control/artifact store that is excluded from measured application resources.
+The prerequisite NATS bootstrap creates the replicated benchmark stores used
+by both NATS application runs and original-GRPC comparison runs. No benchmark
+bundle contains its own broker, client configuration, credentials, or store
+bootstrap resources.
 
-Run-level settings include workload, warm-up/steady/drain durations, user or
-arrival rate, outcome/settlement timeouts, random seed, and collector interval.
+Run-level settings include workload, warm-up/steady/drain durations, user,
+arrival or saturation maximum rate, outcome/settlement timeouts, random seed,
+and collector interval.
 The web UI can also submit additional runs with the same settings, waiting for
 each run to finish and for a configurable delay before submitting the next.
 Each re-run has its own run ID and artifacts. Re-run scheduling is owned by the
@@ -152,6 +203,7 @@ Before it exits it uploads:
 
 - `business.jsonl` and `business.csv`;
 - `outstanding.jsonl` and `resources.jsonl`;
+- `saturation.jsonl` for saturation rung observations and stop decisions;
 - `summary.json`, `runner.log`, `config.json`, and `status.json`;
 - diagnostic `locust_*.csv` files; and
 - one ZIP archive containing the complete run.

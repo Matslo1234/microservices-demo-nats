@@ -58,13 +58,16 @@ HTML = r"""<!doctype html>
       <label>Target metrics URL<input name="metrics_url" type="url"
         placeholder="https://metrics.example.com/snapshot" required></label>
       <label>Workload<select name="workload"><option value="closed">Closed-loop users</option>
-        <option value="open">Open-loop capacity</option></select></label>
+        <option value="open">Open-loop capacity</option>
+        <option value="saturation">Open-loop saturation ladder</option></select></label>
       <label>Warm-up (seconds)<input name="warmup_seconds" type="number" min="0" value="30"></label>
       <label>Steady interval (seconds)<input name="duration_seconds" type="number" min="1" value="120"></label>
       <label>Drain (seconds)<input name="drain_seconds" type="number" min="1" value="60"></label>
       <label>Closed-loop users<input name="users" type="number" min="1" value="10"></label>
       <label>User spawn rate/s<input name="spawn_rate" type="number" min=".01" step=".01" value="1"></label>
       <label>Open-loop orders/s<input name="arrival_rate" type="number" min=".01" step=".01" value="1"></label>
+      <label>Saturation maximum orders/s<input name="saturation_max_rate"
+        type="number" min="10" step="10" value="1000"></label>
       <label>Outcome timeout (seconds)<input name="outcome_timeout_seconds" type="number" min="1" value="30"></label>
       <label>Settlement timeout (seconds)<input name="settlement_timeout_seconds" type="number" min="1" value="60"></label>
       <label>Resource sample interval<input name="resource_sample_interval_seconds" type="number" min="1" value="5"></label>
@@ -78,8 +81,10 @@ HTML = r"""<!doctype html>
         Runtime resources</span></label>
     </div><div class="actions"><button id="start" type="submit">Start benchmark</button>
       <button id="stop" class="danger" type="button" disabled>Stop active run</button></div>
-    <p class="muted">Re-runs use the same settings and produce separate results. Keep this
-      browser tab open until the sequence finishes.</p>
+    <p class="muted">The saturation ladder starts at 10 orders/s and adds 10 every
+      10 seconds; the steady interval and maximum rate are safety bounds. Re-runs use
+      the same settings and produce separate results. Keep this browser tab open until
+      the sequence finishes.</p>
     <p id="message" class="muted" role="status" aria-live="polite"></p></form>
   </section>
   <section class="card"><div class="card-heading"><h2>Runs</h2>
@@ -95,7 +100,7 @@ const message=document.querySelector("#message"), startButton=document.querySele
   rerunDelay=document.querySelector("#rerun-delay"),
   downloadAllButton=document.querySelector("#download-all");
 const fields=["warmup_seconds","duration_seconds","drain_seconds","users","spawn_rate",
-  "arrival_rate","outcome_timeout_seconds","settlement_timeout_seconds",
+  "arrival_rate","saturation_max_rate","outcome_timeout_seconds","settlement_timeout_seconds",
   "resource_sample_interval_seconds","seed"];
 async function api(path,options={}) {
   const response=await fetch(path,options), data=await response.json().catch(()=>({error:response.statusText}));

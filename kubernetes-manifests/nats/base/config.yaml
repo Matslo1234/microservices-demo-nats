@@ -212,7 +212,7 @@ data:
                 "boutique.evt.payment.authorization-release-failed.v1",
                 "_INBOX.>", "$JS.API.>", "$JS.ACK.>"
               ],
-              subscribe: ["_INBOX.>", "boutique.cmd.payment.>", "boutique.qry.payment.tokenize.v1"]
+              subscribe: ["_INBOX.>", "$SRV.>", "boutique.cmd.payment.>", "boutique.qry.payment.tokenize.v1"]
             }
           },
           {

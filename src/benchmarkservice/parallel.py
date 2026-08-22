@@ -23,6 +23,19 @@ def start_object(run_id: str) -> str:
     return f"{run_id}/workers/start.json"
 
 
+def saturation_progress_object(
+    run_id: str, rung: int, worker_index: int
+) -> str:
+    return (
+        f"{run_id}/saturation/{rung:04d}/"
+        f"worker-{worker_index:04d}.json"
+    )
+
+
+def saturation_decision_object(run_id: str, rung: int) -> str:
+    return f"{run_id}/saturation/{rung:04d}/decision.json"
+
+
 def archive_directory(directory: Path) -> bytes:
     output = io.BytesIO()
     with zipfile.ZipFile(
@@ -107,9 +120,10 @@ def merge_worker_outputs(
         record["outstanding"] = total_outstanding
     _write_records(run_directory / "outstanding.jsonl", outstanding)
 
-    resource_source = worker_directories[0] / "resources.jsonl"
-    if resource_source.exists():
-        shutil.copyfile(resource_source, run_directory / "resources.jsonl")
+    for shared_artifact in ("resources.jsonl", "saturation.jsonl"):
+        source = worker_directories[0] / shared_artifact
+        if source.exists():
+            shutil.copyfile(source, run_directory / shared_artifact)
 
     statuses: list[dict[str, Any]] = []
     with (run_directory / "runner.log").open("wb") as combined_log:

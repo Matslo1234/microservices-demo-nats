@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import datetime
 import math
+import os
 import random
 import time
 import uuid
@@ -17,6 +18,11 @@ from locust import FastHttpUser, between, events, task
 from locust.exception import StopUser
 
 import runtime
+from config import (
+    SATURATION_START_RATE,
+    SATURATION_STEP_RATE,
+    SATURATION_STEP_SECONDS,
+)
 from runtime import (
     CONFIG,
     RECORDER,
@@ -27,6 +33,7 @@ from runtime import (
     start_clock,
     submission_deadline,
 )
+from saturation import SaturationCoordinator
 from session_cookie import SESSION_COOKIE_NAME, issued_session_cookie
 from sse import (
     ReceivedOrderEvent,
@@ -318,13 +325,22 @@ class StorefrontAdapter:
         self,
         scheduled_at: float | None,
         schedule_delay_ms: float | None,
+        saturation_rung: int | None = None,
+        target_requests_per_second: float | None = None,
     ) -> dict[str, Any]:
         phase = phase_now()
         if scheduled_at is not None:
             phase = phase_for_elapsed(
                 max(0.0, scheduled_at - runtime.TEST_STARTED_EPOCH)
             )
-        return {
+        if saturation_rung is not None:
+            phase = "steady"
+        elif (
+            CONFIG.workload == "saturation"
+            and target_requests_per_second is not None
+        ):
+            phase = "warmup"
+        context = {
             "application_type": CONFIG.application_type,
             "workload": CONFIG.workload,
             "phase": phase,
@@ -335,13 +351,30 @@ class StorefrontAdapter:
             "accepted": False,
             "outcome": "UNKNOWN",
         }
+        if CONFIG.workload == "saturation":
+            context.update(
+                {
+                    "saturation_rung": saturation_rung,
+                    "target_requests_per_second": (
+                        target_requests_per_second
+                    ),
+                }
+            )
+        return context
 
     def record_precondition_failure(
         self,
         scheduled_at: float | None = None,
         schedule_delay_ms: float | None = None,
+        saturation_rung: int | None = None,
+        target_requests_per_second: float | None = None,
     ) -> None:
-        context = self.base_context(scheduled_at, schedule_delay_ms)
+        context = self.base_context(
+            scheduled_at,
+            schedule_delay_ms,
+            saturation_rung,
+            target_requests_per_second,
+        )
         context["outcome"] = "PRECONDITION_FAILED"
         with self.user.environment.events.request.measure(
             "BUSINESS", "checkout_to_outcome", context=context
@@ -354,8 +387,15 @@ class StorefrontAdapter:
         self,
         scheduled_at: float,
         schedule_delay_ms: float,
+        saturation_rung: int | None = None,
+        target_requests_per_second: float | None = None,
     ) -> None:
-        context = self.base_context(scheduled_at, schedule_delay_ms)
+        context = self.base_context(
+            scheduled_at,
+            schedule_delay_ms,
+            saturation_rung,
+            target_requests_per_second,
+        )
         context["outcome"] = "GENERATOR_SATURATED"
         with self.user.environment.events.request.measure(
             "BUSINESS", "checkout_to_outcome", context=context
@@ -370,6 +410,8 @@ class StorefrontAdapter:
         scheduled_at: float | None = None,
         schedule_delay_ms: float | None = None,
         track_settlement_inline: bool = False,
+        saturation_rung: int | None = None,
+        target_requests_per_second: float | None = None,
     ) -> None:
         raise NotImplementedError
 
@@ -395,8 +437,15 @@ class GrpcAdapter(StorefrontAdapter):
         scheduled_at: float | None = None,
         schedule_delay_ms: float | None = None,
         track_settlement_inline: bool = False,
+        saturation_rung: int | None = None,
+        target_requests_per_second: float | None = None,
     ) -> None:
-        context = self.base_context(scheduled_at, schedule_delay_ms)
+        context = self.base_context(
+            scheduled_at,
+            schedule_delay_ms,
+            saturation_rung,
+            target_requests_per_second,
+        )
         data = self.checkout_data()
         with self.user.environment.events.request.measure(
             "BUSINESS", "checkout_to_outcome", context=context
@@ -485,8 +534,15 @@ class NatsAdapter(StorefrontAdapter):
         scheduled_at: float | None = None,
         schedule_delay_ms: float | None = None,
         track_settlement_inline: bool = False,
+        saturation_rung: int | None = None,
+        target_requests_per_second: float | None = None,
     ) -> None:
-        base_context = self.base_context(scheduled_at, schedule_delay_ms)
+        base_context = self.base_context(
+            scheduled_at,
+            schedule_delay_ms,
+            saturation_rung,
+            target_requests_per_second,
+        )
         settled_context = dict(base_context)
         data = self.checkout_data()
         checkout_started = time.monotonic()
@@ -1240,4 +1296,186 @@ class OpenLoopDriver(FastHttpUser):
             scheduled_at,
             schedule_delay_ms,
             track_settlement_inline=True,
+        )
+
+
+class SaturationDriver(FastHttpUser):
+    fixed_count = 1
+    wait_time = lambda self: 0
+    network_timeout = SSE_NETWORK_TIMEOUT_SECONDS
+    connection_timeout = 5.0
+    worker_count = max(
+        1, int(os.environ.get("BENCHMARK_WORKER_COUNT", "1") or "1")
+    )
+    worker_index = int(
+        os.environ.get("BENCHMARK_WORKER_INDEX", "") or "0"
+    )
+    concurrency = max(
+        20,
+        min(
+            5_000,
+            math.ceil(
+                CONFIG.saturation_effective_max_rate
+                / worker_count
+                * max(
+                    CONFIG.outcome_timeout_seconds,
+                    CONFIG.settlement_timeout_seconds,
+                )
+            ),
+        ),
+    )
+
+    @task
+    def schedule(self) -> None:
+        active: set[gevent.Greenlet] = set()
+        coordinator = SaturationCoordinator(
+            application_type=CONFIG.application_type,
+            output_directory=runtime.OUTPUT_DIRECTORY,
+            worker_index=self.worker_index,
+            worker_count=self.worker_count,
+        )
+        try:
+            if CONFIG.warmup_seconds:
+                self._schedule_window(
+                    active=active,
+                    duration_seconds=CONFIG.warmup_seconds,
+                    target_rate=SATURATION_START_RATE,
+                    rung=None,
+                )
+
+            remaining = float(CONFIG.duration_seconds)
+            rung = 0
+            while remaining > 0:
+                duration = min(float(SATURATION_STEP_SECONDS), remaining)
+                target_rate = min(
+                    CONFIG.saturation_max_rate,
+                    SATURATION_START_RATE + rung * SATURATION_STEP_RATE,
+                )
+                runtime.set_saturation_rung(rung, target_rate)
+                completed_before = RECORDER.completed_count()
+                pending_start = RESOURCE_SAMPLER.latest_pending()
+                started_elapsed = runtime.elapsed_now()
+                self._schedule_window(
+                    active=active,
+                    duration_seconds=duration,
+                    target_rate=target_rate,
+                    rung=rung,
+                )
+                ended_elapsed = runtime.elapsed_now()
+                remaining -= duration
+                maximum_rate_reached = (
+                    target_rate >= CONFIG.saturation_max_rate
+                )
+                decision = coordinator.finish_rung(
+                    rung=rung,
+                    target_rate=target_rate,
+                    started_elapsed_seconds=started_elapsed,
+                    ended_elapsed_seconds=ended_elapsed,
+                    completed_before=completed_before,
+                    completed_after=RECORDER.completed_count(),
+                    pending_start=pending_start,
+                    pending_end=RESOURCE_SAMPLER.latest_pending(),
+                    final_rung=remaining <= 0,
+                    maximum_rate_reached=maximum_rate_reached,
+                )
+                if decision.get("stop"):
+                    runtime.begin_early_drain()
+                    break
+                rung += 1
+
+            remaining_drain = max(
+                0.0, drain_deadline() - time.monotonic()
+            )
+            gevent.joinall(list(active), timeout=remaining_drain)
+            for greenlet in list(active):
+                greenlet.kill(block=False)
+        finally:
+            coordinator.close()
+
+        runner = self.environment.runner
+        if runner is not None:
+            gevent.spawn_later(0, runner.quit)
+        raise StopUser()
+
+    def _schedule_window(
+        self,
+        *,
+        active: set[gevent.Greenlet],
+        duration_seconds: float,
+        target_rate: float,
+        rung: int | None,
+    ) -> None:
+        window_started_monotonic = time.monotonic()
+        window_started_epoch = time.time()
+        scheduled_count = max(
+            0, math.ceil(target_rate * duration_seconds - 1e-9)
+        )
+        for ordinal in range(
+            self.worker_index, scheduled_count, self.worker_count
+        ):
+            scheduled_offset = ordinal / target_rate
+            scheduled_monotonic = (
+                window_started_monotonic + scheduled_offset
+            )
+            delay = scheduled_monotonic - time.monotonic()
+            if delay > 0:
+                gevent.sleep(delay)
+            scheduled_at = window_started_epoch + scheduled_offset
+            schedule_delay_ms = max(
+                0.0, (time.monotonic() - scheduled_monotonic) * 1000
+            )
+            if len(active) >= self.concurrency:
+                adapter_for(
+                    self,
+                    CONFIG.seed + (rung or 0) * 1_000_003 + ordinal + 1,
+                ).record_generator_saturation(
+                    scheduled_at,
+                    schedule_delay_ms,
+                    rung,
+                    target_rate,
+                )
+                continue
+            greenlet = gevent.spawn(
+                self._transaction,
+                ordinal,
+                scheduled_at,
+                schedule_delay_ms,
+                rung,
+                target_rate,
+            )
+            active.add(greenlet)
+            greenlet.link(lambda completed: active.discard(completed))
+
+        window_ends = window_started_monotonic + duration_seconds
+        delay = window_ends - time.monotonic()
+        if delay > 0:
+            gevent.sleep(delay)
+
+    def _transaction(
+        self,
+        ordinal: int,
+        scheduled_at: float,
+        schedule_delay_ms: float,
+        rung: int | None,
+        target_rate: float,
+    ) -> None:
+        adapter = adapter_for(
+            self,
+            CONFIG.seed + (rung or 0) * 1_000_003 + ordinal + 1,
+            session_id=f"benchmark-{uuid.uuid4()}",
+        )
+        if not adapter.add_item():
+            adapter.record_precondition_failure(
+                scheduled_at,
+                schedule_delay_ms,
+                rung,
+                target_rate,
+            )
+            return
+        adapter.checkout(
+            scheduled_at,
+            schedule_delay_ms,
+            track_settlement_inline=True,
+            saturation_rung=rung,
+            target_requests_per_second=target_rate,
         )

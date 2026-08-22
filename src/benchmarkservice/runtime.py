@@ -15,6 +15,7 @@ import gevent
 from gevent.event import Event
 
 from config import BenchmarkConfig
+from saturation import consumer_pending_total
 
 
 CONFIG_FILE = Path(os.environ["BENCHMARK_CONFIG_FILE"])
@@ -24,6 +25,9 @@ with CONFIG_FILE.open(encoding="utf-8") as source:
 
 TEST_STARTED_MONOTONIC = 0.0
 TEST_STARTED_EPOCH = 0.0
+EARLY_DRAIN_DEADLINE: float | None = None
+ACTIVE_SATURATION_RUNG: int | None = None
+ACTIVE_SATURATION_RATE: float | None = None
 
 
 def start_clock() -> None:
@@ -55,11 +59,34 @@ def phase_for_elapsed(elapsed: float) -> str:
 
 
 def phase_now() -> str:
+    if (
+        EARLY_DRAIN_DEADLINE is not None
+        and time.monotonic() >= EARLY_DRAIN_DEADLINE - CONFIG.drain_seconds
+    ):
+        return "drain"
+    if ACTIVE_SATURATION_RUNG is not None:
+        return "steady"
     return phase_for_elapsed(elapsed_now())
 
 
 def drain_deadline() -> float:
-    return TEST_STARTED_MONOTONIC + CONFIG.run_seconds
+    configured = TEST_STARTED_MONOTONIC + CONFIG.run_seconds
+    return min(configured, EARLY_DRAIN_DEADLINE or configured)
+
+
+def begin_early_drain() -> float:
+    global EARLY_DRAIN_DEADLINE
+    global ACTIVE_SATURATION_RATE, ACTIVE_SATURATION_RUNG
+    EARLY_DRAIN_DEADLINE = time.monotonic() + CONFIG.drain_seconds
+    ACTIVE_SATURATION_RUNG = None
+    ACTIVE_SATURATION_RATE = None
+    return EARLY_DRAIN_DEADLINE
+
+
+def set_saturation_rung(rung: int, target_rate: float) -> None:
+    global ACTIVE_SATURATION_RATE, ACTIVE_SATURATION_RUNG
+    ACTIVE_SATURATION_RUNG = rung
+    ACTIVE_SATURATION_RATE = target_rate
 
 
 def submission_deadline() -> float:
@@ -72,6 +99,7 @@ class ArtifactRecorder:
         self._outstanding: Any = None
         self._lock = threading.Lock()
         self._outstanding_count = 0
+        self._completed_count = 0
 
     def open(self) -> None:
         OUTPUT_DIRECTORY.mkdir(parents=True, exist_ok=True)
@@ -123,6 +151,15 @@ class ArtifactRecorder:
         }
         with self._lock:
             self._business.write(json.dumps(record, sort_keys=True) + "\n")
+            if (
+                name == "checkout_to_outcome"
+                and safe_context.get("outcome") == "COMPLETED"
+            ):
+                self._completed_count += 1
+
+    def completed_count(self) -> int:
+        with self._lock:
+            return self._completed_count
 
     def accepted(self, transaction_id: str, phase: str) -> None:
         with self._lock:
@@ -191,6 +228,7 @@ class ResourceSampler:
         self._stop = Event()
         self._greenlet: gevent.Greenlet | None = None
         self._target: Any = None
+        self._latest_pending: float | None = None
 
     def start(self) -> None:
         if not (CONFIG.collect_resources or CONFIG.collect_nats_metrics):
@@ -226,12 +264,24 @@ class ResourceSampler:
                 "nats_metrics": [],
                 "errors": [],
             }
+            if CONFIG.workload == "saturation":
+                record.update(
+                    {
+                        "saturation_rung": ACTIVE_SATURATION_RUNG,
+                        "target_requests_per_second": (
+                            ACTIVE_SATURATION_RATE
+                        ),
+                    }
+                )
             try:
                 snapshot = metrics.sample()
                 if CONFIG.collect_resources:
                     record["pods"] = snapshot["pods"]
                 if CONFIG.collect_nats_metrics:
                     record["nats_metrics"] = snapshot["nats_metrics"]
+                    self._latest_pending = consumer_pending_total(
+                        snapshot["nats_metrics"]
+                    )
                 record["errors"].extend(snapshot["errors"])
             except Exception as exc:
                 record["errors"].append(f"metrics endpoint: {exc}")
@@ -242,6 +292,9 @@ class ResourceSampler:
                 timeout=CONFIG.resource_sample_interval_seconds
             ):
                 break
+
+    def latest_pending(self) -> float | None:
+        return self._latest_pending
 
 
 RESOURCE_SAMPLER = ResourceSampler()

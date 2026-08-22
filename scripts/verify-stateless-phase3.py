@@ -183,10 +183,6 @@ def verify_manifests() -> None:
             raise VerificationError(
                 f"{path.relative_to(ROOT)} retains provider storage: {remaining}"
             )
-        if path.parent == ROOT / "benchmark" and "SHIPPING_PROVIDER_SECRET" not in content:
-            raise VerificationError(
-                f"{path.relative_to(ROOT)} does not provision the shipping provider secret"
-            )
         services = (
             (path.stem,)
             if path.parent == ROOT / "kubernetes-manifests"

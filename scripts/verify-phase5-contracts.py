@@ -64,7 +64,8 @@ require(payment_path, payment,
         "INVALID_OR_EXPIRED_TOKEN", "authorization_declined", "capture_failed", "release_failed",
         "ptok_v1", "pauth_v1", "PAYMENT_SIGNING_KEY", "PAYMENT_SIGNING_KEY_ID",
         "PAYMENT_VERIFICATION_KEYS", "createSigningKeyring",
-        "crypto.hkdfSync", "crypto.timingSafeEqual", "Nats-Msg-Id")
+        "crypto.hkdfSync", "crypto.timingSafeEqual", "Nats-Msg-Id",
+        "nc.services.add", "PaymentTokenization", "addEndpoint('tokenize'")
 forbid(payment_path, payment,
        "credit_card_number:", "credit_card_cvv:", "PaymentState", "PAYMENT_STORE_PATH",
        "provider-state.json")
@@ -123,6 +124,12 @@ require(payment_manifest_path, payment_manifest,
         "nats-client-config", "nats-ca")
 forbid(payment_manifest_path, payment_manifest,
        "PAYMENT_STORE_PATH", "payment-data", "PersistentVolumeClaim", "type: Recreate")
+
+nats_config_path, nats_config = source(
+    "kubernetes-manifests", "nats", "base", "config.yaml")
+require(nats_config_path, nats_config,
+        'subscribe: ["_INBOX.>", "$SRV.>", "boutique.cmd.payment.>", '
+        '"boutique.qry.payment.tokenize.v1"]')
 
 setup_path, setup = source("kubernetes-manifests", "nats", "base", "setup.yaml")
 require(setup_path, setup,

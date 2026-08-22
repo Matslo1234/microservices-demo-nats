@@ -5,7 +5,7 @@ const assert = require('assert');
 const {
   createSigningKeyring, deriveResultMessageID, tokenize, verifyPaymentToken,
   loadSigningKeyring, processTokenBatch, loadContracts, processCommand, runCommandConsumer,
-  superviseCommandConsumer, processingTimeMs, waitForProcessing,
+  superviseCommandConsumer, processingTimeMs, waitForProcessing, registerTokenizationService,
 } = require('./nats_worker');
 
 async function main() {
@@ -147,6 +147,57 @@ async function main() {
       `replica B could not verify token batch item ${index}`,
     );
   }
+
+  let serviceConfig;
+  let endpointRegistration;
+  let serviceRegistrationFlushed = false;
+  const tokenizationService = {
+    isStopped: false,
+    addEndpoint: (name, options) => {
+      endpointRegistration = {name, options};
+      return {name, subject: options.subject};
+    },
+    stop: async () => {},
+  };
+  const registered = await registerTokenizationService({
+    services: {
+      add: async config => {
+        serviceConfig = config;
+        return tokenizationService;
+      },
+    },
+    flush: async () => { serviceRegistrationFlushed = true; },
+  }, replicaAKeyring);
+  assert.deepEqual(serviceConfig, {
+    name: 'PaymentTokenization',
+    version: '1.0.0',
+    description: 'Ephemeral payment card tokenization',
+    queue: 'payment-tokenize-v1',
+  });
+  assert.equal(endpointRegistration.name, 'tokenize');
+  assert.equal(endpointRegistration.options.subject, 'boutique.qry.payment.tokenize.v1');
+  assert.equal(typeof endpointRegistration.options.handler, 'function');
+  assert.equal(registered.service, tokenizationService);
+  assert(serviceRegistrationFlushed, 'tokenization service registration was not flushed');
+  const microResponses = [];
+  const microRequest = {
+    ...request,
+    order_id: 'micro-tokenization-order',
+    idempotency_key: 'micro-tokenization-order',
+  };
+  endpointRegistration.options.handler(null, {
+    subject: 'boutique.qry.payment.tokenize.v1',
+    string: () => JSON.stringify(microRequest),
+    respond: encoded => microResponses.push(JSON.parse(encoded)),
+  });
+  await new Promise(resolve => setTimeout(resolve, 30));
+  assert.equal(microResponses.length, 1, 'NATS micro endpoint did not respond');
+  assert.doesNotThrow(
+    () => verifyPaymentToken(
+      microResponses[0].payment_token, microRequest.order_id, replicaBKeyring,
+    ),
+    'NATS micro endpoint returned an invalid payment token',
+  );
 
   const contracts = await loadContracts();
   const occurredAt = {seconds: Math.floor(now / 1000), nanos: (now % 1000) * 1000000};

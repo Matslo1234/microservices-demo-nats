@@ -7,6 +7,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -37,13 +38,18 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument(
         "--application-type", choices=("GRPC", "NATS"), required=True
     )
-    result.add_argument("--workload", choices=("closed", "open"), default="closed")
+    result.add_argument(
+        "--workload",
+        choices=("closed", "open", "saturation"),
+        default="closed",
+    )
     result.add_argument("--warmup-seconds", type=int, default=30)
     result.add_argument("--duration-seconds", type=int, default=120)
     result.add_argument("--drain-seconds", type=int, default=60)
     result.add_argument("--users", type=int, default=10)
     result.add_argument("--spawn-rate", type=float, default=1.0)
     result.add_argument("--arrival-rate", type=float, default=1.0)
+    result.add_argument("--saturation-max-rate", type=float, default=1_000.0)
     result.add_argument("--outcome-timeout-seconds", type=float, default=30.0)
     result.add_argument(
         "--settlement-timeout-seconds", type=float, default=60.0
@@ -89,11 +95,11 @@ def locust_command(
 ) -> list[str]:
     users = config.users if config.workload == "closed" else 1
     spawn_rate = config.spawn_rate if config.workload == "closed" else 1
-    user_class = (
-        "ClosedLoopUser"
-        if config.workload == "closed"
-        else "OpenLoopDriver"
-    )
+    user_class = {
+        "closed": "ClosedLoopUser",
+        "open": "OpenLoopDriver",
+        "saturation": "SaturationDriver",
+    }[config.workload]
     return [
         sys.executable,
         "-m",
@@ -156,6 +162,9 @@ def run(config: BenchmarkConfig, output_root: Path) -> tuple[int, Path]:
     signal.signal(signal.SIGINT, request_stop)
     start_epoch = time.time() + (5 if config.worker_count > 1 else 0)
     worker_directories: list[Path] = []
+    coordination_directory = run_directory / ".saturation-coordination"
+    if config.workload == "saturation" and config.worker_count > 1:
+        coordination_directory.mkdir(mode=0o750)
     try:
         for index in range(config.worker_count):
             worker_config = config.for_worker(index)
@@ -178,8 +187,15 @@ def run(config: BenchmarkConfig, output_root: Path) -> tuple[int, Path]:
                     "BENCHMARK_CONFIG_FILE": str(config_path),
                     "BENCHMARK_OUTPUT_DIR": str(worker_directory),
                     "BENCHMARK_START_EPOCH": str(start_epoch),
+                    "BENCHMARK_RUN_ID": run_id,
+                    "BENCHMARK_WORKER_COUNT": str(config.worker_count),
+                    "BENCHMARK_WORKER_INDEX": str(index),
                 }
             )
+            if config.workload == "saturation" and config.worker_count > 1:
+                environment["BENCHMARK_SATURATION_COORDINATION_DIR"] = str(
+                    coordination_directory
+                )
             log = (worker_directory / "runner.log").open("wb")
             logs.append(log)
             processes.append(
@@ -216,6 +232,8 @@ def run(config: BenchmarkConfig, output_root: Path) -> tuple[int, Path]:
 
     if config.worker_count > 1:
         statuses = merge_worker_outputs(run_directory, worker_directories)
+    if coordination_directory.exists():
+        shutil.rmtree(coordination_directory)
     failed = [status for status in statuses if status["state"] != "completed"]
     state = "failed" if failed else "completed"
     message = None

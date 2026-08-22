@@ -12,10 +12,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# Self-contained GRPC application benchmark environment.
+# GRPC application benchmark environment.
 #
-# Benchmark run state and artifacts are shared through the isolated NATS
-# control store while runner workloads execute as disposable Kubernetes Jobs.
+# A default dynamic StorageClass is required. Install and wait for the standard
+# NATS configuration before applying this bundle. Benchmark run state and
+# artifacts use its JetStream stores while runner workloads execute as
+# disposable Kubernetes Jobs:
+#   kubectl apply -k kubernetes-manifests/nats/fresh-cluster
+#   kubectl -n nats rollout status deployment/nats-setup --timeout=5m
+#   kubectl -n nats rollout status statefulset/nats --timeout=10m
+#   kubectl -n nats wait --for=condition=complete job/nats-global-bootstrap --timeout=10m
+#   kubectl -n nats wait --for=condition=complete job/nats-regional-bootstrap --timeout=10m
+#   kubectl apply -f benchmark/benchmark-original-app.yaml
+#
 # Run Locust outside this cluster and use the external frontend and
 # benchmarkmetrics URLs to retain target-cluster resource samples.
 
@@ -894,161 +903,6 @@ metadata:
   name: productcatalogservice
 ---
 apiVersion: v1
-kind: Namespace
-metadata:
-  name: benchmark-system
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: benchmark-state
-  namespace: benchmark-system
-spec:
-  selector:
-    app: benchmark-state
-  ports:
-  - name: nats
-    port: 4222
-    targetPort: nats
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: benchmark-state
-  namespace: benchmark-system
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: benchmark-state
-  strategy:
-    type: RollingUpdate
-  template:
-    metadata:
-      labels:
-        app: benchmark-state
-    spec:
-      automountServiceAccountToken: false
-      securityContext:
-        runAsGroup: 1000
-        runAsNonRoot: true
-        runAsUser: 1000
-        seccompProfile:
-          type: RuntimeDefault
-      containers:
-      - name: nats
-        image: nats:2.14.3-alpine
-        args:
-        - --jetstream
-        - --store_dir=/data
-        ports:
-        - name: nats
-          containerPort: 4222
-        readinessProbe:
-          tcpSocket:
-            port: nats
-          periodSeconds: 2
-        livenessProbe:
-          tcpSocket:
-            port: nats
-          periodSeconds: 10
-        resources:
-          requests:
-            cpu: 50m
-            memory: 64Mi
-          limits:
-            cpu: 250m
-            # Raw exports and archives are retained in the local Object Store.
-            # Leave enough cache/recovery headroom across repeated runs.
-            memory: 2Gi
-        securityContext:
-          allowPrivilegeEscalation: false
-          capabilities:
-            drop: ["ALL"]
-          readOnlyRootFilesystem: true
-        volumeMounts:
-        - name: state
-          mountPath: /data
-      volumes:
-      - name: state
-        emptyDir:
-          sizeLimit: 5Gi
----
-apiVersion: batch/v1
-kind: Job
-metadata:
-  name: benchmark-state-bootstrap
-  namespace: benchmark-system
-spec:
-  backoffLimit: 12
-  template:
-    spec:
-      automountServiceAccountToken: false
-      restartPolicy: OnFailure
-      containers:
-      - name: bootstrap
-        image: natsio/nats-box:0.19.7-nonroot
-        command:
-        - /bin/sh
-        - -ec
-        - |
-          server=nats://benchmark-state:4222
-          until nats --server="${server}" account info >/dev/null 2>&1; do
-            sleep 1
-          done
-          if ! nats --server="${server}" kv info BENCHMARK_RUNS >/dev/null 2>&1; then
-            nats --server="${server}" kv add BENCHMARK_RUNS \
-              --history=10 --replicas=1 --storage=file \
-              --max-bucket-size=536870912
-          fi
-          if ! nats --server="${server}" object info BENCHMARK_ARTIFACTS >/dev/null 2>&1; then
-            nats --server="${server}" object add BENCHMARK_ARTIFACTS \
-              --replicas=1 --storage=file \
-              --max-bucket-size=4294967296
-          fi
-        resources:
-          requests:
-            cpu: 10m
-            memory: 32Mi
-          limits:
-            cpu: 100m
-            memory: 128Mi
-        securityContext:
-          allowPrivilegeEscalation: false
-          capabilities:
-            drop: ["ALL"]
-          readOnlyRootFilesystem: true
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: nats-client-config
-data:
-  NATS_URL: nats://benchmark-state.benchmark-system.svc:4222
-  NATS_CA_FILE: ""
-  NATS_CONNECT_TIMEOUT: 2s
-  NATS_RECONNECT_WAIT: 2s
-  NATS_MAX_RECONNECTS: "-1"
-  NATS_PING_INTERVAL: 20s
-  NATS_MAX_PINGS_OUT: "2"
-  NATS_PUBLISH_TIMEOUT: 5s
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: nats-ca
-data: {}
----
-apiVersion: v1
-kind: Secret
-metadata:
-  name: nats-credentials-benchmarkservice
-type: Opaque
-stringData:
-  NATS_USER: ""
-  NATS_PASSWORD: ""
----
-apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: benchmarkservice
@@ -1120,7 +974,7 @@ spec:
             app: benchmarkservice
       containers:
       - name: server
-        image: matslo123/benchmarkservice:v0.5.0@sha256:53b4b74848ff39536162c328b1b6a24b9386b7cde5db8967dabd7a4c2396b477
+        image: matslo123/benchmarkservice:v0.5.0@sha256:b08f16c5add304b4b4e662c396e25cad978a2f7dc8e238a0b982d0585d76916e
         env:
         - name: PORT
           value: "8080"
@@ -1256,7 +1110,7 @@ spec:
           type: RuntimeDefault
       containers:
       - name: server
-        image: matslo123/benchmarkservice:v0.5.0@sha256:53b4b74848ff39536162c328b1b6a24b9386b7cde5db8967dabd7a4c2396b477
+        image: matslo123/benchmarkservice:v0.5.0@sha256:b08f16c5add304b4b4e662c396e25cad978a2f7dc8e238a0b982d0585d76916e
         imagePullPolicy: IfNotPresent
         command: ["python", "metrics_server.py"]
         env:

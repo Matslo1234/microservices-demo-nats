@@ -167,6 +167,39 @@ class BenchmarkConfigTest(unittest.TestCase):
         self.assertEqual(1, open_config.worker_count)
         self.assertEqual(1, closed_config.worker_count)
 
+    def test_saturation_ladder_sizes_workers_for_reachable_maximum(self):
+        config = BenchmarkConfig.from_request(
+            {
+                **self.URLS,
+                "workload": "saturation",
+                "duration_seconds": 120,
+                "saturation_max_rate": 1_000,
+            },
+            "NATS",
+        )
+
+        self.assertEqual(12, config.saturation_step_count)
+        self.assertEqual(120, config.saturation_effective_max_rate)
+        self.assertEqual(2, config.worker_count)
+        self.assertEqual(
+            [120, 120],
+            [
+                config.for_worker(index).saturation_effective_max_rate
+                for index in range(config.worker_count)
+            ],
+        )
+
+    def test_nats_saturation_requires_frequent_pending_samples(self):
+        with self.assertRaisesRegex(ConfigError, "no more than 5"):
+            BenchmarkConfig.from_request(
+                {
+                    **self.URLS,
+                    "workload": "saturation",
+                    "resource_sample_interval_seconds": 10,
+                },
+                "NATS",
+            )
+
     def test_minimum_spawn_rate_remains_valid_after_ten_way_split(self):
         config = BenchmarkConfig.from_request(
             {

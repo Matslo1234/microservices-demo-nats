@@ -11,7 +11,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-from config import BenchmarkConfig
+from config import (
+    BenchmarkConfig,
+    SATURATION_START_RATE,
+    SATURATION_STEP_RATE,
+    SATURATION_STEP_SECONDS,
+)
+from saturation import RAPID_PENDING_GROWTH_PER_SECOND
 
 
 APPLICATION_STREAMS = {"BOUTIQUE_COMMANDS", "BOUTIQUE_EVENTS"}
@@ -77,7 +83,7 @@ def rate(numerator: int, denominator: int) -> float | None:
 
 
 def business_summary(
-    records: list[dict[str, Any]], duration_seconds: int
+    records: list[dict[str, Any]], duration_seconds: float
 ) -> dict[str, Any]:
     steady = [record for record in records if record.get("phase") == "steady"]
     outcomes = [
@@ -393,7 +399,7 @@ def capacity_assessment(
     outstanding: dict[str, Any],
     nats: dict[str, Any],
 ) -> dict[str, Any]:
-    if config.workload != "open":
+    if config.workload not in {"open", "saturation"}:
         return {
             "sustainable": None,
             "reasons": ["capacity is assessed only for open-loop runs"],
@@ -443,13 +449,117 @@ def add_per_order_resource_metrics(
     }
 
 
+def saturation_summary(
+    config: BenchmarkConfig,
+    decisions: list[dict[str, Any]],
+    business_records: list[dict[str, Any]],
+    resource_records: list[dict[str, Any]],
+    outstanding_records: list[dict[str, Any]],
+) -> dict[str, Any]:
+    if not decisions:
+        return {
+            "available": False,
+            "reason": "no saturation rung decisions were recorded",
+            "rungs": [],
+        }
+
+    rungs: list[dict[str, Any]] = []
+    for decision in decisions:
+        rung_number = int(decision["rung"])
+        started = float(decision["started_elapsed_seconds"])
+        ended = float(decision["ended_elapsed_seconds"])
+        duration = float(decision["duration_seconds"])
+        rung_business_records = [
+            record
+            for record in business_records
+            if record.get("context", {}).get("saturation_rung")
+            == rung_number
+        ]
+        rung_resource_records = [
+            record
+            for record in resource_records
+            if (
+                record.get("saturation_rung") == rung_number
+                or (
+                    record.get("saturation_rung") is None
+                    and started
+                    <= float(record.get("elapsed_seconds", -1))
+                    <= ended
+                )
+            )
+        ]
+        rung_outstanding_records = [
+            record
+            for record in outstanding_records
+            if started <= float(record.get("elapsed_seconds", -1)) <= ended
+        ]
+        business = business_summary(rung_business_records, duration)
+        resources = resource_summary(rung_resource_records)
+        add_per_order_resource_metrics(resources, business["completed"])
+        nats = (
+            nats_summary(rung_resource_records)
+            if config.application_type == "NATS"
+            else {
+                "available": False,
+                "reason": "not applicable to GRPC application",
+            }
+        )
+        rungs.append(
+            {
+                **decision,
+                "business": business,
+                "outstanding_orders": outstanding_summary(
+                    rung_outstanding_records
+                ),
+                "resources": resources,
+                "nats": nats,
+            }
+        )
+
+    final = rungs[-1]
+    saturated = bool(final.get("saturated"))
+    sustainable_rungs = rungs[:-1] if saturated else rungs
+    return {
+        "available": True,
+        "start_requests_per_second": SATURATION_START_RATE,
+        "step_requests_per_second": SATURATION_STEP_RATE,
+        "step_seconds": SATURATION_STEP_SECONDS,
+        "maximum_requests_per_second": config.saturation_max_rate,
+        "rapid_pending_growth_threshold_per_second": (
+            RAPID_PENDING_GROWTH_PER_SECOND
+        ),
+        "saturated": saturated,
+        "stop_reason": final.get("stop_reason"),
+        "saturation_requests_per_second": (
+            final.get("target_requests_per_second") if saturated else None
+        ),
+        "highest_sustainable_requests_per_second": (
+            sustainable_rungs[-1].get("target_requests_per_second")
+            if sustainable_rungs
+            else None
+        ),
+        "rungs": rungs,
+    }
+
+
 def build_report(run_directory: Path) -> dict[str, Any]:
     with (run_directory / "config.json").open(encoding="utf-8") as source:
         config = BenchmarkConfig.from_dict(json.load(source))
     business_records = read_json_lines(run_directory / "business.jsonl")
     resource_records = read_json_lines(run_directory / "resources.jsonl")
     outstanding_records = read_json_lines(run_directory / "outstanding.jsonl")
-    business = business_summary(business_records, config.duration_seconds)
+    saturation_decisions = read_json_lines(
+        run_directory / "saturation.jsonl"
+    )
+    measured_duration = (
+        sum(
+            float(decision.get("duration_seconds", 0))
+            for decision in saturation_decisions
+        )
+        if config.workload == "saturation" and saturation_decisions
+        else float(config.duration_seconds)
+    )
+    business = business_summary(business_records, measured_duration)
     resources = resource_summary(resource_records)
     nats = (
         nats_summary(resource_records)
@@ -463,7 +573,7 @@ def build_report(run_directory: Path) -> dict[str, Any]:
         "workload": config.workload,
         "worker_count": config.worker_count,
         "warmup_seconds": config.warmup_seconds,
-        "steady_seconds": config.duration_seconds,
+        "steady_seconds": measured_duration,
         "drain_seconds": config.drain_seconds,
         "business": business,
         "outstanding_orders": outstanding,
@@ -473,6 +583,15 @@ def build_report(run_directory: Path) -> dict[str, Any]:
             config, business, outstanding, nats
         ),
     }
+    if config.workload == "saturation":
+        summary["configured_steady_seconds"] = config.duration_seconds
+        summary["saturation"] = saturation_summary(
+            config,
+            saturation_decisions,
+            business_records,
+            resource_records,
+            outstanding_records,
+        )
     add_per_order_resource_metrics(
         summary["resources"], summary["business"]["completed"]
     )

@@ -10,9 +10,12 @@ from urllib.parse import urlparse
 
 
 APPLICATION_TYPES = {"GRPC", "NATS"}
-WORKLOADS = {"closed", "open"}
+WORKLOADS = {"closed", "open", "saturation"}
 MAX_OPEN_ARRIVAL_RATE_PER_WORKER = 100.0
 MAX_CLOSED_USERS_PER_WORKER = 1_000
+SATURATION_START_RATE = 10.0
+SATURATION_STEP_RATE = 10.0
+SATURATION_STEP_SECONDS = 10
 
 
 class ConfigError(ValueError):
@@ -100,6 +103,7 @@ class BenchmarkConfig:
     users: int
     spawn_rate: float
     arrival_rate: float
+    saturation_max_rate: float
     outcome_timeout_seconds: float
     settlement_timeout_seconds: float
     resource_sample_interval_seconds: float
@@ -132,7 +136,7 @@ class BenchmarkConfig:
 
         workload = str(values.get("workload", "closed")).strip().lower()
         if workload not in WORKLOADS:
-            raise ConfigError("workload must be closed or open")
+            raise ConfigError("workload must be closed, open, or saturation")
         target_url = normalize_target_url(
             str(values.get("target_url", ""))
         )
@@ -150,6 +154,18 @@ class BenchmarkConfig:
         if (collect_resources or collect_nats_metrics) and metrics_url is None:
             raise ConfigError(
                 "metrics_url is required when metrics collection is enabled"
+            )
+        resource_sample_interval_seconds = _number(
+            values, "resource_sample_interval_seconds", 5.0, 1.0, 60.0
+        )
+        if (
+            workload == "saturation"
+            and collect_nats_metrics
+            and resource_sample_interval_seconds > 5.0
+        ):
+            raise ConfigError(
+                "resource_sample_interval_seconds must be no more than 5 "
+                "for NATS saturation workloads"
             )
 
         return cls(
@@ -169,14 +185,21 @@ class BenchmarkConfig:
                 10_000.0,
             ),
             arrival_rate=_number(values, "arrival_rate", 1.0, 0.01, 10_000.0),
+            saturation_max_rate=_number(
+                values,
+                "saturation_max_rate",
+                1_000.0,
+                SATURATION_START_RATE,
+                10_000.0,
+            ),
             outcome_timeout_seconds=_number(
                 values, "outcome_timeout_seconds", 30.0, 1.0, 1800.0
             ),
             settlement_timeout_seconds=_number(
                 values, "settlement_timeout_seconds", 60.0, 1.0, 3600.0
             ),
-            resource_sample_interval_seconds=_number(
-                values, "resource_sample_interval_seconds", 5.0, 1.0, 60.0
+            resource_sample_interval_seconds=(
+                resource_sample_interval_seconds
             ),
             seed=_integer(values, "seed", 1, 0, 2_147_483_647),
             collect_resources=collect_resources,
@@ -217,7 +240,27 @@ class BenchmarkConfig:
                     self.arrival_rate / MAX_OPEN_ARRIVAL_RATE_PER_WORKER
                 ),
             )
+        if self.workload == "saturation":
+            return max(
+                1,
+                math.ceil(
+                    self.saturation_effective_max_rate
+                    / MAX_OPEN_ARRIVAL_RATE_PER_WORKER
+                ),
+            )
         return max(1, math.ceil(self.users / MAX_CLOSED_USERS_PER_WORKER))
+
+    @property
+    def saturation_step_count(self) -> int:
+        return math.ceil(self.duration_seconds / SATURATION_STEP_SECONDS)
+
+    @property
+    def saturation_effective_max_rate(self) -> float:
+        duration_limited_rate = (
+            SATURATION_START_RATE
+            + (self.saturation_step_count - 1) * SATURATION_STEP_RATE
+        )
+        return min(self.saturation_max_rate, duration_limited_rate)
 
     def for_worker(self, index: int) -> "BenchmarkConfig":
         workers = self.worker_count
@@ -244,6 +287,11 @@ class BenchmarkConfig:
                 ),
                 **common,
             )
+        if self.workload == "saturation":
+            # Every synchronized worker needs the global ladder. The driver
+            # deterministically assigns each global request ordinal to one
+            # worker, so retaining the global rate does not duplicate load.
+            return replace(self, **common)
 
         users_per_worker, remainder = divmod(self.users, workers)
         return replace(

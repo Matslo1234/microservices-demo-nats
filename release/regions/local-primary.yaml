@@ -854,7 +854,7 @@ data:
                 "boutique.evt.payment.authorization-release-failed.v1",
                 "_INBOX.>", "$JS.API.>", "$JS.ACK.>"
               ],
-              subscribe: ["_INBOX.>", "boutique.cmd.payment.>", "boutique.qry.payment.tokenize.v1"]
+              subscribe: ["_INBOX.>", "$SRV.>", "boutique.cmd.payment.>", "boutique.qry.payment.tokenize.v1"]
             }
           },
           {
@@ -3809,7 +3809,7 @@ spec:
             name: nats-credentials-paymentservice
         - secretRef:
             name: global-application-secrets
-        image: matslo123/paymentservice:v0.4.0@sha256:85473a6e3663fdfc9d706812ac84bb5cdbeca9915b1856a3f74e3f62186a020d
+        image: matslo123/paymentservice:v0.4.0@sha256:7b62a5f15aed3d4e114eba9b02be53e38ba17f0375a25ed88124494b6ce73da2
         livenessProbe:
           failureThreshold: 6
           httpGet:
