@@ -64,10 +64,24 @@ func main() {
 		kvReady := 0
 		if current := activeProjector.Load(); current != nil {
 			kvReady = 1
+			labels := fmt.Sprintf(
+				"region=\"%s\",k8s_cluster=\"%s\",nats_cluster=\"%s\",stream_owner_region=\"%s\",stream=\"%s\",consumer=\"%s\"",
+				current.config.regionID, current.config.k8sClusterName, current.config.natsClusterName, current.config.streamOwnerRegion,
+				current.config.eventStream, current.config.durable,
+			)
 			_, _ = fmt.Fprintf(response, "boutique_projection_kv_conflict_retries_total %d\n", current.kvConflictRetries.Load())
 			_, _ = fmt.Fprintf(response, "boutique_projection_stale_events_total %d\n", current.staleEventSkips.Load())
 			_, _ = fmt.Fprintf(response, "boutique_storefront_query_revision %d\n", current.queryRevision.Load())
-			_, _ = fmt.Fprintf(response, "boutique_projection_age_seconds %.6f\n", current.projectionAgeSeconds(time.Now()))
+			_, _ = fmt.Fprintf(response, "boutique_projection_age_seconds{%s} %.6f\n", labels, current.projectionAgeSeconds(time.Now()))
+			_, _ = fmt.Fprintf(response, "boutique_projection_consumer_pending{%s} %d\n", labels, current.consumerPending.Load())
+			_, _ = fmt.Fprintf(response, "boutique_projection_consumer_ack_pending{%s} %d\n", labels, current.consumerAckPending.Load())
+			_, _ = fmt.Fprintf(response, "boutique_projection_last_event_unixtime{%s} %.9f\n", labels, float64(current.lastProjectedUnix.Load())/1e9)
+			_, _ = fmt.Fprintf(response,
+				"boutique_projection_identity_info{region=\"%s\",consumer=\"%s\",products_bucket=\"%s\",carts_bucket=\"%s\",context_bucket=\"%s\",orders_bucket=\"%s\",operations_bucket=\"%s\"} 1\n",
+				current.config.regionID, current.config.durable, current.config.productsBucket,
+				current.config.cartsBucket, current.config.contextBucket, current.config.ordersBucket,
+				current.config.operationsBucket,
+			)
 			if current.catalog != nil {
 				_, _ = fmt.Fprintf(response, "boutique_storefront_catalog_cache_hits_total %d\n", current.catalog.hits.Load())
 				_, _ = fmt.Fprintf(response, "boutique_storefront_catalog_cache_misses_total %d\n", current.catalog.misses.Load())
@@ -107,11 +121,15 @@ func main() {
 	activeProjector.Store(runtime.projector)
 	ready.Store(true)
 	log.Printf(
-		"storefront projection consumer established (rebuilding=%t, query_subscriptions=%d)",
+		"storefront projection consumer established (region=%s k8s_cluster=%s nats_cluster=%s stream=%s durable=%s rebuilding=%t query_subscriptions=%d)",
+		runtime.projector.config.regionID,
+		runtime.projector.config.k8sClusterName,
+		runtime.projector.config.natsClusterName,
+		runtime.projector.config.eventStream,
+		runtime.projector.config.durable,
 		runtime.rebuilding,
 		runtime.queryEndpointCount,
 	)
-	go runtime.projector.run(runtime.subscription, runtime.stop)
 
 	select {
 	case <-signals:
@@ -142,11 +160,15 @@ type projectionRuntime struct {
 }
 
 func initializeProjectionRuntime(ready *atomic.Bool) (*projectionRuntime, error) {
-	nc, js, err := connectNATS()
+	config, err := loadProjectionConfig()
 	if err != nil {
 		return nil, err
 	}
-	projector, err := newProjector(js)
+	nc, js, err := connectNATS(config)
+	if err != nil {
+		return nil, err
+	}
+	projector, err := newProjector(js, config)
 	if err != nil {
 		nc.Close()
 		return nil, err
@@ -169,10 +191,29 @@ func initializeProjectionRuntime(ready *atomic.Bool) (*projectionRuntime, error)
 		log.Printf("NATS disconnected: %v", disconnectErr)
 		ready.Store(false)
 	})
-	nc.SetReconnectHandler(func(_ *nats.Conn) { ready.Store(true) })
-	return &projectionRuntime{
+	nc.SetReconnectHandler(func(_ *nats.Conn) {
+		ready.Store(false)
+		go func() {
+			if err := projector.waitForInitialReplay(config.catchupTimeout); err != nil {
+				log.Printf("NATS reconnected but projection catch-up is incomplete: %v", err)
+				return
+			}
+			ready.Store(true)
+		}()
+	})
+	runtime := &projectionRuntime{
 		nc: nc, projector: projector, subscription: subscription,
 		queryService: queryService, queryEndpointCount: queryEndpointCount,
 		rebuilding: rebuilding, stop: make(chan struct{}),
-	}, nil
+	}
+	go runtime.projector.run(runtime.subscription, runtime.stop)
+	if err := projector.waitForInitialReplay(config.catchupTimeout); err != nil {
+		close(runtime.stop)
+		_ = runtime.queryService.Stop()
+		_ = runtime.subscription.Unsubscribe()
+		projector.close()
+		nc.Close()
+		return nil, err
+	}
+	return runtime, nil
 }

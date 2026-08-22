@@ -13,8 +13,8 @@ from dataclasses import dataclass
 from typing import Any, Coroutine
 
 
-RUN_BUCKET = "BENCHMARK_RUNS"
-ARTIFACT_BUCKET = "BENCHMARK_ARTIFACTS"
+RUN_BUCKET = os.environ.get("BENCHMARK_RUNS_BUCKET", "BENCHMARK_RUNS")
+ARTIFACT_BUCKET = os.environ.get("BENCHMARK_ARTIFACTS_BUCKET", "BENCHMARK_ARTIFACTS")
 
 
 class RecordNotFound(KeyError):
@@ -122,7 +122,12 @@ class NatsSharedStore:
                 servers=[os.environ["NATS_URL"]],
                 user=os.environ.get("NATS_USER") or None,
                 password=os.environ.get("NATS_PASSWORD") or None,
-                name=f"benchmarkservice/{os.environ.get('HOSTNAME', 'local')}",
+                name=(
+                    "benchmarkservice/"
+                    f"{os.environ.get('REGION_ID', 'local')}/"
+                    f"{os.environ.get('K8S_CLUSTER_NAME', 'local')}/"
+                    f"{os.environ.get('HOSTNAME', 'local')}"
+                ),
                 tls=tls_context,
                 connect_timeout=float(
                     os.environ.get("NATS_CONNECT_TIMEOUT", "2s").rstrip("s")

@@ -1,0 +1,60 @@
+{
+  "regions": [
+    {
+      "region_id": "us-east-1",
+      "region_key": "US_EAST_1",
+      "k8s_cluster_name": "eks-cluster",
+      "k8s_context": "arn:aws:eks:us-east-1:301085418229:cluster/eks-cluster",
+      "nats_cluster_name": "BOUTIQUE-us-east-1",
+      "nats_cluster_role": "primary",
+      "nats_mode": "supercluster",
+      "gateway_endpoints": [
+        "k8s-nats-natsgate-20ecb3bc11-aecd78d3074202c8.elb.us-east-1.amazonaws.com:7222",
+        "k8s-nats-natsgate-94d9321d7b-e1cc0fc025b842fd.elb.us-east-1.amazonaws.com:7222",
+        "k8s-nats-natsgate-f5042541ac-3b35793a02898133.elb.us-east-1.amazonaws.com:7222"
+      ],
+      "gateway_source_cidrs": ["0.0.0.0/0"],
+      "remote_gateways": ["eu-central-1"],
+      "stream_owner_region": "us-east-1",
+      "storefront_event_stream": "BOUTIQUE_EVENTS",
+      "storefront_projection_durable": "storefront-projection-us-east-1-v1",
+      "storefront_products_bucket": "STOREFRONT_PRODUCTS_US_EAST_1",
+      "storefront_carts_bucket": "STOREFRONT_CARTS_US_EAST_1",
+      "storefront_context_bucket": "STOREFRONT_CONTEXT_US_EAST_1",
+      "storefront_orders_bucket": "STOREFRONT_ORDERS_US_EAST_1",
+      "storefront_operations_bucket": "STOREFRONT_OPERATIONS_US_EAST_1",
+      "benchmark_runs_bucket": "BENCHMARK_RUNS_US_EAST_1",
+      "benchmark_artifacts_bucket": "BENCHMARK_ARTIFACTS_US_EAST_1",
+      "live_operation_prefix": "boutique.live.operation.us-east-1.",
+      "primary_only_workloads": true
+    },
+    {
+      "region_id": "eu-central-1",
+      "region_key": "EU_CENTRAL_1",
+      "k8s_cluster_name": "eu-central-1-cluster",
+      "k8s_context": "nats-eu-central-1",
+      "nats_cluster_name": "BOUTIQUE-eu-central-1",
+      "nats_cluster_role": "secondary",
+      "nats_mode": "supercluster",
+      "gateway_endpoints": [
+        "k8s-nats-natsgate-2c2a33a54d-a5259d04fb10ed85.elb.eu-central-1.amazonaws.com:7222",
+        "k8s-nats-natsgate-8f9a9906cb-6a59ef3d4ff84f12.elb.eu-central-1.amazonaws.com:7222",
+        "k8s-nats-natsgate-a22d86f61f-f6737fcb872d12be.elb.eu-central-1.amazonaws.com:7222"
+      ],
+      "gateway_source_cidrs": ["0.0.0.0/0"],
+      "remote_gateways": ["us-east-1"],
+      "stream_owner_region": "us-east-1",
+      "storefront_event_stream": "BOUTIQUE_EVENTS",
+      "storefront_projection_durable": "storefront-projection-eu-central-1-v1",
+      "storefront_products_bucket": "STOREFRONT_PRODUCTS_EU_CENTRAL_1",
+      "storefront_carts_bucket": "STOREFRONT_CARTS_EU_CENTRAL_1",
+      "storefront_context_bucket": "STOREFRONT_CONTEXT_EU_CENTRAL_1",
+      "storefront_orders_bucket": "STOREFRONT_ORDERS_EU_CENTRAL_1",
+      "storefront_operations_bucket": "STOREFRONT_OPERATIONS_EU_CENTRAL_1",
+      "benchmark_runs_bucket": "BENCHMARK_RUNS_EU_CENTRAL_1",
+      "benchmark_artifacts_bucket": "BENCHMARK_ARTIFACTS_EU_CENTRAL_1",
+      "live_operation_prefix": "boutique.live.operation.eu-central-1.",
+      "primary_only_workloads": false
+    }
+  ]
+}

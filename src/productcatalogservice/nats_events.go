@@ -82,8 +82,8 @@ func connectCatalogPublisher() (*catalogEventPublisher, error) {
 	user := os.Getenv("NATS_USER")
 	password := os.Getenv("NATS_PASSWORD")
 	caFile := os.Getenv("NATS_CA_FILE")
-	if url == "" || user == "" || password == "" || caFile == "" {
-		return nil, fmt.Errorf("NATS_URL, NATS_USER, NATS_PASSWORD, and NATS_CA_FILE are required")
+	if url == "" || user == "" || password == "" || caFile == "" || os.Getenv("REGION_ID") == "" || os.Getenv("K8S_CLUSTER_NAME") == "" {
+		return nil, fmt.Errorf("NATS_URL, NATS_USER, NATS_PASSWORD, NATS_CA_FILE, REGION_ID, and K8S_CLUSTER_NAME are required")
 	}
 
 	connectTimeout, err := durationFromEnv("NATS_CONNECT_TIMEOUT", 2*time.Second)
@@ -123,7 +123,7 @@ func connectCatalogPublisher() (*catalogEventPublisher, error) {
 
 	nc, err := nats.Connect(
 		url,
-		nats.Name("productcatalogservice/phase2"),
+		nats.Name(fmt.Sprintf("productcatalogservice/phase2/%s/%s", os.Getenv("REGION_ID"), os.Getenv("K8S_CLUSTER_NAME"))),
 		nats.UserInfo(user, password),
 		nats.RootCAs(caFile),
 		nats.Timeout(connectTimeout),

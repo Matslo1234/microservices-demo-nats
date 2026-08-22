@@ -91,10 +91,12 @@ public sealed class NatsCartCommandWorker : BackgroundService, ICartMessagingHea
 
     private async Task RunConnectionAsync(CancellationToken stoppingToken)
     {
+        var regionId = Required("REGION_ID");
+        var clusterName = Required("K8S_CLUSTER_NAME");
         var opts = new NatsOpts
         {
             Url = Required("NATS_URL"),
-            Name = "cartservice/phase4",
+            Name = $"cartservice/phase4/{regionId}/{clusterName}",
             AuthOpts = new NatsAuthOpts
             {
                 Username = Required("NATS_USER"),

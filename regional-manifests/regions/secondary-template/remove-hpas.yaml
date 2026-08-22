@@ -1,0 +1,13 @@
+apiVersion: builtin
+kind: PatchTransformer
+metadata: {name: remove-primary-hpas}
+patch: |-
+  apiVersion: autoscaling/v2
+  kind: HorizontalPodAutoscaler
+  metadata: {name: delete-selected-primary-hpa}
+  $patch: delete
+target:
+  group: autoscaling
+  version: v2
+  kind: HorizontalPodAutoscaler
+  name: adservice|benchmarkservice|cartservice|checkoutservice|currencyservice|emailservice|paymentservice|productcatalogservice|recommendationservice|shippingservice

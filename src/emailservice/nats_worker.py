@@ -218,7 +218,8 @@ async def _consume_connection():
     servers=[os.environ["NATS_URL"]],
     user=os.environ["NATS_USER"],
     password=os.environ["NATS_PASSWORD"],
-    name="emailservice/phase3",
+    name=(f"emailservice/phase3/{os.environ.get('REGION_ID', 'unknown')}/"
+          f"{os.environ.get('K8S_CLUSTER_NAME', 'unknown')}"),
     tls=tls_context,
     allow_reconnect=True,
     max_reconnect_attempts=-1)
@@ -249,7 +250,9 @@ async def _consume_connection():
 
 
 async def _run(retry_delay=1):
-  for name in ("NATS_URL", "NATS_USER", "NATS_PASSWORD", "NATS_CA_FILE"):
+  for name in (
+      "NATS_URL", "NATS_USER", "NATS_PASSWORD", "NATS_CA_FILE",
+      "REGION_ID", "K8S_CLUSTER_NAME"):
     if not os.getenv(name):
       raise RuntimeError(f"{name} is required")
   while not _stop.is_set():

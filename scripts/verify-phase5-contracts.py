@@ -89,15 +89,15 @@ require(email_path, email,
 projection_files = list((ROOT / "src/storefrontprojectionservice").glob("*.go"))
 projection = "\n".join(item.read_text() for item in projection_files)
 require(ROOT / "src/storefrontprojectionservice", projection,
-        'js.KeyValue("STOREFRONT_ORDERS")', '"boutique.evt.order.completed.v1"',
+        'js.KeyValue(config.ordersBucket)', '"boutique.evt.order.completed.v1"',
         '"boutique.evt.order.manual-review-required.v1"', '"order":', "orderQuery",
-        '"boutique.live.operation."', "publishOrderUpdate")
+        'config.livePrefix', "publishOrderUpdate")
 
 nats_config_path, nats_config = source(
     "kubernetes-manifests", "nats", "base", "config.yaml")
 require(nats_config_path, nats_config,
-        'subscribe: ["_INBOX.>", "boutique.live.operation.>"]',
-        '"boutique.live.operation.>"')
+        'subscribe: ["_INBOX.>", "__NATS_FRONTEND_LIVE_SUBJECT__"]',
+        '"__NATS_FRONTEND_LIVE_SUBJECT__"')
 
 nats_verification_path, nats_verification = source(
     "kubernetes-manifests", "nats", "verification-job.yaml")
@@ -126,8 +126,8 @@ forbid(payment_manifest_path, payment_manifest,
 
 setup_path, setup = source("kubernetes-manifests", "nats", "base", "setup.yaml")
 require(setup_path, setup,
-        "PAYMENT_SIGNING_KEY", '[ "${service}" = paymentservice ]',
-        "SHIPPING_PROVIDER_SECRET", '[ "${service}" = shippingservice ]',
+        "global-application-secrets", "PAYMENT_SIGNING_KEY",
+        "SHIPPING_PROVIDER_SECRET", "FRONTEND_COOKIE_KEY",
         'sync_from_file secrets default "nats-credentials-${service}"')
 
 for manifest_name, store_path, claim in (

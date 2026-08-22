@@ -339,6 +339,7 @@ func TestOrderProjectionPublishesCommittedViewToLiveSubject(t *testing.T) {
 	var update storefront.OrderView
 	worker := &projector{
 		orders: orders,
+		config: projectionConfig{livePrefix: "boutique.live.operation.local."},
 		publishLive: func(publishedSubject string, data []byte) error {
 			subject = publishedSubject
 			return json.Unmarshal(data, &update)
@@ -352,7 +353,7 @@ func TestOrderProjectionPublishesCommittedViewToLiveSubject(t *testing.T) {
 	if err := worker.updateOrder(want); err != nil {
 		t.Fatal(err)
 	}
-	if subject != "boutique.live.operation.order-1" {
+	if subject != "boutique.live.operation.local.order-1" {
 		t.Fatalf("live subject = %q, want order operation subject", subject)
 	}
 	if update.OrderID != want.OrderID || update.UserID != want.UserID ||

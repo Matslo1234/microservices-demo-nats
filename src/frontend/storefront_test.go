@@ -140,7 +140,7 @@ func TestCartOperationIDUsesRequestIDWithoutKey(t *testing.T) {
 }
 
 func TestSessionCookieIsPortableAcrossReplicasAndRejectsTampering(t *testing.T) {
-	t.Setenv("NATS_PASSWORD", "replica-shared-secret")
+	t.Setenv("FRONTEND_COOKIE_KEY", "replica-shared-secret-with-at-least-32-bytes")
 	sessionID := "12345678-1234-1234-1234-123456789123"
 	signedByReplicaA := signSessionCookie(sessionID)
 
@@ -419,12 +419,13 @@ func TestOrderSSEEventContainsNamedJSONUpdate(t *testing.T) {
 }
 
 func TestLiveOperationSubjectRejectsNATSWildcards(t *testing.T) {
-	subject, err := liveOperationSubject("order-3")
-	if err != nil || subject != "boutique.live.operation.order-3" {
+	prefix := "boutique.live.operation.local."
+	subject, err := liveOperationSubject(prefix, "order-3")
+	if err != nil || subject != "boutique.live.operation.local.order-3" {
 		t.Fatalf("unexpected live subject %q: %v", subject, err)
 	}
 	for _, operationID := range []string{"", "order.*", "order.>", "order 3"} {
-		if _, err := liveOperationSubject(operationID); err == nil {
+		if _, err := liveOperationSubject(prefix, operationID); err == nil {
 			t.Fatalf("unsafe operation ID %q was accepted", operationID)
 		}
 	}

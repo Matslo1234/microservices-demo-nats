@@ -1,0 +1,36 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- ../../../kubernetes-manifests
+- client-config.yaml
+labels:
+- includeSelectors: false
+  includeTemplates: true
+  pairs:
+    boutique.online.io/region: secondary-template
+    boutique.online.io/k8s-cluster: boutique-secondary
+transformers:
+- remove-deployments.yaml
+- remove-statefulsets.yaml
+- remove-serviceaccounts.yaml
+- remove-services.yaml
+- remove-configmaps.yaml
+- remove-jobs.yaml
+- remove-pdbs.yaml
+- remove-hpas.yaml
+- remove-role.yaml
+- remove-rolebinding.yaml
+- remove-network-policies.yaml
+patches:
+- target: {group: apps, version: v1, kind: Deployment}
+  patch: |-
+    - op: add
+      path: /spec/template/spec/containers/0/env/-
+      value:
+        name: OTEL_RESOURCE_ATTRIBUTES
+        value: cloud.region=secondary-template,k8s.cluster.name=boutique-secondary,nats.cluster.name=BOUTIQUE-secondary-template
+- target: {group: apps, version: v1, kind: Deployment, name: storefrontprojectionservice}
+  patch: |-
+    - op: replace
+      path: /spec/template/spec/containers/0/env/1/value
+      value: storefront-projection-secondary-template-v1,boutique.qry.storefront.home.v1,boutique.qry.storefront.product.v1,boutique.qry.storefront.cart.v1,boutique.qry.storefront.currencies.v1,boutique.qry.storefront.product-meta.v1,boutique.qry.storefront.operation.v1,boutique.qry.storefront.order.v1

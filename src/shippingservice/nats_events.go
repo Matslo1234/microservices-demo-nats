@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"math"
@@ -53,8 +54,8 @@ func startShippingEvents() (*shippingEventWorker, error) {
 		return nil, nil
 	}
 	url, user, password, caFile := os.Getenv("NATS_URL"), os.Getenv("NATS_USER"), os.Getenv("NATS_PASSWORD"), os.Getenv("NATS_CA_FILE")
-	if url == "" || user == "" || password == "" || caFile == "" {
-		return nil, fmt.Errorf("NATS_URL, NATS_USER, NATS_PASSWORD, and NATS_CA_FILE are required")
+	if url == "" || user == "" || password == "" || caFile == "" || os.Getenv("REGION_ID") == "" || os.Getenv("K8S_CLUSTER_NAME") == "" {
+		return nil, fmt.Errorf("NATS_URL, NATS_USER, NATS_PASSWORD, NATS_CA_FILE, REGION_ID, and K8S_CLUSTER_NAME are required")
 	}
 	connectTimeout, err := shippingDuration("NATS_CONNECT_TIMEOUT", 2*time.Second)
 	if err != nil {
@@ -86,12 +87,19 @@ func startShippingEvents() (*shippingEventWorker, error) {
 		processingTime: shippingProcessingTime(os.Getenv("PROCESSING_TIME_MS")),
 		stop:           make(chan struct{}),
 	}
-	worker.provider, err = newShippingProvider(os.Getenv("SHIPPING_PROVIDER_SECRET"))
+	providerSecret := os.Getenv("SHIPPING_PROVIDER_SECRET")
+	worker.provider, err = newShippingProvider(providerSecret)
 	if err != nil {
 		return nil, err
 	}
+	providerFingerprint := fmt.Sprintf("%x", sha256.Sum256([]byte(providerSecret)))[:16]
+	log.WithFields(logrus.Fields{
+		"region": os.Getenv("REGION_ID"), "k8s_cluster": os.Getenv("K8S_CLUSTER_NAME"),
+		"shipping_provider_key_fingerprint": providerFingerprint,
+	}).Info("shipping regional configuration loaded")
 	nc, err := nats.Connect(url,
-		nats.Name("shippingservice/phase3"), nats.UserInfo(user, password), nats.RootCAs(caFile),
+		nats.Name(fmt.Sprintf("shippingservice/phase3/%s/%s", os.Getenv("REGION_ID"), os.Getenv("K8S_CLUSTER_NAME"))),
+		nats.UserInfo(user, password), nats.RootCAs(caFile),
 		nats.Timeout(connectTimeout), nats.ReconnectWait(reconnectWait), nats.MaxReconnects(maxReconnects),
 		nats.PingInterval(pingInterval), nats.MaxPingsOutstanding(maxPings),
 		nats.DisconnectErrHandler(func(_ *nats.Conn, err error) {

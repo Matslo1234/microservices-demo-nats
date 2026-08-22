@@ -1,0 +1,26 @@
+apiVersion: v1
+kind: Service
+metadata: {name: nats-gateway-0, namespace: nats}
+spec:
+  type: LoadBalancer
+  externalTrafficPolicy: Local
+  selector: {statefulset.kubernetes.io/pod-name: nats-0}
+  ports: [{name: gateway, protocol: TCP, port: 7222, targetPort: gateway}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: nats-gateway-1, namespace: nats}
+spec:
+  type: LoadBalancer
+  externalTrafficPolicy: Local
+  selector: {statefulset.kubernetes.io/pod-name: nats-1}
+  ports: [{name: gateway, protocol: TCP, port: 7222, targetPort: gateway}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: nats-gateway-2, namespace: nats}
+spec:
+  type: LoadBalancer
+  externalTrafficPolicy: Local
+  selector: {statefulset.kubernetes.io/pod-name: nats-2}
+  ports: [{name: gateway, protocol: TCP, port: 7222, targetPort: gateway}]

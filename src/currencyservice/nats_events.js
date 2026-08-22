@@ -142,7 +142,7 @@ function encodeSnapshot(currencyData) {
 async function connectAndPublish(currencyData, logger) {
   const required = process.env.NATS_REQUIRED === 'true';
   if (!required) return null;
-  const requiredVariables = ['NATS_URL', 'NATS_USER', 'NATS_PASSWORD', 'NATS_CA_FILE'];
+  const requiredVariables = ['NATS_URL', 'NATS_USER', 'NATS_PASSWORD', 'NATS_CA_FILE', 'REGION_ID', 'K8S_CLUSTER_NAME'];
   for (const name of requiredVariables) {
     if (!process.env[name]) throw new Error(`${name} is required when NATS_REQUIRED=true`);
   }
@@ -152,7 +152,7 @@ async function connectAndPublish(currencyData, logger) {
     servers: process.env.NATS_URL,
     user: process.env.NATS_USER,
     pass: process.env.NATS_PASSWORD,
-    name: 'currencyservice/phase2',
+    name: `currencyservice/phase2/${process.env.REGION_ID}/${process.env.K8S_CLUSTER_NAME}`,
     tls: { caFile: process.env.NATS_CA_FILE },
     timeout: parseDurationMs(process.env.NATS_CONNECT_TIMEOUT, 2000),
     reconnectTimeWait: parseDurationMs(process.env.NATS_RECONNECT_WAIT, 2000),

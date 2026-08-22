@@ -24,10 +24,6 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-const projectionDurable = "storefront-projection-v1"
-
-const liveOperationPrefix = "boutique.live.operation."
-
 const (
 	projectionFetchSize   = 1024
 	projectionParallelism = 128
@@ -50,6 +46,7 @@ var projectionFilterSubjects = []string{
 
 type projector struct {
 	js          nats.JetStreamContext
+	config      projectionConfig
 	products    projectionKV
 	catalog     *projectionReadCache
 	carts       projectionKV
@@ -58,10 +55,12 @@ type projector struct {
 	orders      projectionKV
 	publishLive func(string, []byte) error
 
-	kvConflictRetries atomic.Uint64
-	staleEventSkips   atomic.Uint64
-	queryRevision     atomic.Uint64
-	lastProjectedUnix atomic.Int64
+	kvConflictRetries  atomic.Uint64
+	staleEventSkips    atomic.Uint64
+	queryRevision      atomic.Uint64
+	lastProjectedUnix  atomic.Int64
+	consumerPending    atomic.Uint64
+	consumerAckPending atomic.Uint64
 }
 
 // projectionReader keeps read-model queries independently testable.
@@ -78,8 +77,8 @@ type projectionKV interface {
 	Update(string, []byte, uint64) (uint64, error)
 }
 
-func newProjector(js nats.JetStreamContext) (*projector, error) {
-	products, err := js.KeyValue("STOREFRONT_PRODUCTS")
+func newProjector(js nats.JetStreamContext, config projectionConfig) (*projector, error) {
+	products, err := js.KeyValue(config.productsBucket)
 	if err != nil {
 		return nil, fmt.Errorf("open product KV: %w", err)
 	}
@@ -87,28 +86,28 @@ func newProjector(js nats.JetStreamContext) (*projector, error) {
 	if err != nil {
 		return nil, fmt.Errorf("initialize product query cache: %w", err)
 	}
-	carts, err := js.KeyValue("STOREFRONT_CARTS")
+	carts, err := js.KeyValue(config.cartsBucket)
 	if err != nil {
 		catalog.Close()
 		return nil, fmt.Errorf("open cart KV: %w", err)
 	}
-	context, err := js.KeyValue("STOREFRONT_CONTEXT")
+	context, err := js.KeyValue(config.contextBucket)
 	if err != nil {
 		catalog.Close()
 		return nil, fmt.Errorf("open context KV: %w", err)
 	}
-	operations, err := js.KeyValue("STOREFRONT_OPERATIONS")
+	operations, err := js.KeyValue(config.operationsBucket)
 	if err != nil {
 		catalog.Close()
 		return nil, fmt.Errorf("open operations KV: %w", err)
 	}
-	orders, err := js.KeyValue("STOREFRONT_ORDERS")
+	orders, err := js.KeyValue(config.ordersBucket)
 	if err != nil {
 		catalog.Close()
 		return nil, fmt.Errorf("open orders KV: %w", err)
 	}
 	return &projector{
-		js: js, products: products, catalog: catalog, carts: carts,
+		js: js, config: config, products: products, catalog: catalog, carts: carts,
 		context: context, operations: operations, orders: orders,
 	}, nil
 }
@@ -136,8 +135,8 @@ func (p *projector) subscribe() (*nats.Subscription, bool, error) {
 	}
 	subscription, err := p.js.PullSubscribe(
 		"",
-		projectionDurable,
-		nats.Bind("BOUTIQUE_EVENTS", projectionDurable),
+		p.config.durable,
+		nats.Bind(p.config.eventStream, p.config.durable),
 	)
 	if err != nil {
 		return nil, rebuilding, fmt.Errorf("bind projection consumer: %w", err)
@@ -147,7 +146,7 @@ func (p *projector) subscribe() (*nats.Subscription, bool, error) {
 
 func (p *projector) ensureProjectionConsumer() error {
 	config := &nats.ConsumerConfig{
-		Durable:        projectionDurable,
+		Durable:        p.config.durable,
 		DeliverPolicy:  nats.DeliverAllPolicy,
 		AckPolicy:      nats.AckExplicitPolicy,
 		AckWait:        30 * time.Second,
@@ -156,9 +155,9 @@ func (p *projector) ensureProjectionConsumer() error {
 		FilterSubjects: append([]string(nil), projectionFilterSubjects...),
 	}
 	for attempt := 0; attempt < 20; attempt++ {
-		info, err := p.js.ConsumerInfo("BOUTIQUE_EVENTS", projectionDurable)
+		info, err := p.js.ConsumerInfo(p.config.eventStream, p.config.durable)
 		if errors.Is(err, nats.ErrConsumerNotFound) {
-			if _, addErr := p.js.AddConsumer("BOUTIQUE_EVENTS", config); addErr == nil {
+			if _, addErr := p.js.AddConsumer(p.config.eventStream, config); addErr == nil {
 				return nil
 			} else if isConsumerSetupRace(addErr) {
 				projectionBackoff(attempt)
@@ -185,7 +184,7 @@ func (p *projector) ensureProjectionConsumer() error {
 		next.AckPolicy = nats.AckExplicitPolicy
 		next.AckWait = 30 * time.Second
 		next.MaxDeliver = 10
-		if _, updateErr := p.js.UpdateConsumer("BOUTIQUE_EVENTS", &next); updateErr == nil {
+		if _, updateErr := p.js.UpdateConsumer(p.config.eventStream, &next); updateErr == nil {
 			return nil
 		} else if isConsumerSetupRace(updateErr) {
 			projectionBackoff(attempt)
@@ -227,6 +226,7 @@ func (p *projector) run(subscription *nats.Subscription, stop <-chan struct{}) {
 			continue
 		}
 		p.applyStream(batch.Messages())
+		p.refreshConsumerState()
 		if err := batch.Error(); err != nil && !projectionConsumerStopped(err) {
 			log.Printf("projection stream failed: %v", err)
 			time.Sleep(time.Second)
@@ -830,7 +830,7 @@ func (p *projector) publishOrderUpdate(order storefront.OrderView) {
 	if p.publishLive == nil {
 		return
 	}
-	subject, err := liveOperationSubject(order.OrderID)
+	subject, err := liveOperationSubject(p.config.livePrefix, order.OrderID)
 	if err != nil {
 		log.Printf("order live update skipped order_id=%q error=%v", order.OrderID, err)
 		return
@@ -848,7 +848,10 @@ func (p *projector) publishOrderUpdate(order storefront.OrderView) {
 	}
 }
 
-func liveOperationSubject(operationID string) (string, error) {
+func liveOperationSubject(prefix, operationID string) (string, error) {
+	if prefix == "" || !strings.HasSuffix(prefix, ".") {
+		return "", errors.New("live operation prefix is invalid")
+	}
 	if operationID == "" {
 		return "", errors.New("operation ID is empty")
 	}
@@ -859,7 +862,33 @@ func liveOperationSubject(operationID string) (string, error) {
 			return "", errors.New("operation ID is not a safe NATS subject token")
 		}
 	}
-	return liveOperationPrefix + operationID, nil
+	return prefix + operationID, nil
+}
+
+func (p *projector) refreshConsumerState() error {
+	info, err := p.js.ConsumerInfo(p.config.eventStream, p.config.durable)
+	if err != nil {
+		return err
+	}
+	p.consumerPending.Store(info.NumPending)
+	p.consumerAckPending.Store(uint64(info.NumAckPending))
+	return nil
+}
+
+func (p *projector) waitForInitialReplay(timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		if err := p.refreshConsumerState(); err != nil {
+			return fmt.Errorf("inspect regional projection replay: %w", err)
+		}
+		if p.consumerPending.Load() == 0 && p.consumerAckPending.Load() == 0 {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("regional projection replay did not catch up within %s", timeout)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 }
 
 func mergeOrder(current, incoming storefront.OrderView) storefront.OrderView {

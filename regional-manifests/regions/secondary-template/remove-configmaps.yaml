@@ -1,0 +1,12 @@
+apiVersion: builtin
+kind: PatchTransformer
+metadata: {name: remove-primary-configmaps}
+patch: |-
+  apiVersion: v1
+  kind: ConfigMap
+  metadata: {name: delete-selected-primary-configmap}
+  $patch: delete
+target:
+  version: v1
+  kind: ConfigMap
+  name: redis-cluster-bootstrap

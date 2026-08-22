@@ -1,0 +1,13 @@
+apiVersion: builtin
+kind: PatchTransformer
+metadata: {name: remove-primary-network-policies}
+patch: |-
+  apiVersion: networking.k8s.io/v1
+  kind: NetworkPolicy
+  metadata: {name: delete-selected-primary-network-policy}
+  $patch: delete
+target:
+  group: networking.k8s.io
+  version: v1
+  kind: NetworkPolicy
+  name: messageoperationsservice-access|cart-to-redis|redis-cart-cluster|redis-cart-cluster-bootstrap|checkout-to-redis|redis-checkout-cluster|redis-checkout-cluster-bootstrap|benchmark-runner-egress|benchmarkservice-access-and-collection|loadgenerator-to-frontend

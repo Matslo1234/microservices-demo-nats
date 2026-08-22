@@ -1120,7 +1120,7 @@ spec:
             app: benchmarkservice
       containers:
       - name: server
-        image: matslo123/benchmarkservice:v0.5.0@sha256:f746fa15e19e2c6b32ca482f97c14bc48f57d7486350ac8c93821b19cddafff5
+        image: matslo123/benchmarkservice:v0.5.0@sha256:53b4b74848ff39536162c328b1b6a24b9386b7cde5db8967dabd7a4c2396b477
         env:
         - name: PORT
           value: "8080"
@@ -1256,7 +1256,7 @@ spec:
           type: RuntimeDefault
       containers:
       - name: server
-        image: matslo123/benchmarkservice:v0.5.0@sha256:f746fa15e19e2c6b32ca482f97c14bc48f57d7486350ac8c93821b19cddafff5
+        image: matslo123/benchmarkservice:v0.5.0@sha256:53b4b74848ff39536162c328b1b6a24b9386b7cde5db8967dabd7a4c2396b477
         imagePullPolicy: IfNotPresent
         command: ["python", "metrics_server.py"]
         env:

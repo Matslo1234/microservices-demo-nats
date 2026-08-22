@@ -1,0 +1,13 @@
+apiVersion: builtin
+kind: PatchTransformer
+metadata: {name: remove-primary-pdbs}
+patch: |-
+  apiVersion: policy/v1
+  kind: PodDisruptionBudget
+  metadata: {name: delete-selected-primary-pdb}
+  $patch: delete
+target:
+  group: policy
+  version: v1
+  kind: PodDisruptionBudget
+  name: adservice|benchmarkservice|cartservice|checkoutservice|currencyservice|emailservice|messageoperationsservice|productcatalogservice|recommendationservice|shippingservice|redis-cart-cluster|redis-checkout-cluster

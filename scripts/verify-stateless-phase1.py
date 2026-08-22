@@ -109,11 +109,11 @@ def verify_redis_clusters(rendered: str) -> None:
 
 def verify_benchmark_stores(rendered_nats: str, rendered_app: str) -> None:
     for required in (
-        "ensure_kv BENCHMARK_RUNS 10 0s 536870912",
-        "ensure_object BENCHMARK_ARTIFACTS",
+        'ensure_kv "${BENCHMARK_RUNS_BUCKET}" 10 0s 0 536870912',
+        'ensure_object "${BENCHMARK_ARTIFACTS_BUCKET}"',
         'user: "benchmarkservice", password: $BENCHMARKSERVICE_PASSWORD',
-        '"$KV.BENCHMARK_RUNS.>"',
-        '"$O.BENCHMARK_ARTIFACTS.>"',
+        '"__NATS_BENCHMARK_RUNS_SUBJECT__"',
+        '"__NATS_BENCHMARK_ARTIFACTS_SUBJECT__"',
         "benchmarkservice messageoperationsservice",
         '"nats-credentials-${service}"',
     ):
@@ -142,7 +142,10 @@ def verify_nats_storage_capacity(rendered_nats: str) -> None:
     server_config = document(
         rendered_nats, "ConfigMap", "nats-server-config"
     )
-    bootstrap = document(rendered_nats, "ConfigMap", "nats-bootstrap")
+    bootstrap = "\n".join((
+        document(rendered_nats, "ConfigMap", "nats-global-bootstrap"),
+        document(rendered_nats, "ConfigMap", "nats-regional-bootstrap"),
+    ))
     stateful_set = document(rendered_nats, "StatefulSet", "nats")
 
     file_store = re.search(

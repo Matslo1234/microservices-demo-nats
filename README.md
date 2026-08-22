@@ -55,6 +55,23 @@ flowchart LR
     Operator[Operator browser] --> Grafana
 ```
 
+The optional regional layout keeps clients on their local NATS Service. NATS
+gateways carry matching interest across clusters, while authoritative streams
+and Redis owners stay in the primary region:
+
+```mermaid
+flowchart LR
+    Global[Global HTTP traffic] --> PrimaryFE[primary frontend]
+    Global --> SecondaryFE[secondary frontend]
+    PrimaryFE --> PrimaryNATS[(primary NATS BOUTIQUE)]
+    SecondaryFE --> SecondaryNATS[(secondary regional NATS)]
+    PrimaryNATS <-->|mTLS gateway :7222| SecondaryNATS
+    PrimaryNATS --- GlobalStreams[(global command/event streams)]
+    PrimaryNATS --- PrimaryProjection[(primary regional KV)]
+    SecondaryNATS --- SecondaryProjection[(secondary regional KV)]
+    Owners[cart/checkout and Redis owners] --> PrimaryNATS
+```
+
 
 | Service | Language | Description |
 | --- | --- | --- |
@@ -117,7 +134,8 @@ TLS, auth, and JetStream-encryption Secrets without rotating existing values.
 kubectl apply -k kubernetes-manifests/nats/fresh-cluster
 kubectl -n nats rollout status deployment/nats-setup --timeout=5m
 kubectl -n nats rollout status statefulset/nats --timeout=10m
-kubectl -n nats wait --for=condition=complete job/nats-bootstrap --timeout=5m
+kubectl -n nats wait --for=condition=complete job/nats-global-bootstrap --timeout=10m
+kubectl -n nats wait --for=condition=complete job/nats-regional-bootstrap --timeout=10m
 ```
 
 Optionally run the NATS acceptance checks:
@@ -166,6 +184,34 @@ kubectl get service -n observability grafana
 
 Open <http://localhost:3000>. Deployment, storage, access, and production notes
 are in the [observability stack documentation](kubernetes-manifests/observability/README.md).
+
+## Regional and supercluster deployments
+
+The checked-in `local` inventory remains a standalone three-node NATS cluster,
+so the quickstart needs no WAN DNS or gateway. It nevertheless uses the same
+region-qualified projection durable, KV buckets, connection identities, and
+global-key contract as a supercluster deployment.
+
+Regional deployments select one Kubernetes context explicitly:
+
+```sh
+bash scripts/nats/deploy.sh \
+  --context local --region local --role primary --application
+```
+
+The inventory is
+[`kubernetes-manifests/regions/inventory.yaml`](kubernetes-manifests/regions/inventory.yaml),
+and secondary templates are under
+[`kubernetes-manifests/nats/overlays/supercluster`](kubernetes-manifests/nats/overlays/supercluster).
+Before enabling a remote cluster, replace the example DNS and CIDRs, distribute
+the shared gateway CA/certificates and `global-application-secrets`, and add the
+region to the validated inventory. The primary continues to own global streams
+and Redis-backed cart/checkout state; secondary application overlays contain
+only frontend, payment, and the regional storefront projection.
+
+For the configured EKS regions, public gateway-only NLB endpoints, shared
+gateway PKI, application endpoints, and the complete deployment procedure, see the
+[AWS EKS NATS supercluster runbook](docs/aws-nats-supercluster.md).
 
 ## Development
 

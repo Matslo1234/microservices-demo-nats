@@ -1,0 +1,139 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nats-regional-bootstrap
+  namespace: nats
+  labels:
+    app.kubernetes.io/name: nats
+    app.kubernetes.io/component: regional-bootstrap
+data:
+  bootstrap.sh: |
+    #!/bin/sh
+    set -eu
+
+    nats_args="--server=${NATS_URL} --user=${NATS_USER} --password=${NATS_PASSWORD} --tlsca=/etc/nats-ca/ca.crt"
+    until nats ${nats_args} account info >/dev/null 2>&1; do
+      echo "waiting for the local NATS JetStream account"
+      sleep 2
+    done
+
+    assert_regional_name() {
+      case "$1" in
+        *_"${REGION_KEY}") ;;
+        *) echo "regional asset $1 must end in _${REGION_KEY}" >&2; exit 1 ;;
+      esac
+    }
+
+    assert_backing_stream() {
+      stream=$1
+      history=$2
+      max_age=$3
+      max_bytes=$4
+      compact="$(nats ${nats_args} stream info "${stream}" --json | tr -d '[:space:]')"
+      for expected in \
+        "\"num_replicas\":3" \
+        "\"storage\":\"file\"" \
+        "\"max_age\":${max_age}" \
+        "\"max_bytes\":${max_bytes}" \
+        "\"cluster\":\"${NATS_CLUSTER_NAME}\""; do
+        printf '%s' "${compact}" | grep -F "${expected}" >/dev/null || {
+          echo "${stream} does not match ${expected}" >&2
+          exit 1
+        }
+      done
+      if [ "${history}" != skip ]; then
+        printf '%s' "${compact}" | grep -F "\"max_msgs_per_subject\":${history}" >/dev/null || {
+          echo "${stream} has the wrong history limit" >&2
+          exit 1
+        }
+      fi
+    }
+
+    ensure_kv() {
+      bucket=$1
+      history=$2
+      ttl=$3
+      max_age=$4
+      max_bytes=$5
+      assert_regional_name "${bucket}"
+      if nats ${nats_args} kv info "${bucket}" >/dev/null 2>&1; then
+        nats ${nats_args} kv edit "${bucket}" --history="${history}" --replicas=3 \
+          --ttl="${ttl}" --max-bucket-size="${max_bytes}" --cluster="${NATS_CLUSTER_NAME}"
+      else
+        nats ${nats_args} kv add "${bucket}" --history="${history}" --replicas=3 \
+          --storage=file --ttl="${ttl}" --max-bucket-size="${max_bytes}" --cluster="${NATS_CLUSTER_NAME}"
+      fi
+      assert_backing_stream "KV_${bucket}" "${history}" "${max_age}" "${max_bytes}"
+    }
+
+    ensure_object() {
+      bucket=$1
+      assert_regional_name "${bucket}"
+      if nats ${nats_args} object info "${bucket}" >/dev/null 2>&1; then
+        nats ${nats_args} object edit "${bucket}" --replicas=3 \
+          --max-bucket-size=4294967296 --cluster="${NATS_CLUSTER_NAME}"
+      else
+        nats ${nats_args} object add "${bucket}" --replicas=3 --storage=file \
+          --max-bucket-size=4294967296 --cluster="${NATS_CLUSTER_NAME}"
+      fi
+      assert_backing_stream "OBJ_${bucket}" skip 0 4294967296
+    }
+
+    ensure_kv "${STOREFRONT_PRODUCTS_BUCKET}" 5 0s 0 536870912
+    ensure_kv "${STOREFRONT_CARTS_BUCKET}" 2 0s 0 536870912
+    ensure_kv "${STOREFRONT_CONTEXT_BUCKET}" 2 1h 3600000000000 268435456
+    ensure_kv "${STOREFRONT_ORDERS_BUCKET}" 10 0s 0 1610612736
+    ensure_kv "${STOREFRONT_OPERATIONS_BUCKET}" 10 24h 86400000000000 805306368
+    ensure_kv "${BENCHMARK_RUNS_BUCKET}" 10 0s 0 536870912
+    ensure_object "${BENCHMARK_ARTIFACTS_BUCKET}"
+    nats ${nats_args} kv list
+    nats ${nats_args} object ls
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: nats-regional-bootstrap
+  namespace: nats
+  labels:
+    app.kubernetes.io/name: nats
+    app.kubernetes.io/component: regional-bootstrap
+spec:
+  backoffLimit: 6
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: nats-regional-bootstrap
+        app.kubernetes.io/part-of: online-boutique
+    spec:
+      restartPolicy: OnFailure
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+      - name: bootstrap
+        image: natsio/nats-box:0.19.7-nonroot
+        command: ["sh", "/config/bootstrap.sh"]
+        envFrom:
+        - configMapRef: {name: nats-region-config}
+        - secretRef: {name: nats-admin-credentials}
+        resources:
+          requests: {cpu: 20m, memory: 32Mi}
+          limits: {cpu: 100m, memory: 128Mi}
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities: {drop: ["ALL"]}
+          readOnlyRootFilesystem: true
+        volumeMounts:
+        - {name: config, mountPath: /config, readOnly: true}
+        - {name: ca, mountPath: /etc/nats-ca, readOnly: true}
+      volumes:
+      - name: config
+        configMap:
+          name: nats-regional-bootstrap
+          items:
+          - {key: bootstrap.sh, path: bootstrap.sh}
+      - name: ca
+        configMap: {name: nats-ca}

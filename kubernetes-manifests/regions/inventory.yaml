@@ -1,0 +1,32 @@
+{
+  "regions": [
+    {
+      "region_id": "local",
+      "region_key": "LOCAL",
+      "k8s_cluster_name": "local",
+      "k8s_context": "local",
+      "nats_cluster_name": "BOUTIQUE",
+      "nats_cluster_role": "primary",
+      "nats_mode": "standalone",
+      "gateway_endpoints": [
+        "nats-0.gw.local.example.net:7222",
+        "nats-1.gw.local.example.net:7222",
+        "nats-2.gw.local.example.net:7222"
+      ],
+      "gateway_source_cidrs": [],
+      "remote_gateways": [],
+      "stream_owner_region": "local",
+      "storefront_event_stream": "BOUTIQUE_EVENTS",
+      "storefront_projection_durable": "storefront-projection-local-v1",
+      "storefront_products_bucket": "STOREFRONT_PRODUCTS_LOCAL",
+      "storefront_carts_bucket": "STOREFRONT_CARTS_LOCAL",
+      "storefront_context_bucket": "STOREFRONT_CONTEXT_LOCAL",
+      "storefront_orders_bucket": "STOREFRONT_ORDERS_LOCAL",
+      "storefront_operations_bucket": "STOREFRONT_OPERATIONS_LOCAL",
+      "benchmark_runs_bucket": "BENCHMARK_RUNS_LOCAL",
+      "benchmark_artifacts_bucket": "BENCHMARK_ARTIFACTS_LOCAL",
+      "live_operation_prefix": "boutique.live.operation.local.",
+      "primary_only_workloads": true
+    }
+  ]
+}

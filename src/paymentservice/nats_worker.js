@@ -627,6 +627,8 @@ async function startPaymentNATS() {
     'NATS_USER',
     'NATS_PASSWORD',
     'NATS_CA_FILE',
+    'REGION_ID',
+    'K8S_CLUSTER_NAME',
     'PAYMENT_SIGNING_KEY_ID',
     'PAYMENT_SIGNING_KEY',
   ]) {
@@ -635,7 +637,8 @@ async function startPaymentNATS() {
   const contracts = await loadContracts();
   const keyring = loadSigningKeyring();
   const nc = await connect({ servers: process.env.NATS_URL, user: process.env.NATS_USER, pass: process.env.NATS_PASSWORD,
-    name: 'paymentservice/phase3', tls: { caFile: process.env.NATS_CA_FILE },
+    name: `paymentservice/phase3/${process.env.REGION_ID}/${process.env.K8S_CLUSTER_NAME}`,
+    tls: { caFile: process.env.NATS_CA_FILE },
     reconnectTimeWait: 2000, maxReconnectAttempts: -1, pingInterval: 20000, maxPingOut: 2 });
   const js = nc.jetstream({ timeout: 5000 });
   const workerStatus = {

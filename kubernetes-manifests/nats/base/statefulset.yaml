@@ -128,13 +128,42 @@ spec:
       - name: nats
         image: nats:2.14.3-alpine
         imagePullPolicy: IfNotPresent
-        args: ["-c", "/etc/nats-config/nats.conf"]
+        command: ["/bin/sh", "-ec"]
+        args:
+        - |
+          export NATS_SERVER_NAME="${REGION_ID}-${POD_NAME}"
+          export NATS_NODE_TAG="node:${NODE_NAME}"
+          case "${POD_NAME}" in
+            nats-0) NATS_GATEWAY_ADVERTISE="${NATS_GATEWAY_ADVERTISE_0:-${POD_NAME}.${NATS_GATEWAY_DOMAIN}:7222}" ;;
+            nats-1) NATS_GATEWAY_ADVERTISE="${NATS_GATEWAY_ADVERTISE_1:-${POD_NAME}.${NATS_GATEWAY_DOMAIN}:7222}" ;;
+            nats-2) NATS_GATEWAY_ADVERTISE="${NATS_GATEWAY_ADVERTISE_2:-${POD_NAME}.${NATS_GATEWAY_DOMAIN}:7222}" ;;
+            *) echo "unexpected NATS pod name ${POD_NAME}" >&2; exit 1 ;;
+          esac
+          export NATS_GATEWAY_ADVERTISE
+          sed \
+            -e "s|__NATS_FRONTEND_LIVE_SUBJECT__|${NATS_FRONTEND_LIVE_SUBJECT}|g" \
+            -e "s|__NATS_PROJECTION_PRODUCTS_SUBJECT__|${NATS_PROJECTION_PRODUCTS_SUBJECT}|g" \
+            -e "s|__NATS_PROJECTION_CARTS_SUBJECT__|${NATS_PROJECTION_CARTS_SUBJECT}|g" \
+            -e "s|__NATS_PROJECTION_CONTEXT_SUBJECT__|${NATS_PROJECTION_CONTEXT_SUBJECT}|g" \
+            -e "s|__NATS_PROJECTION_ORDERS_SUBJECT__|${NATS_PROJECTION_ORDERS_SUBJECT}|g" \
+            -e "s|__NATS_PROJECTION_OPERATIONS_SUBJECT__|${NATS_PROJECTION_OPERATIONS_SUBJECT}|g" \
+            -e "s|__NATS_BENCHMARK_RUNS_SUBJECT__|${NATS_BENCHMARK_RUNS_SUBJECT}|g" \
+            -e "s|__NATS_BENCHMARK_ARTIFACTS_SUBJECT__|${NATS_BENCHMARK_ARTIFACTS_SUBJECT}|g" \
+            /etc/nats-config/nats.conf > /var/run/nats/nats.conf
+          cp /etc/nats-config/gateway.conf /var/run/nats/gateway.conf
+          exec nats-server -c /var/run/nats/nats.conf
         env:
         - name: POD_NAME
           valueFrom:
             fieldRef:
               fieldPath: metadata.name
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
         envFrom:
+        - configMapRef:
+            name: nats-region-config
         - secretRef:
             name: nats-server-auth
         ports:
@@ -142,6 +171,8 @@ spec:
           containerPort: 4222
         - name: cluster
           containerPort: 6222
+        - name: gateway
+          containerPort: 7222
         - name: monitor
           containerPort: 8222
         startupProbe:
@@ -190,6 +221,9 @@ spec:
         - name: tls
           mountPath: /etc/nats/tls
           readOnly: true
+        - name: gateway-tls
+          mountPath: /etc/nats/gateway-tls
+          readOnly: true
         - name: jetstream
           mountPath: /data
         - name: run
@@ -197,7 +231,7 @@ spec:
       - name: metrics
         image: natsio/prometheus-nats-exporter:0.20.1
         imagePullPolicy: IfNotPresent
-        args: ["-p", "7777", "-varz", "-routez", "-subz", "-jsz=all", "http://127.0.0.1:8222"]
+        args: ["-p", "7777", "-varz", "-routez", "-gatewayz", "-subz", "-jsz=all", "http://127.0.0.1:8222"]
         ports:
         - name: metrics
           containerPort: 7777
@@ -217,11 +251,19 @@ spec:
           readOnlyRootFilesystem: true
       volumes:
       - name: config
-        configMap:
-          name: nats-server-config
+        projected:
+          sources:
+          - configMap:
+              name: nats-server-config
+          - configMap:
+              name: nats-gateway-config
       - name: tls
         secret:
           secretName: nats-server-tls
+      - name: gateway-tls
+        secret:
+          secretName: nats-gateway-tls
+          optional: true
       - name: run
         emptyDir: {}
   volumeClaimTemplates:

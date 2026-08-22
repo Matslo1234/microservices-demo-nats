@@ -1,0 +1,34 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nats-gateway-config
+  namespace: nats
+data:
+  gateway.conf: |
+    gateway {
+      name: $NATS_CLUSTER_NAME
+      listen: 0.0.0.0:7222
+      advertise: $NATS_GATEWAY_ADVERTISE
+      reject_unknown_cluster: true
+      connect_retries: 120
+      connect_backoff: true
+      write_deadline: "10s"
+      tls {
+        cert_file: "/etc/nats/gateway-tls/tls.crt"
+        key_file: "/etc/nats/gateway-tls/tls.key"
+        ca_file: "/etc/nats/gateway-tls/ca.crt"
+        min_version: "1.2"
+        timeout: 5
+        verify: true
+      }
+      gateways: [
+        {
+          name: "BOUTIQUE-us-east-1"
+          urls: [
+            tls://k8s-nats-natsgate-20ecb3bc11-aecd78d3074202c8.elb.us-east-1.amazonaws.com:7222,
+            tls://k8s-nats-natsgate-94d9321d7b-e1cc0fc025b842fd.elb.us-east-1.amazonaws.com:7222,
+            tls://k8s-nats-natsgate-f5042541ac-3b35793a02898133.elb.us-east-1.amazonaws.com:7222
+          ]
+        }
+      ]
+    }

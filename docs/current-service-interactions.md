@@ -63,7 +63,7 @@ The architecture uses five interaction styles:
 | Durable commands | `boutique.cmd.>` in `BOUTIQUE_COMMANDS` | Cart changes and the checkout/payment/shipping workflow |
 | Replayable facts | `boutique.evt.>` in `BOUTIQUE_EVENTS` | Owner snapshots, workflow results, notifications, and storefront inputs |
 | Bounded queries | `boutique.qry.>` over Core NATS | Reads from the storefront projection and payment tokenization |
-| Live notifications | `boutique.live.operation.<order-id>` over Core NATS | Best-effort order updates bridged to active browser SSE connections |
+| Live notifications | `boutique.live.operation.<region-id>.<order-id>` over Core NATS | Best-effort order updates bridged only to browser SSE connections in the projector's region |
 | Dead-letter operations | `BOUTIQUE_ADVISORIES`, `BOUTIQUE_DLQ`, and `DLQ_CASES` | Durable max-delivery capture, restricted payload storage, administrator review, and replay |
 
 Commands and events use the protobuf envelope and identity conventions in
@@ -82,7 +82,7 @@ domain owners directly.
 | Home, product, cart and currency views | `boutique.qry.storefront.home.v1`, `.product.v1`, `.cart.v1`, `.currencies.v1` |
 | Product metadata and search | `boutique.qry.storefront.product-meta.v1`, `.search-products.v1` |
 | Operation and order resources | `boutique.qry.storefront.operation.v1`, `.order.v1` |
-| Live order status | `boutique.live.operation.<order-id>` subscription exposed as `GET /orders/{id}/events` |
+| Live order status | `boutique.live.operation.<region-id>.<order-id>` subscription exposed as `GET /orders/{id}/events` |
 | Product page context | `boutique.evt.storefront.page-viewed.v1` |
 | Add/clear cart | `boutique.cmd.cart.add-item.v1`, `.clear.v1`, plus `boutique.evt.storefront.operation-accepted.v1` |
 | Checkout | `boutique.qry.payment.tokenize.v1`, then `boutique.cmd.order.submit.v1` |
@@ -121,8 +121,10 @@ they operate on the complete cart state.
 | `messageoperationsservice` | JetStream max-delivery advisories | Restricted DLQ records, case lifecycle metadata, operational events, alert metrics, and authenticated replay |
 
 The storefront projection stores products, carts, recent page context, orders,
-and operation status in `STOREFRONT_PRODUCTS`, `STOREFRONT_CARTS`,
-`STOREFRONT_CONTEXT`, `STOREFRONT_ORDERS`, and `STOREFRONT_OPERATIONS`.
+and operation status in `STOREFRONT_PRODUCTS_<REGION_KEY>`,
+`STOREFRONT_CARTS_<REGION_KEY>`, `STOREFRONT_CONTEXT_<REGION_KEY>`,
+`STOREFRONT_ORDERS_<REGION_KEY>`, and
+`STOREFRONT_OPERATIONS_<REGION_KEY>`.
 These buckets are derived state and can be deleted and rebuilt by replaying
 `BOUTIQUE_EVENTS`. Domain owner snapshots provide the current catalog and
 currency baselines before consumers become ready.
@@ -213,6 +215,14 @@ reach DNS, NATS, optional OTLP, and only their explicit local dependency
 (cartservice to Redis). Load generation can reach only frontend. The NATS
 namespace accepts client traffic only from the named deployed workloads, and
 each NATS identity has subject-scoped publish/subscribe grants.
+
+In supercluster mode, clients still connect only to their local
+`nats.nats.svc.cluster.local:4222`. Routes stay inside one Kubernetes region;
+mTLS gateways use only TCP `7222` between uniquely named NATS clusters. Global
+command/event streams and the owner Redis workloads remain primary-placed,
+while every region has its own projection durable and placed derived buckets.
+The checked-in local inventory selects standalone mode, which exercises the
+same regional application contract without requiring a remote peer.
 
 ## Recovery boundaries
 

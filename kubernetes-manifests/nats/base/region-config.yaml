@@ -1,0 +1,52 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nats-region-config
+  namespace: nats
+  labels:
+    app.kubernetes.io/name: nats
+    app.kubernetes.io/component: region-config
+data:
+  REGION_ID: local
+  REGION_KEY: LOCAL
+  K8S_CLUSTER_NAME: local
+  NATS_CLUSTER_NAME: BOUTIQUE
+  NATS_CLUSTER_ROLE: primary
+  NATS_SUPERCLUSTER_ENABLED: "false"
+  STREAM_OWNER_REGION: local
+  GLOBAL_ASSET_CLUSTER: BOUTIQUE
+  NATS_REGION_TAG: region:local
+  NATS_CLUSTER_TAG: cluster:BOUTIQUE
+  NATS_GATEWAY_DOMAIN: nats-headless.nats.svc.cluster.local
+  NATS_GATEWAY_DNS_NAMES: nats-0.nats-headless.nats.svc.cluster.local,nats-1.nats-headless.nats.svc.cluster.local,nats-2.nats-headless.nats.svc.cluster.local
+  STOREFRONT_EVENT_STREAM: BOUTIQUE_EVENTS
+  STOREFRONT_PROJECTION_DURABLE: storefront-projection-local-v1
+  STOREFRONT_PRODUCTS_BUCKET: STOREFRONT_PRODUCTS_LOCAL
+  STOREFRONT_CARTS_BUCKET: STOREFRONT_CARTS_LOCAL
+  STOREFRONT_CONTEXT_BUCKET: STOREFRONT_CONTEXT_LOCAL
+  STOREFRONT_ORDERS_BUCKET: STOREFRONT_ORDERS_LOCAL
+  STOREFRONT_OPERATIONS_BUCKET: STOREFRONT_OPERATIONS_LOCAL
+  BENCHMARK_RUNS_BUCKET: BENCHMARK_RUNS_LOCAL
+  BENCHMARK_ARTIFACTS_BUCKET: BENCHMARK_ARTIFACTS_LOCAL
+  NATS_FRONTEND_LIVE_SUBJECT: boutique.live.operation.local.>
+  NATS_PROJECTION_PRODUCTS_SUBJECT: $KV.STOREFRONT_PRODUCTS_LOCAL.>
+  NATS_PROJECTION_CARTS_SUBJECT: $KV.STOREFRONT_CARTS_LOCAL.>
+  NATS_PROJECTION_CONTEXT_SUBJECT: $KV.STOREFRONT_CONTEXT_LOCAL.>
+  NATS_PROJECTION_ORDERS_SUBJECT: $KV.STOREFRONT_ORDERS_LOCAL.>
+  NATS_PROJECTION_OPERATIONS_SUBJECT: $KV.STOREFRONT_OPERATIONS_LOCAL.>
+  NATS_BENCHMARK_RUNS_SUBJECT: $KV.BENCHMARK_RUNS_LOCAL.>
+  NATS_BENCHMARK_ARTIFACTS_SUBJECT: $O.BENCHMARK_ARTIFACTS_LOCAL.>
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nats-gateway-config
+  namespace: nats
+  labels:
+    app.kubernetes.io/name: nats
+    app.kubernetes.io/component: gateway
+data:
+  # The standalone overlay deliberately has no gateway block. Supercluster
+  # overlays replace this key with a listener and their exact remote seeds.
+  gateway.conf: |
+    # Standalone cluster: gateway listener disabled.

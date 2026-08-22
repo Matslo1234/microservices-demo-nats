@@ -81,6 +81,27 @@ data:
           severity: warning
         annotations:
           summary: A durable NATS consumer has more than 50 unacknowledged messages
+      - alert: NatsGatewayDisconnected
+        expr: gnatsd_gatewayz_outbound_gateway_configured == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: A configured regional NATS gateway is disconnected
+      - alert: NatsGatewayRTTHigh
+        expr: gnatsd_gatewayz_outbound_gateway_conn_rtt > 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Cross-region NATS gateway RTT exceeds one second
+      - alert: NatsGatewayPendingBytes
+        expr: gnatsd_gatewayz_outbound_gateway_conn_pending_bytes > 1048576
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: A regional NATS gateway has more than one MiB pending
       - alert: BoutiqueDependencyUnavailable
         expr: boutique_dependency_ready == 0
         for: 2m
@@ -150,11 +171,29 @@ data:
         },
         {
           "type": "timeseries",
+          "title": "Gateway traffic",
+          "targets": [
+            {"expr": "sum by (gateway_name, remote_gateway_name) (rate(gnatsd_gatewayz_outbound_gateway_conn_out_bytes[5m]))", "legendFormat": "{{gateway_name}} to {{remote_gateway_name}}", "refId": "A"},
+            {"expr": "sum by (gateway_name, remote_gateway_name) (rate(gnatsd_gatewayz_inbound_gateway_conn_in_bytes[5m]))", "legendFormat": "{{remote_gateway_name}} to {{gateway_name}}", "refId": "B"}
+          ],
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 12}
+        },
+        {
+          "type": "timeseries",
+          "title": "Gateway RTT and pending bytes",
+          "targets": [
+            {"expr": "max by (gateway_name, remote_gateway_name) (gnatsd_gatewayz_outbound_gateway_conn_rtt)", "legendFormat": "{{gateway_name}}/{{remote_gateway_name}} RTT", "refId": "A"},
+            {"expr": "max by (gateway_name, remote_gateway_name) (gnatsd_gatewayz_outbound_gateway_conn_pending_bytes)", "legendFormat": "{{gateway_name}}/{{remote_gateway_name}} pending", "refId": "B"}
+          ],
+          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 12}
+        },
+        {
+          "type": "timeseries",
           "title": "Application dependency readiness",
           "targets": [
             {"expr": "min by (service, dependency) (boutique_dependency_ready)", "legendFormat": "{{service}}/{{dependency}}", "refId": "A"}
           ],
-          "gridPos": {"h": 8, "w": 24, "x": 0, "y": 12}
+          "gridPos": {"h": 8, "w": 24, "x": 0, "y": 20}
         }
       ],
       "schemaVersion": 41,

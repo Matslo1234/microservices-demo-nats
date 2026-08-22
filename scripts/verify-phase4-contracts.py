@@ -75,7 +75,7 @@ for forbidden in (
 projection_dir = ROOT / "src" / "storefrontprojectionservice"
 projection = "\n".join(path.read_text() for path in projection_dir.glob("*.go"))
 for required in (
-    'js.KeyValue("STOREFRONT_OPERATIONS")',
+    "js.KeyValue(config.operationsBucket)",
     '"boutique.evt.storefront.operation-accepted.v1"',
     '"boutique.evt.cart.command-rejected.v1"',
     '"operation":',

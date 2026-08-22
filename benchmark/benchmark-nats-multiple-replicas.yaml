@@ -115,7 +115,13 @@ subjects:
 ---
 apiVersion: v1
 data:
+  BENCHMARK_ARTIFACTS_BUCKET: BENCHMARK_ARTIFACTS_LOCAL
+  BENCHMARK_RUNS_BUCKET: BENCHMARK_RUNS_LOCAL
+  K8S_CLUSTER_NAME: local
+  LIVE_OPERATION_PREFIX: boutique.live.operation.local.
   NATS_CA_FILE: /etc/nats-ca/ca.crt
+  NATS_CLUSTER_NAME: BOUTIQUE
+  NATS_CLUSTER_ROLE: primary
   NATS_CONNECT_TIMEOUT: 2s
   NATS_DRAIN_TIMEOUT: 30s
   NATS_HEALTH_MAX_DISCONNECTED: 15s
@@ -127,8 +133,20 @@ data:
   NATS_REQUEST_TIMEOUT: 2s
   NATS_REQUIRED: "false"
   NATS_REQUIRED_SUBSCRIPTIONS: ""
+  NATS_SUPERCLUSTER_ENABLED: "false"
   NATS_TRACE_PROPAGATION: w3c
   NATS_URL: tls://nats.nats.svc.cluster.local:4222
+  REGION_ID: local
+  REGION_KEY: LOCAL
+  STOREFRONT_CARTS_BUCKET: STOREFRONT_CARTS_LOCAL
+  STOREFRONT_CONTEXT_BUCKET: STOREFRONT_CONTEXT_LOCAL
+  STOREFRONT_EVENT_STREAM: BOUTIQUE_EVENTS
+  STOREFRONT_INITIAL_REPLAY_TIMEOUT: 10m
+  STOREFRONT_OPERATIONS_BUCKET: STOREFRONT_OPERATIONS_LOCAL
+  STOREFRONT_ORDERS_BUCKET: STOREFRONT_ORDERS_LOCAL
+  STOREFRONT_PRODUCTS_BUCKET: STOREFRONT_PRODUCTS_LOCAL
+  STOREFRONT_PROJECTION_DURABLE: storefront-projection-local-v1
+  STREAM_OWNER_REGION: local
 kind: ConfigMap
 metadata:
   labels:
@@ -136,6 +154,18 @@ metadata:
     app.kubernetes.io/part-of: online-boutique
   name: nats-client-config
   namespace: default
+---
+apiVersion: v1
+data:
+  gateway.conf: |
+    # Standalone cluster: gateway listener disabled.
+kind: ConfigMap
+metadata:
+  labels:
+    app.kubernetes.io/component: gateway
+    app.kubernetes.io/name: nats
+  name: nats-gateway-config
+  namespace: nats
 ---
 apiVersion: v1
 data:
@@ -155,7 +185,8 @@ data:
       "discard": "old",
       "num_replicas": 3,
       "duplicate_window": 120000000000,
-      "allow_direct": false
+      "allow_direct": false,
+      "placement": {"cluster": "__GLOBAL_ASSET_CLUSTER__"}
     }
   BOUTIQUE_COMMANDS.json: |
     {
@@ -173,7 +204,8 @@ data:
       "discard": "new",
       "num_replicas": 3,
       "duplicate_window": 120000000000,
-      "allow_direct": false
+      "allow_direct": false,
+      "placement": {"cluster": "__GLOBAL_ASSET_CLUSTER__"}
     }
   BOUTIQUE_DLQ.json: |
     {
@@ -191,7 +223,8 @@ data:
       "discard": "old",
       "num_replicas": 3,
       "duplicate_window": 120000000000,
-      "allow_direct": false
+      "allow_direct": false,
+      "placement": {"cluster": "__GLOBAL_ASSET_CLUSTER__"}
     }
   BOUTIQUE_EVENTS.json: |
     {
@@ -209,82 +242,93 @@ data:
       "discard": "old",
       "num_replicas": 3,
       "duplicate_window": 120000000000,
-      "allow_direct": true
+      "allow_direct": true,
+      "placement": {"cluster": "__GLOBAL_ASSET_CLUSTER__"}
     }
   bootstrap.sh: |
     #!/bin/sh
     set -eu
 
-    nats_args="--server=${NATS_URL} --user=${NATS_USER} --password=${NATS_PASSWORD} --tlsca=/etc/nats-ca/ca.crt"
+    if [ "${NATS_CLUSTER_ROLE}" != primary ]; then
+      echo "global bootstrap refuses NATS_CLUSTER_ROLE=${NATS_CLUSTER_ROLE}" >&2
+      exit 1
+    fi
+    if [ "${GLOBAL_ASSET_CLUSTER}" != "${NATS_CLUSTER_NAME}" ]; then
+      echo "global assets must be bootstrapped from their owner cluster" >&2
+      exit 1
+    fi
 
+    nats_args="--server=${NATS_URL} --user=${NATS_USER} --password=${NATS_PASSWORD} --tlsca=/etc/nats-ca/ca.crt"
     until nats ${nats_args} account info >/dev/null 2>&1; do
       echo "waiting for the NATS JetStream account"
       sleep 2
     done
 
-    for config in /config/streams/*.json; do
-      stream_name="$(basename "${config}" .json)"
+    for source in /config/streams/*.json; do
+      target="/work/$(basename "${source}")"
+      sed "s/__GLOBAL_ASSET_CLUSTER__/${GLOBAL_ASSET_CLUSTER}/g" "${source}" > "${target}"
+      stream_name="$(basename "${source}" .json)"
       if nats ${nats_args} stream info "${stream_name}" >/dev/null 2>&1; then
-        nats ${nats_args} stream update "${stream_name}" --config "${config}" --force
+        nats ${nats_args} stream update "${stream_name}" --config "${target}" --force
       else
-        nats ${nats_args} stream add --config "${config}"
+        nats ${nats_args} stream add --config "${target}"
       fi
+      compact="$(nats ${nats_args} stream info "${stream_name}" --json | tr -d '[:space:]')"
+      printf '%s' "${compact}" | grep -F "\"cluster\":\"${GLOBAL_ASSET_CLUSTER}\"" >/dev/null || {
+        echo "stream ${stream_name} is not placed in ${GLOBAL_ASSET_CLUSTER}" >&2
+        exit 1
+      }
     done
 
+    assert_backing_stream() {
+      stream=$1
+      history=$2
+      max_age=$3
+      max_bytes=$4
+      cluster=$5
+      compact="$(nats ${nats_args} stream info "${stream}" --json | tr -d '[:space:]')"
+      for expected in \
+        "\"num_replicas\":3" \
+        "\"storage\":\"file\"" \
+        "\"max_msgs_per_subject\":${history}" \
+        "\"max_age\":${max_age}" \
+        "\"max_bytes\":${max_bytes}" \
+        "\"cluster\":\"${cluster}\""; do
+        printf '%s' "${compact}" | grep -F "${expected}" >/dev/null || {
+          echo "${stream} does not match ${expected}" >&2
+          exit 1
+        }
+      done
+    }
+
     ensure_kv() {
-      bucket="$1"
-      history="$2"
-      ttl="$3"
-      max_bytes="$4"
+      bucket=$1
+      history=$2
+      ttl=$3
+      max_age=$4
+      max_bytes=$5
+      cluster=$6
       if nats ${nats_args} kv info "${bucket}" >/dev/null 2>&1; then
-        nats ${nats_args} kv edit "${bucket}" \
-          --history="${history}" \
-          --replicas=3 \
-          --ttl="${ttl}" \
-          --max-bucket-size="${max_bytes}"
+        nats ${nats_args} kv edit "${bucket}" --history="${history}" --replicas=3 \
+          --ttl="${ttl}" --max-bucket-size="${max_bytes}" --cluster="${cluster}"
       else
-        nats ${nats_args} kv add "${bucket}" \
-          --history="${history}" \
-          --replicas=3 \
-          --storage=file \
-          --ttl="${ttl}" \
-          --max-bucket-size="${max_bytes}"
+        nats ${nats_args} kv add "${bucket}" --history="${history}" --replicas=3 \
+          --storage=file --ttl="${ttl}" --max-bucket-size="${max_bytes}" --cluster="${cluster}"
       fi
+      assert_backing_stream "KV_${bucket}" "${history}" "${max_age}" "${max_bytes}" "${cluster}"
     }
 
-    ensure_kv STOREFRONT_PRODUCTS 5 0s 536870912
-    ensure_kv STOREFRONT_CARTS 2 0s 536870912
-    ensure_kv STOREFRONT_CONTEXT 2 1h 268435456
-    ensure_kv STOREFRONT_ORDERS 10 0s 1610612736
-    ensure_kv STOREFRONT_OPERATIONS 10 24h 805306368
-    ensure_kv RECOMMENDATION_CATALOG 5 0s 268435456
-    ensure_kv BOOTSTRAP_CLAIMS 5 0s 67108864
-    ensure_kv DLQ_CASES 10 2160h 268435456
-
-    ensure_object() {
-      bucket="$1"
-      if nats ${nats_args} object info "${bucket}" >/dev/null 2>&1; then
-        echo "object store ${bucket} already exists"
-      else
-        nats ${nats_args} object add "${bucket}" \
-          --replicas=3 \
-          --storage=file \
-          --max-bucket-size=4294967296
-      fi
-    }
-
-    # Benchmark API replicas and disposable runner Jobs share these stores.
-    ensure_kv BENCHMARK_RUNS 10 0s 536870912
-    ensure_object BENCHMARK_ARTIFACTS
+    ensure_kv RECOMMENDATION_CATALOG 5 0s 0 268435456 "${GLOBAL_ASSET_CLUSTER}"
+    ensure_kv BOOTSTRAP_CLAIMS 5 0s 0 67108864 "${GLOBAL_ASSET_CLUSTER}"
+    ensure_kv DLQ_CASES 10 2160h 7776000000000000 268435456 "${GLOBAL_ASSET_CLUSTER}"
     nats ${nats_args} stream list
     nats ${nats_args} kv list
-    nats ${nats_args} object ls
 kind: ConfigMap
 metadata:
   labels:
-    app.kubernetes.io/component: bootstrap
+    app.kubernetes.io/component: global-bootstrap
     app.kubernetes.io/name: nats
-  name: nats-bootstrap
+  name: nats-global-bootstrap
   namespace: nats
 ---
 apiVersion: v1
@@ -340,11 +384,29 @@ data:
         },
         {
           "type": "timeseries",
+          "title": "Gateway traffic",
+          "targets": [
+            {"expr": "sum by (gateway_name, remote_gateway_name) (rate(gnatsd_gatewayz_outbound_gateway_conn_out_bytes[5m]))", "legendFormat": "{{gateway_name}} to {{remote_gateway_name}}", "refId": "A"},
+            {"expr": "sum by (gateway_name, remote_gateway_name) (rate(gnatsd_gatewayz_inbound_gateway_conn_in_bytes[5m]))", "legendFormat": "{{remote_gateway_name}} to {{gateway_name}}", "refId": "B"}
+          ],
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 12}
+        },
+        {
+          "type": "timeseries",
+          "title": "Gateway RTT and pending bytes",
+          "targets": [
+            {"expr": "max by (gateway_name, remote_gateway_name) (gnatsd_gatewayz_outbound_gateway_conn_rtt)", "legendFormat": "{{gateway_name}}/{{remote_gateway_name}} RTT", "refId": "A"},
+            {"expr": "max by (gateway_name, remote_gateway_name) (gnatsd_gatewayz_outbound_gateway_conn_pending_bytes)", "legendFormat": "{{gateway_name}}/{{remote_gateway_name}} pending", "refId": "B"}
+          ],
+          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 12}
+        },
+        {
+          "type": "timeseries",
           "title": "Application dependency readiness",
           "targets": [
             {"expr": "min by (service, dependency) (boutique_dependency_ready)", "legendFormat": "{{service}}/{{dependency}}", "refId": "A"}
           ],
-          "gridPos": {"h": 8, "w": 24, "x": 0, "y": 12}
+          "gridPos": {"h": 8, "w": 24, "x": 0, "y": 20}
         }
       ],
       "schemaVersion": 41,
@@ -419,6 +481,27 @@ data:
           severity: warning
         annotations:
           summary: A durable NATS consumer has more than 50 unacknowledged messages
+      - alert: NatsGatewayDisconnected
+        expr: gnatsd_gatewayz_outbound_gateway_configured == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: A configured regional NATS gateway is disconnected
+      - alert: NatsGatewayRTTHigh
+        expr: gnatsd_gatewayz_outbound_gateway_conn_rtt > 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Cross-region NATS gateway RTT exceeds one second
+      - alert: NatsGatewayPendingBytes
+        expr: gnatsd_gatewayz_outbound_gateway_conn_pending_bytes > 1048576
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: A regional NATS gateway has more than one MiB pending
       - alert: BoutiqueDependencyUnavailable
         expr: boutique_dependency_ready == 0
         for: 2m
@@ -436,8 +519,139 @@ metadata:
 ---
 apiVersion: v1
 data:
+  BENCHMARK_ARTIFACTS_BUCKET: BENCHMARK_ARTIFACTS_LOCAL
+  BENCHMARK_RUNS_BUCKET: BENCHMARK_RUNS_LOCAL
+  GLOBAL_ASSET_CLUSTER: BOUTIQUE
+  K8S_CLUSTER_NAME: local
+  NATS_BENCHMARK_ARTIFACTS_SUBJECT: $O.BENCHMARK_ARTIFACTS_LOCAL.>
+  NATS_BENCHMARK_RUNS_SUBJECT: $KV.BENCHMARK_RUNS_LOCAL.>
+  NATS_CLUSTER_NAME: BOUTIQUE
+  NATS_CLUSTER_ROLE: primary
+  NATS_CLUSTER_TAG: cluster:BOUTIQUE
+  NATS_FRONTEND_LIVE_SUBJECT: boutique.live.operation.local.>
+  NATS_GATEWAY_DNS_NAMES: nats-0.nats-headless.nats.svc.cluster.local,nats-1.nats-headless.nats.svc.cluster.local,nats-2.nats-headless.nats.svc.cluster.local
+  NATS_GATEWAY_DOMAIN: nats-headless.nats.svc.cluster.local
+  NATS_PROJECTION_CARTS_SUBJECT: $KV.STOREFRONT_CARTS_LOCAL.>
+  NATS_PROJECTION_CONTEXT_SUBJECT: $KV.STOREFRONT_CONTEXT_LOCAL.>
+  NATS_PROJECTION_OPERATIONS_SUBJECT: $KV.STOREFRONT_OPERATIONS_LOCAL.>
+  NATS_PROJECTION_ORDERS_SUBJECT: $KV.STOREFRONT_ORDERS_LOCAL.>
+  NATS_PROJECTION_PRODUCTS_SUBJECT: $KV.STOREFRONT_PRODUCTS_LOCAL.>
+  NATS_REGION_TAG: region:local
+  NATS_SUPERCLUSTER_ENABLED: "false"
+  REGION_ID: local
+  REGION_KEY: LOCAL
+  STOREFRONT_CARTS_BUCKET: STOREFRONT_CARTS_LOCAL
+  STOREFRONT_CONTEXT_BUCKET: STOREFRONT_CONTEXT_LOCAL
+  STOREFRONT_EVENT_STREAM: BOUTIQUE_EVENTS
+  STOREFRONT_OPERATIONS_BUCKET: STOREFRONT_OPERATIONS_LOCAL
+  STOREFRONT_ORDERS_BUCKET: STOREFRONT_ORDERS_LOCAL
+  STOREFRONT_PRODUCTS_BUCKET: STOREFRONT_PRODUCTS_LOCAL
+  STOREFRONT_PROJECTION_DURABLE: storefront-projection-local-v1
+  STREAM_OWNER_REGION: local
+kind: ConfigMap
+metadata:
+  labels:
+    app.kubernetes.io/component: region-config
+    app.kubernetes.io/name: nats
+  name: nats-region-config
+  namespace: nats
+---
+apiVersion: v1
+data:
+  bootstrap.sh: |
+    #!/bin/sh
+    set -eu
+
+    nats_args="--server=${NATS_URL} --user=${NATS_USER} --password=${NATS_PASSWORD} --tlsca=/etc/nats-ca/ca.crt"
+    until nats ${nats_args} account info >/dev/null 2>&1; do
+      echo "waiting for the local NATS JetStream account"
+      sleep 2
+    done
+
+    assert_regional_name() {
+      case "$1" in
+        *_"${REGION_KEY}") ;;
+        *) echo "regional asset $1 must end in _${REGION_KEY}" >&2; exit 1 ;;
+      esac
+    }
+
+    assert_backing_stream() {
+      stream=$1
+      history=$2
+      max_age=$3
+      max_bytes=$4
+      compact="$(nats ${nats_args} stream info "${stream}" --json | tr -d '[:space:]')"
+      for expected in \
+        "\"num_replicas\":3" \
+        "\"storage\":\"file\"" \
+        "\"max_age\":${max_age}" \
+        "\"max_bytes\":${max_bytes}" \
+        "\"cluster\":\"${NATS_CLUSTER_NAME}\""; do
+        printf '%s' "${compact}" | grep -F "${expected}" >/dev/null || {
+          echo "${stream} does not match ${expected}" >&2
+          exit 1
+        }
+      done
+      if [ "${history}" != skip ]; then
+        printf '%s' "${compact}" | grep -F "\"max_msgs_per_subject\":${history}" >/dev/null || {
+          echo "${stream} has the wrong history limit" >&2
+          exit 1
+        }
+      fi
+    }
+
+    ensure_kv() {
+      bucket=$1
+      history=$2
+      ttl=$3
+      max_age=$4
+      max_bytes=$5
+      assert_regional_name "${bucket}"
+      if nats ${nats_args} kv info "${bucket}" >/dev/null 2>&1; then
+        nats ${nats_args} kv edit "${bucket}" --history="${history}" --replicas=3 \
+          --ttl="${ttl}" --max-bucket-size="${max_bytes}" --cluster="${NATS_CLUSTER_NAME}"
+      else
+        nats ${nats_args} kv add "${bucket}" --history="${history}" --replicas=3 \
+          --storage=file --ttl="${ttl}" --max-bucket-size="${max_bytes}" --cluster="${NATS_CLUSTER_NAME}"
+      fi
+      assert_backing_stream "KV_${bucket}" "${history}" "${max_age}" "${max_bytes}"
+    }
+
+    ensure_object() {
+      bucket=$1
+      assert_regional_name "${bucket}"
+      if nats ${nats_args} object info "${bucket}" >/dev/null 2>&1; then
+        nats ${nats_args} object edit "${bucket}" --replicas=3 \
+          --max-bucket-size=4294967296 --cluster="${NATS_CLUSTER_NAME}"
+      else
+        nats ${nats_args} object add "${bucket}" --replicas=3 --storage=file \
+          --max-bucket-size=4294967296 --cluster="${NATS_CLUSTER_NAME}"
+      fi
+      assert_backing_stream "OBJ_${bucket}" skip 0 4294967296
+    }
+
+    ensure_kv "${STOREFRONT_PRODUCTS_BUCKET}" 5 0s 0 536870912
+    ensure_kv "${STOREFRONT_CARTS_BUCKET}" 2 0s 0 536870912
+    ensure_kv "${STOREFRONT_CONTEXT_BUCKET}" 2 1h 3600000000000 268435456
+    ensure_kv "${STOREFRONT_ORDERS_BUCKET}" 10 0s 0 1610612736
+    ensure_kv "${STOREFRONT_OPERATIONS_BUCKET}" 10 24h 86400000000000 805306368
+    ensure_kv "${BENCHMARK_RUNS_BUCKET}" 10 0s 0 536870912
+    ensure_object "${BENCHMARK_ARTIFACTS_BUCKET}"
+    nats ${nats_args} kv list
+    nats ${nats_args} object ls
+kind: ConfigMap
+metadata:
+  labels:
+    app.kubernetes.io/component: regional-bootstrap
+    app.kubernetes.io/name: nats
+  name: nats-regional-bootstrap
+  namespace: nats
+---
+apiVersion: v1
+data:
   nats.conf: |
-    server_name: $POD_NAME
+    server_name: $NATS_SERVER_NAME
+    server_tags: [$NATS_REGION_TAG, $NATS_CLUSTER_TAG, $NATS_NODE_TAG]
     pid_file: "/var/run/nats/nats.pid"
     listen: 0.0.0.0:4222
     http: 0.0.0.0:8222
@@ -455,7 +669,7 @@ data:
     }
 
     cluster {
-      name: "BOUTIQUE"
+      name: $NATS_CLUSTER_NAME
       listen: 0.0.0.0:6222
       # Kubernetes clients connect through the TLS service name. Do not gossip
       # pod IPs, which are not stable and are intentionally absent from the cert.
@@ -475,6 +689,10 @@ data:
         timeout: 2
       }
     }
+
+    # Empty in standalone mode. A regional supercluster overlay supplies a
+    # gateway block with exact remote cluster names and seed URLs.
+    include ./gateway.conf
 
     jetstream {
       store_dir: "/data/jetstream"
@@ -520,7 +738,7 @@ data:
                 "boutique.qry.payment.tokenize.v1", "$JS.API.INFO",
                 "$JS.API.STREAM.INFO.*"
               ],
-              subscribe: ["_INBOX.>", "boutique.live.operation.>"]
+              subscribe: ["_INBOX.>", "__NATS_FRONTEND_LIVE_SUBJECT__"]
             }
           },
           {
@@ -528,10 +746,10 @@ data:
             permissions: {
               publish: [
                 "$JS.API.>", "$JS.ACK.>", "$JS.FC.>", "_INBOX.>",
-                "$KV.STOREFRONT_PRODUCTS.>", "$KV.STOREFRONT_CARTS.>",
-                "$KV.STOREFRONT_CONTEXT.>", "$KV.STOREFRONT_ORDERS.>",
-                "$KV.STOREFRONT_OPERATIONS.>", "$KV.STOREFRONT_ASSISTANT.>",
-                "boutique.live.operation.>"
+                "__NATS_PROJECTION_PRODUCTS_SUBJECT__", "__NATS_PROJECTION_CARTS_SUBJECT__",
+                "__NATS_PROJECTION_CONTEXT_SUBJECT__", "__NATS_PROJECTION_ORDERS_SUBJECT__",
+                "__NATS_PROJECTION_OPERATIONS_SUBJECT__",
+                "__NATS_FRONTEND_LIVE_SUBJECT__"
               ],
               subscribe: ["_INBOX.>", "$SRV.>", "boutique.evt.>", "boutique.qry.storefront.>"]
             }
@@ -655,12 +873,12 @@ data:
             user: "benchmarkservice", password: $BENCHMARKSERVICE_PASSWORD,
             permissions: {
               publish: [
-                "$JS.API.>", "$KV.BENCHMARK_RUNS.>",
-                "$O.BENCHMARK_ARTIFACTS.>"
+                "$JS.API.>", "__NATS_BENCHMARK_RUNS_SUBJECT__",
+                "__NATS_BENCHMARK_ARTIFACTS_SUBJECT__"
               ],
               subscribe: [
-                "_INBOX.>", "$KV.BENCHMARK_RUNS.>",
-                "$O.BENCHMARK_ARTIFACTS.>"
+                "_INBOX.>", "__NATS_BENCHMARK_RUNS_SUBJECT__",
+                "__NATS_BENCHMARK_ARTIFACTS_SUBJECT__"
               ]
             }
           },
@@ -909,7 +1127,7 @@ data:
       {
         printf '%s' '{"apiVersion":"v1","kind":"Secret","metadata":{"name":"nats-server-auth","namespace":"nats","labels":{"app.kubernetes.io/name":"nats","app.kubernetes.io/component":"setup","app.kubernetes.io/part-of":"online-boutique"}},"type":"Opaque","data":{'
         first=true
-        for key in JETSTREAM_ENCRYPTION_KEY SYS_PASSWORD ADMIN_PASSWORD PAYMENT_SIGNING_KEY SHIPPING_PROVIDER_SECRET; do
+        for key in JETSTREAM_ENCRYPTION_KEY SYS_PASSWORD ADMIN_PASSWORD; do
           value=$(random_secret) || return 1
           if [ "${first}" = true ]; then first=false; else printf ','; fi
           printf '"%s":"%s"' "${key}" "$(b64_text "${value}")"
@@ -944,6 +1162,54 @@ data:
       printf '%s\n' "{\"apiVersion\":\"v1\",\"kind\":\"Secret\",\"metadata\":{\"name\":\"nats-server-tls\",\"namespace\":\"nats\",\"labels\":{\"app.kubernetes.io/name\":\"nats\",\"app.kubernetes.io/component\":\"setup\",\"app.kubernetes.io/part-of\":\"online-boutique\"}},\"type\":\"Opaque\",\"data\":{\"ca.crt\":\"$(b64_file "${workdir}/ca.crt")\",\"tls.crt\":\"$(b64_file "${workdir}/tls.crt")\",\"tls.key\":\"$(b64_file "${workdir}/tls.key")\"}}" > "${output}"
     }
 
+    write_gateway_tls_secret() {
+      output=$1
+      gateway_dns_names=${NATS_GATEWAY_DNS_NAMES:-}
+      if [ -z "${gateway_dns_names}" ]; then
+        fail 'NATS_GATEWAY_DNS_NAMES is required to create standalone gateway PKI'
+        return 1
+      fi
+      case "${gateway_dns_names}" in
+        *[!A-Za-z0-9.,*-]*) fail 'NATS_GATEWAY_DNS_NAMES contains unsafe characters'; return 1 ;;
+      esac
+      gateway_sans=$(printf '%s' "${gateway_dns_names}" | sed 's/^/DNS:/; s/,/,DNS:/g')
+      first_gateway_dns=${gateway_dns_names%%,*}
+      umask 077
+      openssl req -x509 -newkey rsa:3072 -nodes -sha256 -days 3650 \
+        -subj '/CN=Online Boutique NATS Gateway CA' \
+        -keyout "${workdir}/gateway-ca.key" -out "${workdir}/gateway-ca.crt" >/dev/null 2>&1 || return 1
+      {
+        printf '%s\n' 'basicConstraints=critical,CA:FALSE'
+        printf '%s\n' 'keyUsage=critical,digitalSignature,keyEncipherment'
+        printf '%s\n' 'extendedKeyUsage=serverAuth,clientAuth'
+        printf 'subjectAltName=%s\n' "${gateway_sans}"
+      } > "${workdir}/gateway-server.ext"
+      openssl req -newkey rsa:3072 -nodes -sha256 \
+        -subj "/CN=${first_gateway_dns}" \
+        -keyout "${workdir}/gateway-tls.key" -out "${workdir}/gateway-tls.csr" >/dev/null 2>&1 || return 1
+      openssl x509 -req -sha256 -days 825 \
+        -in "${workdir}/gateway-tls.csr" -CA "${workdir}/gateway-ca.crt" \
+        -CAkey "${workdir}/gateway-ca.key" -CAcreateserial \
+        -extfile "${workdir}/gateway-server.ext" -out "${workdir}/gateway-tls.crt" >/dev/null 2>&1 || return 1
+      printf '%s\n' "{\"apiVersion\":\"v1\",\"kind\":\"Secret\",\"metadata\":{\"name\":\"nats-gateway-tls\",\"namespace\":\"nats\",\"labels\":{\"app.kubernetes.io/name\":\"nats\",\"app.kubernetes.io/component\":\"gateway-pki\",\"app.kubernetes.io/part-of\":\"online-boutique\"}},\"type\":\"Opaque\",\"data\":{\"ca.crt\":\"$(b64_file "${workdir}/gateway-ca.crt")\",\"tls.crt\":\"$(b64_file "${workdir}/gateway-tls.crt")\",\"tls.key\":\"$(b64_file "${workdir}/gateway-tls.key")\"}}" > "${output}"
+    }
+
+    write_global_application_secret() {
+      output=$1
+      frontend_cookie_key=$(random_secret) || return 1
+      payment_signing_key=$(random_secret) || return 1
+      shipping_provider_secret=$(random_secret) || return 1
+      printf '%s\n' "{\"apiVersion\":\"v1\",\"kind\":\"Secret\",\"metadata\":{\"name\":\"global-application-secrets\",\"namespace\":\"default\",\"labels\":{\"app.kubernetes.io/name\":\"global-application-secrets\",\"app.kubernetes.io/component\":\"business-keys\",\"app.kubernetes.io/part-of\":\"online-boutique\"}},\"type\":\"Opaque\",\"data\":{\"FRONTEND_COOKIE_KEY\":\"$(b64_text "${frontend_cookie_key}")\",\"PAYMENT_SIGNING_KEY\":\"$(b64_text "${payment_signing_key}")\",\"PAYMENT_VERIFICATION_KEYS\":\"$(b64_text '{}')\",\"SHIPPING_PROVIDER_SECRET\":\"$(b64_text "${shipping_provider_secret}")\"}}" > "${output}"
+    }
+
+    secret_fingerprint() {
+      namespace=$1
+      name=$2
+      key=$3
+      encoded=$(secret_data "${namespace}" "${name}" "${key}") || return 1
+      printf '%s' "${encoded}" | base64 -d | openssl dgst -sha256 | sed 's/^.*= //; s/^\(.\{16\}\).*$/\1/'
+    }
+
     pem_json() {
       base64 -d | awk '{gsub(/\\/, "\\\\"); gsub(/"/, "\\\""); printf "%s\\n", $0}'
     }
@@ -962,16 +1228,7 @@ data:
       user=$3
       password=$4
       output=$5
-      payment_signing_key=${6:-}
-      shipping_provider_secret=${7:-}
-      extra_data=
-      if [ -n "${payment_signing_key}" ]; then
-        extra_data=",\"PAYMENT_SIGNING_KEY\":\"${payment_signing_key}\""
-      fi
-      if [ -n "${shipping_provider_secret}" ]; then
-        extra_data="${extra_data},\"SHIPPING_PROVIDER_SECRET\":\"${shipping_provider_secret}\""
-      fi
-      printf '%s\n' "{\"apiVersion\":\"v1\",\"kind\":\"Secret\",\"metadata\":{\"name\":\"${name}\",\"namespace\":\"${namespace}\",\"labels\":{\"app.kubernetes.io/name\":\"nats\",\"app.kubernetes.io/component\":\"setup\",\"app.kubernetes.io/part-of\":\"online-boutique\"}},\"type\":\"Opaque\",\"data\":{\"NATS_URL\":\"$(b64_text "${nats_url}")\",\"NATS_USER\":\"$(b64_text "${user}")\",\"NATS_PASSWORD\":\"${password}\"${extra_data}}}" > "${output}"
+      printf '%s\n' "{\"apiVersion\":\"v1\",\"kind\":\"Secret\",\"metadata\":{\"name\":\"${name}\",\"namespace\":\"${namespace}\",\"labels\":{\"app.kubernetes.io/name\":\"nats\",\"app.kubernetes.io/component\":\"setup\",\"app.kubernetes.io/part-of\":\"online-boutique\"}},\"type\":\"Opaque\",\"data\":{\"NATS_URL\":\"$(b64_text "${nats_url}")\",\"NATS_USER\":\"$(b64_text "${user}")\",\"NATS_PASSWORD\":\"${password}\"}}" > "${output}"
     }
 
     write_messageoperations_admin_secret() {
@@ -983,7 +1240,7 @@ data:
     reconcile() {
       write_auth_secret "${workdir}/auth.json" || return 1
       ensure_from_file secrets nats nats-server-auth "${workdir}/auth.json" || return 1
-      for key in JETSTREAM_ENCRYPTION_KEY SYS_PASSWORD ADMIN_PASSWORD PAYMENT_SIGNING_KEY SHIPPING_PROVIDER_SECRET; do
+      for key in JETSTREAM_ENCRYPTION_KEY SYS_PASSWORD ADMIN_PASSWORD; do
         secret_data nats nats-server-auth "${key}" >/dev/null || return 1
       done
       for service in ${services}; do
@@ -995,6 +1252,34 @@ data:
       ensure_from_file secrets nats nats-server-tls "${workdir}/tls.json" || return 1
       for key in ca.crt tls.crt tls.key; do
         secret_data nats nats-server-tls "${key}" >/dev/null || return 1
+      done
+
+      api_get /api/v1/namespaces/nats/secrets/nats-gateway-tls "${workdir}/existing-gateway-tls.json"
+      gateway_status=$?
+      if [ "${gateway_status}" -eq 4 ] && [ "${NATS_SUPERCLUSTER_ENABLED}" = true ]; then
+        fail 'supercluster mode requires a pre-provisioned shared-trust nats-gateway-tls Secret'
+        return 1
+      elif [ "${gateway_status}" -ne 0 ] && [ "${gateway_status}" -ne 4 ]; then
+        return 1
+      fi
+      write_gateway_tls_secret "${workdir}/gateway-tls.json" || return 1
+      ensure_from_file secrets nats nats-gateway-tls "${workdir}/gateway-tls.json" || return 1
+      for key in ca.crt tls.crt tls.key; do
+        secret_data nats nats-gateway-tls "${key}" >/dev/null || return 1
+      done
+
+      api_get /api/v1/namespaces/default/secrets/global-application-secrets "${workdir}/existing-global-application.json"
+      global_status=$?
+      if [ "${global_status}" -eq 4 ] && [ "${NATS_CLUSTER_ROLE}" = secondary ]; then
+        fail 'secondary cluster requires a pre-provisioned global-application-secrets Secret'
+        return 1
+      elif [ "${global_status}" -ne 0 ] && [ "${global_status}" -ne 4 ]; then
+        return 1
+      fi
+      write_global_application_secret "${workdir}/global-application.json" || return 1
+      ensure_from_file secrets default global-application-secrets "${workdir}/global-application.json" || return 1
+      for key in FRONTEND_COOKIE_KEY PAYMENT_SIGNING_KEY PAYMENT_VERIFICATION_KEYS SHIPPING_PROVIDER_SECRET; do
+        secret_data default global-application-secrets "${key}" >/dev/null || return 1
       done
 
       for namespace in nats default; do
@@ -1009,15 +1294,7 @@ data:
       for service in ${services}; do
         key=$(printf '%s' "${service}" | tr '[:lower:]' '[:upper:]')_PASSWORD
         password=$(secret_data nats nats-server-auth "${key}") || return 1
-        if [ "${service}" = paymentservice ]; then
-          payment_signing_key=$(secret_data nats nats-server-auth PAYMENT_SIGNING_KEY) || return 1
-          write_credentials_secret default "nats-credentials-${service}" "${service}" "${password}" "${workdir}/credential-${service}.json" "${payment_signing_key}" || return 1
-        elif [ "${service}" = shippingservice ]; then
-          shipping_provider_secret=$(secret_data nats nats-server-auth SHIPPING_PROVIDER_SECRET) || return 1
-          write_credentials_secret default "nats-credentials-${service}" "${service}" "${password}" "${workdir}/credential-${service}.json" "" "${shipping_provider_secret}" || return 1
-        else
-          write_credentials_secret default "nats-credentials-${service}" "${service}" "${password}" "${workdir}/credential-${service}.json" || return 1
-        fi
+        write_credentials_secret default "nats-credentials-${service}" "${service}" "${password}" "${workdir}/credential-${service}.json" || return 1
         sync_from_file secrets default "nats-credentials-${service}" "${workdir}/credential-${service}.json" || return 1
       done
 
@@ -1029,6 +1306,8 @@ data:
       ensure_from_file secrets default messageoperations-admin-api "${workdir}/messageoperations-admin.json" || return 1
       secret_data default messageoperations-admin-api ADMIN_USER >/dev/null || return 1
       secret_data default messageoperations-admin-api ADMIN_API_TOKEN >/dev/null || return 1
+
+      log "global key fingerprints frontend_cookie=$(secret_fingerprint default global-application-secrets FRONTEND_COOKIE_KEY) payment=$(secret_fingerprint default global-application-secrets PAYMENT_SIGNING_KEY) shipping=$(secret_fingerprint default global-application-secrets SHIPPING_PROVIDER_SECRET) gateway_ca=$(secret_fingerprint nats nats-gateway-tls ca.crt)"
     }
 
     mkdir -p "${workdir}" || exit 1
@@ -1227,6 +1506,9 @@ spec:
         env:
         - name: RECONCILE_INTERVAL_SECONDS
           value: "21600"
+        envFrom:
+        - configMapRef:
+            name: nats-region-config
         image: alpine/openssl:3.3.3@sha256:0cb8b9948f86d73f196cef2f828ca0b60e40c7c74d8edf9e60d9990cbb7b8b76
         imagePullPolicy: IfNotPresent
         name: setup
@@ -1311,14 +1593,37 @@ spec:
             weight: 100
       containers:
       - args:
-        - -c
-        - /etc/nats-config/nats.conf
+        - |
+          export NATS_SERVER_NAME="${REGION_ID}-${POD_NAME}"
+          export NATS_NODE_TAG="node:${NODE_NAME}"
+          export NATS_GATEWAY_ADVERTISE="${POD_NAME}.${NATS_GATEWAY_DOMAIN}:7222"
+          sed \
+            -e "s|__NATS_FRONTEND_LIVE_SUBJECT__|${NATS_FRONTEND_LIVE_SUBJECT}|g" \
+            -e "s|__NATS_PROJECTION_PRODUCTS_SUBJECT__|${NATS_PROJECTION_PRODUCTS_SUBJECT}|g" \
+            -e "s|__NATS_PROJECTION_CARTS_SUBJECT__|${NATS_PROJECTION_CARTS_SUBJECT}|g" \
+            -e "s|__NATS_PROJECTION_CONTEXT_SUBJECT__|${NATS_PROJECTION_CONTEXT_SUBJECT}|g" \
+            -e "s|__NATS_PROJECTION_ORDERS_SUBJECT__|${NATS_PROJECTION_ORDERS_SUBJECT}|g" \
+            -e "s|__NATS_PROJECTION_OPERATIONS_SUBJECT__|${NATS_PROJECTION_OPERATIONS_SUBJECT}|g" \
+            -e "s|__NATS_BENCHMARK_RUNS_SUBJECT__|${NATS_BENCHMARK_RUNS_SUBJECT}|g" \
+            -e "s|__NATS_BENCHMARK_ARTIFACTS_SUBJECT__|${NATS_BENCHMARK_ARTIFACTS_SUBJECT}|g" \
+            /etc/nats-config/nats.conf > /var/run/nats/nats.conf
+          cp /etc/nats-config/gateway.conf /var/run/nats/gateway.conf
+          exec nats-server -c /var/run/nats/nats.conf
+        command:
+        - /bin/sh
+        - -ec
         env:
         - name: POD_NAME
           valueFrom:
             fieldRef:
               fieldPath: metadata.name
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
         envFrom:
+        - configMapRef:
+            name: nats-region-config
         - secretRef:
             name: nats-server-auth
         image: nats:2.14.3-alpine
@@ -1344,6 +1649,8 @@ spec:
           name: client
         - containerPort: 6222
           name: cluster
+        - containerPort: 7222
+          name: gateway
         - containerPort: 8222
           name: monitor
         readinessProbe:
@@ -1379,6 +1686,9 @@ spec:
         - mountPath: /etc/nats/tls
           name: tls
           readOnly: true
+        - mountPath: /etc/nats/gateway-tls
+          name: gateway-tls
+          readOnly: true
         - mountPath: /data
           name: jetstream
         - mountPath: /var/run/nats
@@ -1388,6 +1698,7 @@ spec:
         - "7777"
         - -varz
         - -routez
+        - -gatewayz
         - -subz
         - -jsz=all
         - http://127.0.0.1:8222
@@ -1446,12 +1757,20 @@ spec:
         topologyKey: kubernetes.io/hostname
         whenUnsatisfiable: ScheduleAnyway
       volumes:
-      - configMap:
-          name: nats-server-config
-        name: config
+      - name: config
+        projected:
+          sources:
+          - configMap:
+              name: nats-server-config
+          - configMap:
+              name: nats-gateway-config
       - name: tls
         secret:
           secretName: nats-server-tls
+      - name: gateway-tls
+        secret:
+          optional: true
+          secretName: nats-gateway-tls
       - emptyDir: {}
         name: run
   updateStrategy:
@@ -1575,16 +1894,18 @@ apiVersion: batch/v1
 kind: Job
 metadata:
   labels:
-    app.kubernetes.io/component: bootstrap
+    app.kubernetes.io/component: global-bootstrap
     app.kubernetes.io/name: nats
-  name: nats-bootstrap
+  name: nats-global-bootstrap
   namespace: nats
 spec:
   backoffLimit: 6
+  completions: 1
+  parallelism: 1
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: nats-bootstrap
+        app.kubernetes.io/name: nats-global-bootstrap
         app.kubernetes.io/part-of: online-boutique
     spec:
       containers:
@@ -1592,6 +1913,86 @@ spec:
         - sh
         - /config/bootstrap.sh
         envFrom:
+        - configMapRef:
+            name: nats-region-config
+        - secretRef:
+            name: nats-admin-credentials
+        image: natsio/nats-box:0.19.7-nonroot
+        name: bootstrap
+        resources:
+          limits:
+            cpu: 100m
+            memory: 128Mi
+          requests:
+            cpu: 20m
+            memory: 32Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+        volumeMounts:
+        - mountPath: /config
+          name: config
+          readOnly: true
+        - mountPath: /etc/nats-ca
+          name: ca
+          readOnly: true
+        - mountPath: /work
+          name: work
+      restartPolicy: OnFailure
+      securityContext:
+        runAsGroup: 1000
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      volumes:
+      - configMap:
+          items:
+          - key: bootstrap.sh
+            path: bootstrap.sh
+          - key: BOUTIQUE_COMMANDS.json
+            path: streams/BOUTIQUE_COMMANDS.json
+          - key: BOUTIQUE_EVENTS.json
+            path: streams/BOUTIQUE_EVENTS.json
+          - key: BOUTIQUE_DLQ.json
+            path: streams/BOUTIQUE_DLQ.json
+          - key: BOUTIQUE_ADVISORIES.json
+            path: streams/BOUTIQUE_ADVISORIES.json
+          name: nats-global-bootstrap
+        name: config
+      - configMap:
+          name: nats-ca
+        name: ca
+      - emptyDir: {}
+        name: work
+  ttlSecondsAfterFinished: 3600
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  labels:
+    app.kubernetes.io/component: regional-bootstrap
+    app.kubernetes.io/name: nats
+  name: nats-regional-bootstrap
+  namespace: nats
+spec:
+  backoffLimit: 6
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: nats-regional-bootstrap
+        app.kubernetes.io/part-of: online-boutique
+    spec:
+      containers:
+      - command:
+        - sh
+        - /config/bootstrap.sh
+        envFrom:
+        - configMapRef:
+            name: nats-region-config
         - secretRef:
             name: nats-admin-credentials
         image: natsio/nats-box:0.19.7-nonroot
@@ -1628,15 +2029,7 @@ spec:
           items:
           - key: bootstrap.sh
             path: bootstrap.sh
-          - key: BOUTIQUE_COMMANDS.json
-            path: streams/BOUTIQUE_COMMANDS.json
-          - key: BOUTIQUE_EVENTS.json
-            path: streams/BOUTIQUE_EVENTS.json
-          - key: BOUTIQUE_DLQ.json
-            path: streams/BOUTIQUE_DLQ.json
-          - key: BOUTIQUE_ADVISORIES.json
-            path: streams/BOUTIQUE_ADVISORIES.json
-          name: nats-bootstrap
+          name: nats-regional-bootstrap
         name: config
       - configMap:
           name: nats-ca
@@ -1775,7 +2168,8 @@ spec:
     - key: app.kubernetes.io/name
       operator: In
       values:
-      - nats-bootstrap
+      - nats-global-bootstrap
+      - nats-regional-bootstrap
       - nats-backup
       - nats-advisory-watcher
       - nats-phase1-verification
@@ -2216,7 +2610,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-adservice
-        image: matslo123/adservice:v0.4.0@sha256:016ac2ddf41f7ac7b7fcf0ac04cfa4e59b169a60fe14bd3582c041594b5010d8
+        image: matslo123/adservice:v0.4.0@sha256:3856d1a4302a98e4a39e4be1e9e7995c315e177fc028fd5eb8542a4c33394fac
         livenessProbe:
           httpGet:
             path: /healthz
@@ -2319,7 +2713,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-benchmarkservice
-        image: matslo123/benchmarkservice:v0.4.0@sha256:f746fa15e19e2c6b32ca482f97c14bc48f57d7486350ac8c93821b19cddafff5
+        image: matslo123/benchmarkservice:v0.4.0@sha256:53b4b74848ff39536162c328b1b6a24b9386b7cde5db8967dabd7a4c2396b477
         livenessProbe:
           httpGet:
             path: /healthz
@@ -2439,7 +2833,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-cartservice
-        image: matslo123/cartservice:v0.4.0@sha256:751cbd6b8fb98199757f722457853775304e51d20a57eae331cb60825dd524e2
+        image: matslo123/cartservice:v0.4.0@sha256:98812d26da5f93a29cffc8aa93801fb7b82517b703bade18876033385061c3a0
         livenessProbe:
           failureThreshold: 6
           httpGet:
@@ -2576,7 +2970,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-checkoutservice
-        image: matslo123/checkoutservice:v0.4.0@sha256:949a6a98bd4b24156e39fc60bf0bc1fdd4f9a5d7e381b1eef0ff7ed11c7e74fb
+        image: matslo123/checkoutservice:v0.4.0@sha256:14374b110125e8ce183db256c1357d98a1ae1769fca01a61c13267979dd34b0d
         livenessProbe:
           httpGet:
             path: /healthz
@@ -2697,7 +3091,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-currencyservice
-        image: matslo123/currencyservice:v0.4.0@sha256:e83f05d7d0dcfd22b8bbd9e8bb79630e740085bc4118229e4833f34988a647b3
+        image: matslo123/currencyservice:v0.4.0@sha256:1b676e316bfbb845411f4b5b02f376b780fe2ca3614c8a84065aa4a06be608f6
         livenessProbe:
           httpGet:
             path: /healthz
@@ -2812,7 +3206,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-emailservice
-        image: matslo123/emailservice:v0.4.0@sha256:bd6ae1930f8cd96a201830910f513595e1c4c47fec228a9a9c75241fab84698d
+        image: matslo123/emailservice:v0.4.0@sha256:bff27de63900bb605ffa8082776fd866f65f56831fc15da72e6f62c29679c619
         livenessProbe:
           httpGet:
             path: /healthz
@@ -2976,7 +3370,9 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-frontend
-        image: matslo123/frontend:v0.4.0@sha256:9fa9292420bea28f676fa7f237ed22d9949629f1e2c7a9dbf5baf372aaa5914f
+        - secretRef:
+            name: global-application-secrets
+        image: matslo123/frontend:v0.4.0@sha256:7d659542349ad1bf9ff80399a5f99f4af83c4bd4360b4e4e43f9e119e53ba2fd
         livenessProbe:
           failureThreshold: 6
           httpGet:
@@ -3123,7 +3519,7 @@ spec:
             name: nats-credentials-messageoperationsservice
         - secretRef:
             name: messageoperations-admin-api
-        image: matslo123/messageoperationsservice:v0.4.0@sha256:d5661b18a6adf5c4389111f35e796e026910499cad35db1a80d5f89227ffea75
+        image: matslo123/messageoperationsservice:v0.4.0@sha256:07abbd1a93fd51c9092f347d3d34bb58bc5a848ece8524d2a092105968d12b1f
         livenessProbe:
           failureThreshold: 6
           httpGet:
@@ -3250,7 +3646,9 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-paymentservice
-        image: matslo123/paymentservice:v0.4.0@sha256:85473a6e3663fdfc9d706812ac84bb5cdbeca9915b1856a3f74e3f62186a020d
+        - secretRef:
+            name: global-application-secrets
+        image: matslo123/paymentservice:v0.4.0@sha256:48b79ac7ecf5aa4f302599a3cf0738f14c4f368c76cccbcef3185bbb51e950cd
         livenessProbe:
           failureThreshold: 6
           httpGet:
@@ -3367,7 +3765,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-productcatalogservice
-        image: matslo123/productcatalogservice:v0.4.0@sha256:9721c7972d03c4c4b035c872f3b879c856f3016989f317a4b965878f547ecc41
+        image: matslo123/productcatalogservice:v0.4.0@sha256:26d97784a6e105cf1586b2ff723772c583021491d5fa165ceaae6a3af12fe54d
         livenessProbe:
           httpGet:
             path: /healthz
@@ -3484,7 +3882,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-recommendationservice
-        image: matslo123/recommendationservice:v0.4.0@sha256:2f10eb25d40828c218dea63ae1ad323579d6204e5c49ace71c61b2bc84f9eabf
+        image: matslo123/recommendationservice:v0.4.0@sha256:7c056ea623ea3964eee7f21b7c4cc5e100d24abafeb3fe9f7b91ae26caa0544b
         livenessProbe:
           failureThreshold: 6
           httpGet:
@@ -3608,7 +4006,9 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-shippingservice
-        image: matslo123/shippingservice:v0.4.0@sha256:fc5433ddfa1b8463e6b253300f790ab66dc31991813cdd8c91e3aabd0008bc73
+        - secretRef:
+            name: global-application-secrets
+        image: matslo123/shippingservice:v0.4.0@sha256:d8c1054bf40a9df1917249358c272239a7685f12f9ce625d5aa5d9e0f2a3aeba
         livenessProbe:
           failureThreshold: 6
           httpGet:
@@ -3700,7 +4100,7 @@ spec:
         - name: NATS_REQUIRED
           value: "true"
         - name: NATS_REQUIRED_SUBSCRIPTIONS
-          value: storefront-projection-v1,boutique.qry.storefront.home.v1,boutique.qry.storefront.product.v1,boutique.qry.storefront.cart.v1,boutique.qry.storefront.currencies.v1,boutique.qry.storefront.product-meta.v1,boutique.qry.storefront.operation.v1,boutique.qry.storefront.order.v1
+          value: storefront-projection-local-v1,boutique.qry.storefront.home.v1,boutique.qry.storefront.product.v1,boutique.qry.storefront.cart.v1,boutique.qry.storefront.currencies.v1,boutique.qry.storefront.product-meta.v1,boutique.qry.storefront.operation.v1,boutique.qry.storefront.order.v1
         - name: GOMEMLIMIT
           value: 400MiB
         - name: ENABLE_TRACING
@@ -3726,7 +4126,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-storefrontprojectionservice
-        image: matslo123/storefrontprojectionservice:v0.4.0@sha256:ca046da94f8c8da01622179dabb5cb24d1d7d9719b27cbb73ab383575335a469
+        image: matslo123/storefrontprojectionservice:v0.4.0@sha256:13ff3ef9fb7a254e595f3ace2caad03b16384dbf1709843292f03a0b27d895af
         livenessProbe:
           failureThreshold: 6
           httpGet:
@@ -5354,7 +5754,7 @@ spec:
               key: BENCHMARK_METRICS_TOKEN
               name: benchmark-metrics-auth
               optional: true
-        image: matslo123/benchmarkservice:v0.4.0@sha256:f746fa15e19e2c6b32ca482f97c14bc48f57d7486350ac8c93821b19cddafff5
+        image: matslo123/benchmarkservice:v0.4.0@sha256:53b4b74848ff39536162c328b1b6a24b9386b7cde5db8967dabd7a4c2396b477
         imagePullPolicy: IfNotPresent
         livenessProbe:
           httpGet:

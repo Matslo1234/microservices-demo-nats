@@ -31,8 +31,8 @@ func environmentDuration(name string, fallback time.Duration) (time.Duration, er
 
 func connectNATS() (*nats.Conn, nats.JetStreamContext, error) {
 	url, user, password, caFile := os.Getenv("NATS_URL"), os.Getenv("NATS_USER"), os.Getenv("NATS_PASSWORD"), os.Getenv("NATS_CA_FILE")
-	if url == "" || user == "" || password == "" || caFile == "" {
-		return nil, nil, errors.New("NATS_URL, NATS_USER, NATS_PASSWORD, and NATS_CA_FILE are required")
+	if url == "" || user == "" || password == "" || caFile == "" || os.Getenv("REGION_ID") == "" || os.Getenv("K8S_CLUSTER_NAME") == "" {
+		return nil, nil, errors.New("NATS_URL, NATS_USER, NATS_PASSWORD, NATS_CA_FILE, REGION_ID, and K8S_CLUSTER_NAME are required")
 	}
 	connectTimeout, err := environmentDuration("NATS_CONNECT_TIMEOUT", 2*time.Second)
 	if err != nil {
@@ -50,7 +50,8 @@ func connectNATS() (*nats.Conn, nats.JetStreamContext, error) {
 		}
 	}
 	nc, err := nats.Connect(url,
-		nats.Name("messageoperationsservice/v1"), nats.UserInfo(user, password),
+		nats.Name(fmt.Sprintf("messageoperationsservice/v1/%s/%s", os.Getenv("REGION_ID"), os.Getenv("K8S_CLUSTER_NAME"))),
+		nats.UserInfo(user, password),
 		nats.RootCAs(caFile), nats.Timeout(connectTimeout), nats.ReconnectWait(reconnectWait),
 		nats.MaxReconnects(maxReconnects), nats.PingInterval(20*time.Second), nats.MaxPingsOutstanding(2),
 	)

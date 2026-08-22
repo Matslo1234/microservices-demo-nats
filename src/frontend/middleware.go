@@ -139,11 +139,6 @@ func ensureSessionID(next http.Handler) http.HandlerFunc {
 func sessionCookieKey() []byte {
 	sessionCookieKeyOnce.Do(func() {
 		secret := os.Getenv("FRONTEND_COOKIE_KEY")
-		if secret == "" {
-			// The frontend NATS credential is already a replica-shared Kubernetes
-			// Secret. Domain separation prevents using its raw value as a cookie key.
-			secret = os.Getenv("NATS_PASSWORD")
-		}
 		sessionCookieKeyValue = sha256.Sum256(
 			[]byte("online-boutique.frontend-cookie.v1\x00" + secret),
 		)

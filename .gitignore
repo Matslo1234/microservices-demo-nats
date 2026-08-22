@@ -28,3 +28,6 @@ release/wi-kubernetes-manifests.yaml
 vendor/
 gha-creds-*.json
 docs/development/*
+!docs/development/supercluster-progress/
+docs/development/supercluster-progress/*
+!docs/development/supercluster-progress/code-changes.md

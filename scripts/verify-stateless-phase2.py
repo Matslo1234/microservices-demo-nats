@@ -173,9 +173,11 @@ def verify_replica_state_sources() -> None:
             "signSessionCookie",
             "verifySessionCookie",
             "hmac.Equal",
-            "NATS_PASSWORD",
+            "FRONTEND_COOKIE_KEY",
         ),
     )
+    if "NATS_PASSWORD" in frontend:
+        raise VerificationError("frontend session cookies still depend on a regional NATS password")
     del frontend
     payment = require_all(
         ROOT / "src" / "paymentservice" / "nats_worker.js",
@@ -203,8 +205,8 @@ def verify_replica_state_sources() -> None:
 
 def verify_nats_resources(rendered_nats: str) -> None:
     required = (
-        "ensure_kv RECOMMENDATION_CATALOG 5 0s 268435456",
-        "ensure_kv BOOTSTRAP_CLAIMS 5 0s 67108864",
+        "ensure_kv RECOMMENDATION_CATALOG 5 0s 0 268435456",
+        "ensure_kv BOOTSTRAP_CLAIMS 5 0s 0 67108864",
         '"$KV.RECOMMENDATION_CATALOG.>"',
         '"$KV.BOOTSTRAP_CLAIMS.>"',
         'user: "productcatalogservice"',

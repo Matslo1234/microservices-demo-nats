@@ -3,9 +3,12 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
+import sys
+import tempfile
 from pathlib import Path
 
 
@@ -22,6 +25,7 @@ RELEASE_HEADER = """# Copyright 2026 Google LLC
 ---
 """
 FOOTER = "# [END gke_release_kubernetes_manifests_microservices_demo]\n"
+REGION_INVENTORY = ROOT / "kubernetes-manifests" / "regions" / "inventory.yaml"
 SERVICES = (
     "adservice",
     "benchmarkservice",
@@ -39,20 +43,20 @@ SERVICES = (
     "storefrontprojectionservice",
 )
 DEFAULT_IMAGE_DIGESTS = {
-    "adservice": "016ac2ddf41f7ac7b7fcf0ac04cfa4e59b169a60fe14bd3582c041594b5010d8",
-    "benchmarkservice": "f746fa15e19e2c6b32ca482f97c14bc48f57d7486350ac8c93821b19cddafff5",
-    "cartservice": "751cbd6b8fb98199757f722457853775304e51d20a57eae331cb60825dd524e2",
-    "checkoutservice": "949a6a98bd4b24156e39fc60bf0bc1fdd4f9a5d7e381b1eef0ff7ed11c7e74fb",
-    "currencyservice": "e83f05d7d0dcfd22b8bbd9e8bb79630e740085bc4118229e4833f34988a647b3",
-    "emailservice": "bd6ae1930f8cd96a201830910f513595e1c4c47fec228a9a9c75241fab84698d",
-    "frontend": "9fa9292420bea28f676fa7f237ed22d9949629f1e2c7a9dbf5baf372aaa5914f",
+    "adservice": "3856d1a4302a98e4a39e4be1e9e7995c315e177fc028fd5eb8542a4c33394fac",
+    "benchmarkservice": "53b4b74848ff39536162c328b1b6a24b9386b7cde5db8967dabd7a4c2396b477",
+    "cartservice": "98812d26da5f93a29cffc8aa93801fb7b82517b703bade18876033385061c3a0",
+    "checkoutservice": "14374b110125e8ce183db256c1357d98a1ae1769fca01a61c13267979dd34b0d",
+    "currencyservice": "1b676e316bfbb845411f4b5b02f376b780fe2ca3614c8a84065aa4a06be608f6",
+    "emailservice": "bff27de63900bb605ffa8082776fd866f65f56831fc15da72e6f62c29679c619",
+    "frontend": "7d659542349ad1bf9ff80399a5f99f4af83c4bd4360b4e4e43f9e119e53ba2fd",
     "loadgenerator": "c66a188ecf8bf7507bd3982a5fa50ae3e9497f3239248dd48b275fc2aee0adb3",
-    "messageoperationsservice": "d5661b18a6adf5c4389111f35e796e026910499cad35db1a80d5f89227ffea75",
-    "paymentservice": "85473a6e3663fdfc9d706812ac84bb5cdbeca9915b1856a3f74e3f62186a020d",
-    "productcatalogservice": "9721c7972d03c4c4b035c872f3b879c856f3016989f317a4b965878f547ecc41",
-    "recommendationservice": "2f10eb25d40828c218dea63ae1ad323579d6204e5c49ace71c61b2bc84f9eabf",
-    "shippingservice": "fc5433ddfa1b8463e6b253300f790ab66dc31991813cdd8c91e3aabd0008bc73",
-    "storefrontprojectionservice": "ca046da94f8c8da01622179dabb5cb24d1d7d9719b27cbb73ab383575335a469",
+    "messageoperationsservice": "07abbd1a93fd51c9092f347d3d34bb58bc5a848ece8524d2a092105968d12b1f",
+    "paymentservice": "48b79ac7ecf5aa4f302599a3cf0738f14c4f368c76cccbcef3185bbb51e950cd",
+    "productcatalogservice": "26d97784a6e105cf1586b2ff723772c583021491d5fa165ceaae6a3af12fe54d",
+    "recommendationservice": "7c056ea623ea3964eee7f21b7c4cc5e100d24abafeb3fe9f7b91ae26caa0544b",
+    "shippingservice": "d8c1054bf40a9df1917249358c272239a7685f12f9ce625d5aa5d9e0f2a3aeba",
+    "storefrontprojectionservice": "13ff3ef9fb7a254e595f3ace2caad03b16384dbf1709843292f03a0b27d895af",
 }
 
 
@@ -87,6 +91,27 @@ def qualify_images(content: str) -> str:
     return content
 
 
+def validate_regional_render(
+    content: str, region: str, role: str, *, application: bool = False
+) -> None:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml") as manifest:
+        manifest.write(content)
+        manifest.flush()
+        command = [
+            sys.executable,
+            "scripts/nats/validate-rendered.py",
+            "--manifest",
+            manifest.name,
+            "--region",
+            region,
+            "--role",
+            role,
+        ]
+        if application:
+            command.append("--application")
+        subprocess.run(command, cwd=ROOT, check=True)
+
+
 def write(path: Path, content: str, header: str, footer: str = "") -> None:
     path.write_text(header + qualify_images(content) + footer)
 
@@ -112,6 +137,16 @@ def benchmark_header(description: str, notes: tuple[str, ...]) -> str:
 
 
 def main() -> None:
+    subprocess.run(
+        [
+            sys.executable,
+            "scripts/nats/validate-regions.py",
+            "--inventory",
+            str(REGION_INVENTORY),
+        ],
+        cwd=ROOT,
+        check=True,
+    )
     application = render("kubernetes-manifests")
     write(
         ROOT / "release" / "kubernetes-manifests-no-loadgenerator.yaml",
@@ -135,6 +170,12 @@ def main() -> None:
     single_replica_application = render(
         "benchmark/manifests/single-replica",
         allow_external_resources=True,
+    )
+    write(
+        ROOT / "release" / "kubernetes-manifests-single-replica-no-loadgenerator.yaml",
+        single_replica_application,
+        RELEASE_HEADER,
+        FOOTER,
     )
     delayed_application = render(
         "benchmark/manifests/with-delay",
@@ -216,9 +257,42 @@ def main() -> None:
             content,
             benchmark_header(description, notes),
         )
+    regional_release_dir = ROOT / "release" / "regions"
+    regional_release_dir.mkdir(parents=True, exist_ok=True)
+    inventory = json.loads(REGION_INVENTORY.read_text())
+    for region in inventory["regions"]:
+        region_id = region["region_id"]
+        role = region["nats_cluster_role"]
+        nats_mode = region["nats_mode"]
+        nats_path = (
+            f"kubernetes-manifests/nats/overlays/supercluster/{region_id}"
+            if nats_mode == "supercluster"
+            else "kubernetes-manifests/nats/overlays/standalone"
+        )
+        regional_application = render(
+            f"regional-manifests/regions/{region_id}"
+        )
+        regional_nats = render(nats_path)
+        validate_regional_render(regional_nats, region_id, role)
+        validate_regional_render(
+            regional_application, region_id, role, application=True
+        )
+        header = benchmark_header(
+            f"Online Boutique regional release: {region_id} ({role}).",
+            (
+                f"Region identity: {region_id}.",
+                f"NATS cluster role: {role}; topology mode: {nats_mode}.",
+                "Apply only to the explicitly selected Kubernetes context for this region.",
+            ),
+        )
+        write(
+            regional_release_dir / f"{region_id}-{role}.yaml",
+            regional_nats + "---\n" + regional_application,
+            header,
+        )
     print(
         "Generated release manifests with and without loadgenerator and "
-        "the NATS benchmark bundles."
+        "the NATS benchmark and per-region bundles."
     )
 
 

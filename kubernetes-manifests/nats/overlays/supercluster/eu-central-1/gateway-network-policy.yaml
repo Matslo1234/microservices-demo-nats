@@ -1,0 +1,26 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: nats-approved-gateways
+  namespace: nats
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: nats
+  policyTypes: [Ingress, Egress]
+  ingress:
+  - from:
+    - ipBlock: {cidr: 0.0.0.0/0}
+    ports:
+    - {protocol: TCP, port: 7222}
+  - from:
+    - ipBlock: {cidr: 172.31.0.0/20}
+    - ipBlock: {cidr: 172.31.16.0/20}
+    - ipBlock: {cidr: 172.31.32.0/20}
+    ports:
+    - {protocol: TCP, port: 8222}
+  egress:
+  - to:
+    - ipBlock: {cidr: 0.0.0.0/0}
+    ports:
+    - {protocol: TCP, port: 7222}

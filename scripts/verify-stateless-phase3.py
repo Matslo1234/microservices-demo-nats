@@ -229,7 +229,7 @@ def verify_manifests() -> None:
         ROOT / "kubernetes-manifests" / "nats" / "base" / "setup.yaml",
         (
             "SHIPPING_PROVIDER_SECRET",
-            '[ "${service}" = shippingservice ]',
+            "global-application-secrets",
             "PAYMENT_SIGNING_KEY",
         ),
     )

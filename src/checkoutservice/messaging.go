@@ -106,8 +106,8 @@ type checkoutWorker struct {
 
 func startCheckoutWorker(store *stateStore) (*checkoutWorker, error) {
 	url, user, password, caFile := os.Getenv("NATS_URL"), os.Getenv("NATS_USER"), os.Getenv("NATS_PASSWORD"), os.Getenv("NATS_CA_FILE")
-	if url == "" || user == "" || password == "" || caFile == "" {
-		return nil, errors.New("NATS_URL, NATS_USER, NATS_PASSWORD, and NATS_CA_FILE are required")
+	if url == "" || user == "" || password == "" || caFile == "" || os.Getenv("REGION_ID") == "" || os.Getenv("K8S_CLUSTER_NAME") == "" {
+		return nil, errors.New("NATS_URL, NATS_USER, NATS_PASSWORD, NATS_CA_FILE, REGION_ID, and K8S_CLUSTER_NAME are required")
 	}
 	connectTimeout, err := durationEnv("NATS_CONNECT_TIMEOUT", 2*time.Second)
 	if err != nil {
@@ -159,7 +159,8 @@ func startCheckoutWorker(store *stateStore) (*checkoutWorker, error) {
 		leaseDuration: leaseDuration, leaseStore: leaseStore, workerID: workerID,
 		stop: make(chan struct{}),
 	}
-	nc, err := nats.Connect(url, nats.Name("checkoutservice/stateless-phase5"),
+	connectionName := fmt.Sprintf("checkoutservice/stateless-phase5/%s/%s", os.Getenv("REGION_ID"), os.Getenv("K8S_CLUSTER_NAME"))
+	nc, err := nats.Connect(url, nats.Name(connectionName),
 		nats.UserInfo(user, password), nats.RootCAs(caFile),
 		nats.Timeout(connectTimeout), nats.ReconnectWait(reconnectWait), nats.MaxReconnects(maxReconnects),
 		nats.PingInterval(pingInterval), nats.MaxPingsOutstanding(maxPings),

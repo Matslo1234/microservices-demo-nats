@@ -73,6 +73,8 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-paymentservice
+        - secretRef:
+            name: global-application-secrets
         volumeMounts:
         - name: nats-ca
           mountPath: /etc/nats-ca

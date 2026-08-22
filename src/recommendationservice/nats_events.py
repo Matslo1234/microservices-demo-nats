@@ -327,7 +327,10 @@ async def _run():
     if not required:
         _ready.set()
         return
-    for name in ("NATS_URL", "NATS_USER", "NATS_PASSWORD", "NATS_CA_FILE"):
+    for name in (
+        "NATS_URL", "NATS_USER", "NATS_PASSWORD", "NATS_CA_FILE",
+        "REGION_ID", "K8S_CLUSTER_NAME",
+    ):
         if not os.getenv(name):
             raise RuntimeError(f"{name} is required when NATS_REQUIRED=true")
     tls_context = ssl.create_default_context(cafile=os.environ["NATS_CA_FILE"])
@@ -350,7 +353,8 @@ async def _run():
         servers=[os.environ["NATS_URL"]],
         user=os.environ["NATS_USER"],
         password=os.environ["NATS_PASSWORD"],
-        name="recommendationservice/phase2",
+        name=(f"recommendationservice/phase2/{os.environ.get('REGION_ID', 'unknown')}/"
+              f"{os.environ.get('K8S_CLUSTER_NAME', 'unknown')}"),
         tls=tls_context,
         connect_timeout=_duration("NATS_CONNECT_TIMEOUT", 2),
         reconnect_time_wait=_duration("NATS_RECONNECT_WAIT", 2),

@@ -1,0 +1,24 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: nats-approved-gateways
+  namespace: nats
+  annotations:
+    boutique.online.io/configuration-required: replace-example-cidr-from-region-inventory
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: nats
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+  - from:
+    # RFC 5737 documentation range: deliberately non-routable until an
+    # operator replaces it with the approved remote gateway/LB source CIDRs.
+    - ipBlock: {cidr: 192.0.2.0/24}
+    ports:
+    - {protocol: TCP, port: 7222}
+  egress:
+  - to:
+    - ipBlock: {cidr: 192.0.2.0/24}
+    ports:
+    - {protocol: TCP, port: 7222}

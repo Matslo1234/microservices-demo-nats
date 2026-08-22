@@ -172,8 +172,9 @@ deploy_path, deploy = read("scripts", "nats", "deploy.sh")
 require(
     deploy_path,
     deploy,
+    '--context CONTEXT --region REGION --role primary|secondary',
     "application_deployments=(",
-    'kubectl --namespace default rollout restart "${restart_targets[@]}"',
+    'kubectl --context "${context}" --namespace default rollout restart "${restart_targets[@]}"',
 )
 
 monitoring_path, monitoring = read("kubernetes-manifests", "nats", "base", "monitoring.yaml")

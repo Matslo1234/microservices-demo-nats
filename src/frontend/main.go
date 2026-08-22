@@ -65,6 +65,9 @@ type frontendServer struct {
 	tracingEnabled           bool
 	log                      *logrus.Logger
 	shutdown                 chan struct{}
+	regionID                 string
+	k8sClusterName           string
+	liveOperationPrefix      string
 
 	shoppingAssistantSvcAddr string
 }
@@ -75,6 +78,19 @@ func main() {
 	tracingEnabled := os.Getenv("ENABLE_TRACING") == "1"
 
 	svc := &frontendServer{log: log, tracingEnabled: tracingEnabled, shutdown: make(chan struct{})}
+	regionalConfig, err := loadFrontendRegionalConfig()
+	if err != nil {
+		log.Fatal(err)
+	}
+	svc.regionID = regionalConfig.regionID
+	svc.k8sClusterName = regionalConfig.k8sClusterName
+	svc.liveOperationPrefix = regionalConfig.livePrefix
+	log.WithFields(logrus.Fields{
+		"region":                          regionalConfig.regionID,
+		"k8s_cluster":                     regionalConfig.k8sClusterName,
+		"nats_cluster":                    regionalConfig.natsClusterName,
+		"frontend_cookie_key_fingerprint": secretFingerprint(regionalConfig.cookieKey),
+	}).Info("frontend regional configuration loaded")
 	initializePlatform(log)
 	shutdownTracing, err := telemetry.Init(ctx, "frontend")
 	if err != nil {
@@ -113,7 +129,7 @@ func main() {
 	// legacy HTTP integration dormant unless an operator explicitly configures it.
 	svc.shoppingAssistantSvcAddr = os.Getenv("SHOPPING_ASSISTANT_SERVICE_ADDR")
 
-	svc.natsConn, svc.natsJS, svc.natsRequestTimeout, svc.natsPublishTimeout, err = connectFrontendNATS()
+	svc.natsConn, svc.natsJS, svc.natsRequestTimeout, svc.natsPublishTimeout, err = connectFrontendNATS(regionalConfig)
 	if err != nil {
 		log.Fatal(err)
 	}

@@ -25,7 +25,6 @@ import (
 
 const (
 	orderSubmitSubject      = "boutique.cmd.order.submit.v1"
-	liveOperationPrefix     = "boutique.live.operation."
 	orderAPIPollRetryAfter  = "1"
 	orderQueryAttempts      = 3
 	orderQueryRetryInterval = time.Second
@@ -166,7 +165,7 @@ func (fe *frontendServer) orderHandler(response http.ResponseWriter, request *ht
 
 func (fe *frontendServer) orderEventsHandler(response http.ResponseWriter, request *http.Request) {
 	orderID := mux.Vars(request)["id"]
-	subject, err := liveOperationSubject(orderID)
+	subject, err := liveOperationSubject(fe.liveOperationPrefix, orderID)
 	if err != nil {
 		http.Error(response, "invalid order ID", http.StatusBadRequest)
 		return
@@ -253,7 +252,10 @@ func (fe *frontendServer) orderEventsHandler(response http.ResponseWriter, reque
 	}
 }
 
-func liveOperationSubject(operationID string) (string, error) {
+func liveOperationSubject(prefix, operationID string) (string, error) {
+	if prefix == "" || !strings.HasSuffix(prefix, ".") {
+		return "", errors.New("live operation prefix is invalid")
+	}
 	if operationID == "" {
 		return "", errors.New("operation ID is empty")
 	}
@@ -264,7 +266,7 @@ func liveOperationSubject(operationID string) (string, error) {
 			return "", errors.New("operation ID is not a safe NATS subject token")
 		}
 	}
-	return liveOperationPrefix + operationID, nil
+	return prefix + operationID, nil
 }
 
 func writeOrderSSE(response http.ResponseWriter, order *orderStatus) error {

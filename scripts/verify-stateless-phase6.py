@@ -316,8 +316,8 @@ def verify_release_manifests() -> None:
             "name: benchmark-runner",
             "name: redis-cart-cluster",
             "name: redis-checkout-cluster",
-            "name: nats-bootstrap",
-            "ensure_kv BENCHMARK_RUNS 10",
+            "name: nats-global-bootstrap",
+            'ensure_kv "${BENCHMARK_RUNS_BUCKET}" 10',
             "name: benchmarkmetrics-external",
             "type: LoadBalancer",
             "python",
@@ -570,8 +570,8 @@ def verify_dashboard_and_bootstrap() -> None:
     ).read_text()
     require(
         bootstrap,
-        "ensure_kv BENCHMARK_RUNS 10",
-        "ensure_object BENCHMARK_ARTIFACTS",
+        'ensure_kv "${BENCHMARK_RUNS_BUCKET}" 10',
+        'ensure_object "${BENCHMARK_ARTIFACTS_BUCKET}"',
         "--replicas=3",
         "nats ${nats_args} object ls",
     )

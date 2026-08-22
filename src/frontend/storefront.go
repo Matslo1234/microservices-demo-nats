@@ -76,7 +76,7 @@ type storefrontQueryResponse struct {
 	Error           string                   `json:"error"`
 }
 
-func connectFrontendNATS() (*nats.Conn, nats.JetStreamContext, time.Duration, time.Duration, error) {
+func connectFrontendNATS(regionalConfig frontendRegionalConfig) (*nats.Conn, nats.JetStreamContext, time.Duration, time.Duration, error) {
 	url, user, password, caFile := os.Getenv("NATS_URL"), os.Getenv("NATS_USER"), os.Getenv("NATS_PASSWORD"), os.Getenv("NATS_CA_FILE")
 	if url == "" || user == "" || password == "" || caFile == "" {
 		return nil, nil, 0, 0, fmt.Errorf("NATS_URL, NATS_USER, NATS_PASSWORD, and NATS_CA_FILE are required")
@@ -110,7 +110,8 @@ func connectFrontendNATS() (*nats.Conn, nats.JetStreamContext, time.Duration, ti
 		return nil, nil, 0, 0, err
 	}
 	nc, err := nats.Connect(url,
-		nats.Name("frontend/phase3"), nats.UserInfo(user, password), nats.RootCAs(caFile),
+		nats.Name(fmt.Sprintf("frontend/phase3/%s/%s", regionalConfig.regionID, regionalConfig.k8sClusterName)),
+		nats.UserInfo(user, password), nats.RootCAs(caFile),
 		nats.Timeout(connectTimeout), nats.ReconnectWait(reconnectWait), nats.MaxReconnects(maxReconnects),
 		nats.PingInterval(pingInterval), nats.MaxPingsOutstanding(maxPings),
 	)

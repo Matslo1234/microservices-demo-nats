@@ -108,7 +108,7 @@ spec:
     matchExpressions:
     - key: app.kubernetes.io/name
       operator: In
-      values: ["nats-bootstrap", "nats-backup", "nats-advisory-watcher", "nats-phase1-verification"]
+      values: ["nats-global-bootstrap", "nats-regional-bootstrap", "nats-backup", "nats-advisory-watcher", "nats-phase1-verification"]
   policyTypes: ["Egress"]
   egress:
   - to:

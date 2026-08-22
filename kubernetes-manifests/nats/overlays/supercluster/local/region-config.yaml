@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nats-region-config
+  namespace: nats
+data:
+  NATS_SUPERCLUSTER_ENABLED: "true"
+  NATS_GATEWAY_DOMAIN: gw.local.example.net
+  NATS_GATEWAY_DNS_NAMES: nats-0.gw.local.example.net,nats-1.gw.local.example.net,nats-2.gw.local.example.net

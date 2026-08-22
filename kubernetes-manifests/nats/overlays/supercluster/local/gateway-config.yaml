@@ -1,0 +1,27 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nats-gateway-config
+  namespace: nats
+data:
+  gateway.conf: |
+    gateway {
+      name: $NATS_CLUSTER_NAME
+      listen: 0.0.0.0:7222
+      advertise: $NATS_GATEWAY_ADVERTISE
+      # The local inventory currently has no approved remote cluster. Keeping
+      # the list empty is intentional and remains a valid one-member topology.
+      reject_unknown_cluster: false
+      connect_retries: 120
+      connect_backoff: true
+      write_deadline: "10s"
+      tls {
+        cert_file: "/etc/nats/gateway-tls/tls.crt"
+        key_file: "/etc/nats/gateway-tls/tls.key"
+        ca_file: "/etc/nats/gateway-tls/ca.crt"
+        min_version: "1.2"
+        timeout: 5
+        verify: true
+      }
+      gateways: []
+    }

@@ -1,0 +1,13 @@
+apiVersion: builtin
+kind: PatchTransformer
+metadata: {name: remove-primary-statefulsets}
+patch: |-
+  apiVersion: apps/v1
+  kind: StatefulSet
+  metadata: {name: delete-selected-primary-statefulset}
+  $patch: delete
+target:
+  group: apps
+  version: v1
+  kind: StatefulSet
+  name: redis-cart-cluster|redis-checkout-cluster

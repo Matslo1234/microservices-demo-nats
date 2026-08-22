@@ -1,0 +1,50 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- ../../../kubernetes-manifests
+- client-config.yaml
+images:
+- name: frontend
+  newName: matslo123/frontend
+  newTag: v0.7.0
+  digest: sha256:7d659542349ad1bf9ff80399a5f99f4af83c4bd4360b4e4e43f9e119e53ba2fd
+- name: paymentservice
+  newName: matslo123/paymentservice
+  newTag: v0.7.0
+  digest: sha256:48b79ac7ecf5aa4f302599a3cf0738f14c4f368c76cccbcef3185bbb51e950cd
+- name: storefrontprojectionservice
+  newName: matslo123/storefrontprojectionservice
+  newTag: v0.7.0
+  digest: sha256:13ff3ef9fb7a254e595f3ace2caad03b16384dbf1709843292f03a0b27d895af
+labels:
+- includeSelectors: false
+  includeTemplates: true
+  pairs:
+    boutique.online.io/region: eu-central-1
+    boutique.online.io/k8s-cluster: eu-central-1-cluster
+transformers:
+- remove-deployments.yaml
+- remove-statefulsets.yaml
+- remove-serviceaccounts.yaml
+- remove-services.yaml
+- remove-configmaps.yaml
+- remove-jobs.yaml
+- remove-pdbs.yaml
+- remove-hpas.yaml
+- remove-role.yaml
+- remove-rolebinding.yaml
+- remove-network-policies.yaml
+patches:
+- path: frontend-external.yaml
+- target: {group: apps, version: v1, kind: Deployment}
+  patch: |-
+    - op: add
+      path: /spec/template/spec/containers/0/env/-
+      value:
+        name: OTEL_RESOURCE_ATTRIBUTES
+        value: cloud.region=eu-central-1,k8s.cluster.name=eu-central-1-cluster,nats.cluster.name=BOUTIQUE-eu-central-1
+- target: {group: apps, version: v1, kind: Deployment, name: storefrontprojectionservice}
+  patch: |-
+    - op: replace
+      path: /spec/template/spec/containers/0/env/1/value
+      value: storefront-projection-eu-central-1-v1,boutique.qry.storefront.home.v1,boutique.qry.storefront.product.v1,boutique.qry.storefront.cart.v1,boutique.qry.storefront.currencies.v1,boutique.qry.storefront.product-meta.v1,boutique.qry.storefront.operation.v1,boutique.qry.storefront.order.v1

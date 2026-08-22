@@ -133,7 +133,7 @@ data:
           namespace: default
           service: shippingservice
       - record: boutique_jetstream_consumer_pending
-        expr: max(jetstream_consumer_num_pending{account="BOUTIQUE",consumer_name="storefront-projection-v1",is_consumer_leader="true"})
+        expr: max by (region) (boutique_projection_consumer_pending)
         labels:
           namespace: default
           service: storefrontprojectionservice

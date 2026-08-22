@@ -66,7 +66,14 @@ final class NatsEventWorker implements AutoCloseable {
     if (!required) {
       return;
     }
-    for (String name : List.of("NATS_URL", "NATS_USER", "NATS_PASSWORD", "NATS_CA_FILE")) {
+    for (String name :
+        List.of(
+            "NATS_URL",
+            "NATS_USER",
+            "NATS_PASSWORD",
+            "NATS_CA_FILE",
+            "REGION_ID",
+            "K8S_CLUSTER_NAME")) {
       if (System.getenv(name) == null || System.getenv(name).isBlank()) {
         throw new IOException(name + " is required when NATS_REQUIRED=true");
       }
@@ -84,7 +91,11 @@ final class NatsEventWorker implements AutoCloseable {
             new Options.Builder()
                 .server(System.getenv("NATS_URL"))
                 .userInfo(System.getenv("NATS_USER"), System.getenv("NATS_PASSWORD"))
-                .connectionName("adservice/phase2")
+                .connectionName(
+                    "adservice/phase2/"
+                        + System.getenv("REGION_ID")
+                        + "/"
+                        + System.getenv("K8S_CLUSTER_NAME"))
                 .sslContext(trustContext(System.getenv("NATS_CA_FILE")))
                 .connectionTimeout(duration("NATS_CONNECT_TIMEOUT", Duration.ofSeconds(2)))
                 .reconnectWait(duration("NATS_RECONNECT_WAIT", Duration.ofSeconds(2)))

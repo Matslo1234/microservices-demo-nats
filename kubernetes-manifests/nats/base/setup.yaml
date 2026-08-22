@@ -74,10 +74,9 @@ roleRef:
   name: nats-setup
 ---
 # This script uses only the Kubernetes API and OpenSSL supplied by the public
-# image below. Broker auth, TLS, and the JetStream encryption key are
-# create-only, as is the payment token signing key. Client CA and credential
-# resources are derived from those broker Secrets and patched back into sync
-# when they already exist.
+# image below. Regional broker auth, client/route TLS, and the JetStream
+# encryption key are create-only. Business keys live in a separate global
+# application Secret, and gateway PKI has its own create-only Secret contract.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -306,7 +305,7 @@ data:
       {
         printf '%s' '{"apiVersion":"v1","kind":"Secret","metadata":{"name":"nats-server-auth","namespace":"nats","labels":{"app.kubernetes.io/name":"nats","app.kubernetes.io/component":"setup","app.kubernetes.io/part-of":"online-boutique"}},"type":"Opaque","data":{'
         first=true
-        for key in JETSTREAM_ENCRYPTION_KEY SYS_PASSWORD ADMIN_PASSWORD PAYMENT_SIGNING_KEY SHIPPING_PROVIDER_SECRET; do
+        for key in JETSTREAM_ENCRYPTION_KEY SYS_PASSWORD ADMIN_PASSWORD; do
           value=$(random_secret) || return 1
           if [ "${first}" = true ]; then first=false; else printf ','; fi
           printf '"%s":"%s"' "${key}" "$(b64_text "${value}")"
@@ -341,6 +340,54 @@ data:
       printf '%s\n' "{\"apiVersion\":\"v1\",\"kind\":\"Secret\",\"metadata\":{\"name\":\"nats-server-tls\",\"namespace\":\"nats\",\"labels\":{\"app.kubernetes.io/name\":\"nats\",\"app.kubernetes.io/component\":\"setup\",\"app.kubernetes.io/part-of\":\"online-boutique\"}},\"type\":\"Opaque\",\"data\":{\"ca.crt\":\"$(b64_file "${workdir}/ca.crt")\",\"tls.crt\":\"$(b64_file "${workdir}/tls.crt")\",\"tls.key\":\"$(b64_file "${workdir}/tls.key")\"}}" > "${output}"
     }
 
+    write_gateway_tls_secret() {
+      output=$1
+      gateway_dns_names=${NATS_GATEWAY_DNS_NAMES:-}
+      if [ -z "${gateway_dns_names}" ]; then
+        fail 'NATS_GATEWAY_DNS_NAMES is required to create standalone gateway PKI'
+        return 1
+      fi
+      case "${gateway_dns_names}" in
+        *[!A-Za-z0-9.,*-]*) fail 'NATS_GATEWAY_DNS_NAMES contains unsafe characters'; return 1 ;;
+      esac
+      gateway_sans=$(printf '%s' "${gateway_dns_names}" | sed 's/^/DNS:/; s/,/,DNS:/g')
+      first_gateway_dns=${gateway_dns_names%%,*}
+      umask 077
+      openssl req -x509 -newkey rsa:3072 -nodes -sha256 -days 3650 \
+        -subj '/CN=Online Boutique NATS Gateway CA' \
+        -keyout "${workdir}/gateway-ca.key" -out "${workdir}/gateway-ca.crt" >/dev/null 2>&1 || return 1
+      {
+        printf '%s\n' 'basicConstraints=critical,CA:FALSE'
+        printf '%s\n' 'keyUsage=critical,digitalSignature,keyEncipherment'
+        printf '%s\n' 'extendedKeyUsage=serverAuth,clientAuth'
+        printf 'subjectAltName=%s\n' "${gateway_sans}"
+      } > "${workdir}/gateway-server.ext"
+      openssl req -newkey rsa:3072 -nodes -sha256 \
+        -subj "/CN=${first_gateway_dns}" \
+        -keyout "${workdir}/gateway-tls.key" -out "${workdir}/gateway-tls.csr" >/dev/null 2>&1 || return 1
+      openssl x509 -req -sha256 -days 825 \
+        -in "${workdir}/gateway-tls.csr" -CA "${workdir}/gateway-ca.crt" \
+        -CAkey "${workdir}/gateway-ca.key" -CAcreateserial \
+        -extfile "${workdir}/gateway-server.ext" -out "${workdir}/gateway-tls.crt" >/dev/null 2>&1 || return 1
+      printf '%s\n' "{\"apiVersion\":\"v1\",\"kind\":\"Secret\",\"metadata\":{\"name\":\"nats-gateway-tls\",\"namespace\":\"nats\",\"labels\":{\"app.kubernetes.io/name\":\"nats\",\"app.kubernetes.io/component\":\"gateway-pki\",\"app.kubernetes.io/part-of\":\"online-boutique\"}},\"type\":\"Opaque\",\"data\":{\"ca.crt\":\"$(b64_file "${workdir}/gateway-ca.crt")\",\"tls.crt\":\"$(b64_file "${workdir}/gateway-tls.crt")\",\"tls.key\":\"$(b64_file "${workdir}/gateway-tls.key")\"}}" > "${output}"
+    }
+
+    write_global_application_secret() {
+      output=$1
+      frontend_cookie_key=$(random_secret) || return 1
+      payment_signing_key=$(random_secret) || return 1
+      shipping_provider_secret=$(random_secret) || return 1
+      printf '%s\n' "{\"apiVersion\":\"v1\",\"kind\":\"Secret\",\"metadata\":{\"name\":\"global-application-secrets\",\"namespace\":\"default\",\"labels\":{\"app.kubernetes.io/name\":\"global-application-secrets\",\"app.kubernetes.io/component\":\"business-keys\",\"app.kubernetes.io/part-of\":\"online-boutique\"}},\"type\":\"Opaque\",\"data\":{\"FRONTEND_COOKIE_KEY\":\"$(b64_text "${frontend_cookie_key}")\",\"PAYMENT_SIGNING_KEY\":\"$(b64_text "${payment_signing_key}")\",\"PAYMENT_VERIFICATION_KEYS\":\"$(b64_text '{}')\",\"SHIPPING_PROVIDER_SECRET\":\"$(b64_text "${shipping_provider_secret}")\"}}" > "${output}"
+    }
+
+    secret_fingerprint() {
+      namespace=$1
+      name=$2
+      key=$3
+      encoded=$(secret_data "${namespace}" "${name}" "${key}") || return 1
+      printf '%s' "${encoded}" | base64 -d | openssl dgst -sha256 | sed 's/^.*= //; s/^\(.\{16\}\).*$/\1/'
+    }
+
     pem_json() {
       base64 -d | awk '{gsub(/\\/, "\\\\"); gsub(/"/, "\\\""); printf "%s\\n", $0}'
     }
@@ -359,16 +406,7 @@ data:
       user=$3
       password=$4
       output=$5
-      payment_signing_key=${6:-}
-      shipping_provider_secret=${7:-}
-      extra_data=
-      if [ -n "${payment_signing_key}" ]; then
-        extra_data=",\"PAYMENT_SIGNING_KEY\":\"${payment_signing_key}\""
-      fi
-      if [ -n "${shipping_provider_secret}" ]; then
-        extra_data="${extra_data},\"SHIPPING_PROVIDER_SECRET\":\"${shipping_provider_secret}\""
-      fi
-      printf '%s\n' "{\"apiVersion\":\"v1\",\"kind\":\"Secret\",\"metadata\":{\"name\":\"${name}\",\"namespace\":\"${namespace}\",\"labels\":{\"app.kubernetes.io/name\":\"nats\",\"app.kubernetes.io/component\":\"setup\",\"app.kubernetes.io/part-of\":\"online-boutique\"}},\"type\":\"Opaque\",\"data\":{\"NATS_URL\":\"$(b64_text "${nats_url}")\",\"NATS_USER\":\"$(b64_text "${user}")\",\"NATS_PASSWORD\":\"${password}\"${extra_data}}}" > "${output}"
+      printf '%s\n' "{\"apiVersion\":\"v1\",\"kind\":\"Secret\",\"metadata\":{\"name\":\"${name}\",\"namespace\":\"${namespace}\",\"labels\":{\"app.kubernetes.io/name\":\"nats\",\"app.kubernetes.io/component\":\"setup\",\"app.kubernetes.io/part-of\":\"online-boutique\"}},\"type\":\"Opaque\",\"data\":{\"NATS_URL\":\"$(b64_text "${nats_url}")\",\"NATS_USER\":\"$(b64_text "${user}")\",\"NATS_PASSWORD\":\"${password}\"}}" > "${output}"
     }
 
     write_messageoperations_admin_secret() {
@@ -380,7 +418,7 @@ data:
     reconcile() {
       write_auth_secret "${workdir}/auth.json" || return 1
       ensure_from_file secrets nats nats-server-auth "${workdir}/auth.json" || return 1
-      for key in JETSTREAM_ENCRYPTION_KEY SYS_PASSWORD ADMIN_PASSWORD PAYMENT_SIGNING_KEY SHIPPING_PROVIDER_SECRET; do
+      for key in JETSTREAM_ENCRYPTION_KEY SYS_PASSWORD ADMIN_PASSWORD; do
         secret_data nats nats-server-auth "${key}" >/dev/null || return 1
       done
       for service in ${services}; do
@@ -392,6 +430,38 @@ data:
       ensure_from_file secrets nats nats-server-tls "${workdir}/tls.json" || return 1
       for key in ca.crt tls.crt tls.key; do
         secret_data nats nats-server-tls "${key}" >/dev/null || return 1
+      done
+
+      api_get /api/v1/namespaces/nats/secrets/nats-gateway-tls "${workdir}/existing-gateway-tls.json"
+      gateway_status=$?
+      if [ "${gateway_status}" -eq 4 ]; then
+        if [ "${NATS_SUPERCLUSTER_ENABLED}" = true ]; then
+          fail 'supercluster mode requires a pre-provisioned shared-trust nats-gateway-tls Secret'
+          return 1
+        fi
+        write_gateway_tls_secret "${workdir}/gateway-tls.json" || return 1
+        ensure_from_file secrets nats nats-gateway-tls "${workdir}/gateway-tls.json" || return 1
+      elif [ "${gateway_status}" -ne 0 ]; then
+        return 1
+      else
+        log 'preserving existing secrets nats/nats-gateway-tls'
+      fi
+      for key in ca.crt tls.crt tls.key; do
+        secret_data nats nats-gateway-tls "${key}" >/dev/null || return 1
+      done
+
+      api_get /api/v1/namespaces/default/secrets/global-application-secrets "${workdir}/existing-global-application.json"
+      global_status=$?
+      if [ "${global_status}" -eq 4 ] && [ "${NATS_CLUSTER_ROLE}" = secondary ]; then
+        fail 'secondary cluster requires a pre-provisioned global-application-secrets Secret'
+        return 1
+      elif [ "${global_status}" -ne 0 ] && [ "${global_status}" -ne 4 ]; then
+        return 1
+      fi
+      write_global_application_secret "${workdir}/global-application.json" || return 1
+      ensure_from_file secrets default global-application-secrets "${workdir}/global-application.json" || return 1
+      for key in FRONTEND_COOKIE_KEY PAYMENT_SIGNING_KEY PAYMENT_VERIFICATION_KEYS SHIPPING_PROVIDER_SECRET; do
+        secret_data default global-application-secrets "${key}" >/dev/null || return 1
       done
 
       for namespace in nats default; do
@@ -406,15 +476,7 @@ data:
       for service in ${services}; do
         key=$(printf '%s' "${service}" | tr '[:lower:]' '[:upper:]')_PASSWORD
         password=$(secret_data nats nats-server-auth "${key}") || return 1
-        if [ "${service}" = paymentservice ]; then
-          payment_signing_key=$(secret_data nats nats-server-auth PAYMENT_SIGNING_KEY) || return 1
-          write_credentials_secret default "nats-credentials-${service}" "${service}" "${password}" "${workdir}/credential-${service}.json" "${payment_signing_key}" || return 1
-        elif [ "${service}" = shippingservice ]; then
-          shipping_provider_secret=$(secret_data nats nats-server-auth SHIPPING_PROVIDER_SECRET) || return 1
-          write_credentials_secret default "nats-credentials-${service}" "${service}" "${password}" "${workdir}/credential-${service}.json" "" "${shipping_provider_secret}" || return 1
-        else
-          write_credentials_secret default "nats-credentials-${service}" "${service}" "${password}" "${workdir}/credential-${service}.json" || return 1
-        fi
+        write_credentials_secret default "nats-credentials-${service}" "${service}" "${password}" "${workdir}/credential-${service}.json" || return 1
         sync_from_file secrets default "nats-credentials-${service}" "${workdir}/credential-${service}.json" || return 1
       done
 
@@ -426,6 +488,8 @@ data:
       ensure_from_file secrets default messageoperations-admin-api "${workdir}/messageoperations-admin.json" || return 1
       secret_data default messageoperations-admin-api ADMIN_USER >/dev/null || return 1
       secret_data default messageoperations-admin-api ADMIN_API_TOKEN >/dev/null || return 1
+
+      log "global key fingerprints frontend_cookie=$(secret_fingerprint default global-application-secrets FRONTEND_COOKIE_KEY) payment=$(secret_fingerprint default global-application-secrets PAYMENT_SIGNING_KEY) shipping=$(secret_fingerprint default global-application-secrets SHIPPING_PROVIDER_SECRET) gateway_ca=$(secret_fingerprint nats nats-gateway-tls ca.crt)"
     }
 
     mkdir -p "${workdir}" || exit 1
@@ -485,6 +549,9 @@ spec:
         env:
         - name: RECONCILE_INTERVAL_SECONDS
           value: "21600"
+        envFrom:
+        - configMapRef:
+            name: nats-region-config
         readinessProbe:
           exec:
             command: ["/bin/sh", "-c", "test -f /tmp/nats-setup/ready"]

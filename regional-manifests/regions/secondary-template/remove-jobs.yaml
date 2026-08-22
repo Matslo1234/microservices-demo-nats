@@ -1,0 +1,13 @@
+apiVersion: builtin
+kind: PatchTransformer
+metadata: {name: remove-primary-jobs}
+patch: |-
+  apiVersion: batch/v1
+  kind: Job
+  metadata: {name: delete-selected-primary-job}
+  $patch: delete
+target:
+  group: batch
+  version: v1
+  kind: Job
+  name: redis-cart-cluster-bootstrap|redis-checkout-cluster-bootstrap

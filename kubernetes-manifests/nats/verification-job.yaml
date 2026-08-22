@@ -12,7 +12,7 @@ data:
     allowed_subject="boutique.qry.storefront.home.v1"
     denied_subject="boutique.evt.payment.phase1-verify.v1"
     advisory_subject="boutique.evt.ops.phase1-max-delivery.v1"
-    live_subject="boutique.live.operation.phase1-verify-$(date +%s)"
+    live_subject="boutique.live.operation.${REGION_ID}.phase1-verify-$(date +%s)"
     consumer="PHASE1_REPLAY_VERIFY"
     advisory_consumer="PHASE1_MAX_DELIVERY_VERIFY"
     payload="phase1-replay-payload"
@@ -161,6 +161,8 @@ spec:
               name: nats-server-auth
               key: STOREFRONTPROJECTIONSERVICE_PASSWORD
         envFrom:
+        - configMapRef:
+            name: nats-region-config
         - secretRef:
             name: nats-admin-credentials
         resources:

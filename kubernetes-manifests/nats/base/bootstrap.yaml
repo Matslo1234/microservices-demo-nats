@@ -1,80 +1,90 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: nats-bootstrap
+  name: nats-global-bootstrap
   namespace: nats
   labels:
     app.kubernetes.io/name: nats
-    app.kubernetes.io/component: bootstrap
+    app.kubernetes.io/component: global-bootstrap
 data:
   bootstrap.sh: |
     #!/bin/sh
     set -eu
 
-    nats_args="--server=${NATS_URL} --user=${NATS_USER} --password=${NATS_PASSWORD} --tlsca=/etc/nats-ca/ca.crt"
+    if [ "${NATS_CLUSTER_ROLE}" != primary ]; then
+      echo "global bootstrap refuses NATS_CLUSTER_ROLE=${NATS_CLUSTER_ROLE}" >&2
+      exit 1
+    fi
+    if [ "${GLOBAL_ASSET_CLUSTER}" != "${NATS_CLUSTER_NAME}" ]; then
+      echo "global assets must be bootstrapped from their owner cluster" >&2
+      exit 1
+    fi
 
+    nats_args="--server=${NATS_URL} --user=${NATS_USER} --password=${NATS_PASSWORD} --tlsca=/etc/nats-ca/ca.crt"
     until nats ${nats_args} account info >/dev/null 2>&1; do
       echo "waiting for the NATS JetStream account"
       sleep 2
     done
 
-    for config in /config/streams/*.json; do
-      stream_name="$(basename "${config}" .json)"
+    for source in /config/streams/*.json; do
+      target="/work/$(basename "${source}")"
+      sed "s/__GLOBAL_ASSET_CLUSTER__/${GLOBAL_ASSET_CLUSTER}/g" "${source}" > "${target}"
+      stream_name="$(basename "${source}" .json)"
       if nats ${nats_args} stream info "${stream_name}" >/dev/null 2>&1; then
-        nats ${nats_args} stream update "${stream_name}" --config "${config}" --force
+        nats ${nats_args} stream update "${stream_name}" --config "${target}" --force
       else
-        nats ${nats_args} stream add --config "${config}"
+        nats ${nats_args} stream add --config "${target}"
       fi
+      compact="$(nats ${nats_args} stream info "${stream_name}" --json | tr -d '[:space:]')"
+      printf '%s' "${compact}" | grep -F "\"cluster\":\"${GLOBAL_ASSET_CLUSTER}\"" >/dev/null || {
+        echo "stream ${stream_name} is not placed in ${GLOBAL_ASSET_CLUSTER}" >&2
+        exit 1
+      }
     done
 
+    assert_backing_stream() {
+      stream=$1
+      history=$2
+      max_age=$3
+      max_bytes=$4
+      cluster=$5
+      compact="$(nats ${nats_args} stream info "${stream}" --json | tr -d '[:space:]')"
+      for expected in \
+        "\"num_replicas\":3" \
+        "\"storage\":\"file\"" \
+        "\"max_msgs_per_subject\":${history}" \
+        "\"max_age\":${max_age}" \
+        "\"max_bytes\":${max_bytes}" \
+        "\"cluster\":\"${cluster}\""; do
+        printf '%s' "${compact}" | grep -F "${expected}" >/dev/null || {
+          echo "${stream} does not match ${expected}" >&2
+          exit 1
+        }
+      done
+    }
+
     ensure_kv() {
-      bucket="$1"
-      history="$2"
-      ttl="$3"
-      max_bytes="$4"
+      bucket=$1
+      history=$2
+      ttl=$3
+      max_age=$4
+      max_bytes=$5
+      cluster=$6
       if nats ${nats_args} kv info "${bucket}" >/dev/null 2>&1; then
-        nats ${nats_args} kv edit "${bucket}" \
-          --history="${history}" \
-          --replicas=3 \
-          --ttl="${ttl}" \
-          --max-bucket-size="${max_bytes}"
+        nats ${nats_args} kv edit "${bucket}" --history="${history}" --replicas=3 \
+          --ttl="${ttl}" --max-bucket-size="${max_bytes}" --cluster="${cluster}"
       else
-        nats ${nats_args} kv add "${bucket}" \
-          --history="${history}" \
-          --replicas=3 \
-          --storage=file \
-          --ttl="${ttl}" \
-          --max-bucket-size="${max_bytes}"
+        nats ${nats_args} kv add "${bucket}" --history="${history}" --replicas=3 \
+          --storage=file --ttl="${ttl}" --max-bucket-size="${max_bytes}" --cluster="${cluster}"
       fi
+      assert_backing_stream "KV_${bucket}" "${history}" "${max_age}" "${max_bytes}" "${cluster}"
     }
 
-    ensure_kv STOREFRONT_PRODUCTS 5 0s 536870912
-    ensure_kv STOREFRONT_CARTS 2 0s 536870912
-    ensure_kv STOREFRONT_CONTEXT 2 1h 268435456
-    ensure_kv STOREFRONT_ORDERS 10 0s 1610612736
-    ensure_kv STOREFRONT_OPERATIONS 10 24h 805306368
-    ensure_kv RECOMMENDATION_CATALOG 5 0s 268435456
-    ensure_kv BOOTSTRAP_CLAIMS 5 0s 67108864
-    ensure_kv DLQ_CASES 10 2160h 268435456
-
-    ensure_object() {
-      bucket="$1"
-      if nats ${nats_args} object info "${bucket}" >/dev/null 2>&1; then
-        echo "object store ${bucket} already exists"
-      else
-        nats ${nats_args} object add "${bucket}" \
-          --replicas=3 \
-          --storage=file \
-          --max-bucket-size=4294967296
-      fi
-    }
-
-    # Benchmark API replicas and disposable runner Jobs share these stores.
-    ensure_kv BENCHMARK_RUNS 10 0s 536870912
-    ensure_object BENCHMARK_ARTIFACTS
+    ensure_kv RECOMMENDATION_CATALOG 5 0s 0 268435456 "${GLOBAL_ASSET_CLUSTER}"
+    ensure_kv BOOTSTRAP_CLAIMS 5 0s 0 67108864 "${GLOBAL_ASSET_CLUSTER}"
+    ensure_kv DLQ_CASES 10 2160h 7776000000000000 268435456 "${GLOBAL_ASSET_CLUSTER}"
     nats ${nats_args} stream list
     nats ${nats_args} kv list
-    nats ${nats_args} object ls
   BOUTIQUE_COMMANDS.json: |
     {
       "name": "BOUTIQUE_COMMANDS",
@@ -91,7 +101,8 @@ data:
       "discard": "new",
       "num_replicas": 3,
       "duplicate_window": 120000000000,
-      "allow_direct": false
+      "allow_direct": false,
+      "placement": {"cluster": "__GLOBAL_ASSET_CLUSTER__"}
     }
   BOUTIQUE_EVENTS.json: |
     {
@@ -109,7 +120,8 @@ data:
       "discard": "old",
       "num_replicas": 3,
       "duplicate_window": 120000000000,
-      "allow_direct": true
+      "allow_direct": true,
+      "placement": {"cluster": "__GLOBAL_ASSET_CLUSTER__"}
     }
   BOUTIQUE_DLQ.json: |
     {
@@ -127,7 +139,8 @@ data:
       "discard": "old",
       "num_replicas": 3,
       "duplicate_window": 120000000000,
-      "allow_direct": false
+      "allow_direct": false,
+      "placement": {"cluster": "__GLOBAL_ASSET_CLUSTER__"}
     }
   BOUTIQUE_ADVISORIES.json: |
     {
@@ -145,24 +158,27 @@ data:
       "discard": "old",
       "num_replicas": 3,
       "duplicate_window": 120000000000,
-      "allow_direct": false
+      "allow_direct": false,
+      "placement": {"cluster": "__GLOBAL_ASSET_CLUSTER__"}
     }
 ---
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: nats-bootstrap
+  name: nats-global-bootstrap
   namespace: nats
   labels:
     app.kubernetes.io/name: nats
-    app.kubernetes.io/component: bootstrap
+    app.kubernetes.io/component: global-bootstrap
 spec:
   backoffLimit: 6
+  completions: 1
+  parallelism: 1
   ttlSecondsAfterFinished: 3600
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: nats-bootstrap
+        app.kubernetes.io/name: nats-global-bootstrap
         app.kubernetes.io/part-of: online-boutique
     spec:
       restartPolicy: OnFailure
@@ -177,42 +193,32 @@ spec:
         image: natsio/nats-box:0.19.7-nonroot
         command: ["sh", "/config/bootstrap.sh"]
         envFrom:
+        - configMapRef:
+            name: nats-region-config
         - secretRef:
             name: nats-admin-credentials
         resources:
-          requests:
-            cpu: 20m
-            memory: 32Mi
-          limits:
-            cpu: 100m
-            memory: 128Mi
+          requests: {cpu: 20m, memory: 32Mi}
+          limits: {cpu: 100m, memory: 128Mi}
         securityContext:
           allowPrivilegeEscalation: false
-          capabilities:
-            drop: ["ALL"]
+          capabilities: {drop: ["ALL"]}
           readOnlyRootFilesystem: true
         volumeMounts:
-        - name: config
-          mountPath: /config
-          readOnly: true
-        - name: ca
-          mountPath: /etc/nats-ca
-          readOnly: true
+        - {name: config, mountPath: /config, readOnly: true}
+        - {name: ca, mountPath: /etc/nats-ca, readOnly: true}
+        - {name: work, mountPath: /work}
       volumes:
       - name: config
         configMap:
-          name: nats-bootstrap
+          name: nats-global-bootstrap
           items:
-          - key: bootstrap.sh
-            path: bootstrap.sh
-          - key: BOUTIQUE_COMMANDS.json
-            path: streams/BOUTIQUE_COMMANDS.json
-          - key: BOUTIQUE_EVENTS.json
-            path: streams/BOUTIQUE_EVENTS.json
-          - key: BOUTIQUE_DLQ.json
-            path: streams/BOUTIQUE_DLQ.json
-          - key: BOUTIQUE_ADVISORIES.json
-            path: streams/BOUTIQUE_ADVISORIES.json
+          - {key: bootstrap.sh, path: bootstrap.sh}
+          - {key: BOUTIQUE_COMMANDS.json, path: streams/BOUTIQUE_COMMANDS.json}
+          - {key: BOUTIQUE_EVENTS.json, path: streams/BOUTIQUE_EVENTS.json}
+          - {key: BOUTIQUE_DLQ.json, path: streams/BOUTIQUE_DLQ.json}
+          - {key: BOUTIQUE_ADVISORIES.json, path: streams/BOUTIQUE_ADVISORIES.json}
       - name: ca
-        configMap:
-          name: nats-ca
+        configMap: {name: nats-ca}
+      - name: work
+        emptyDir: {}
