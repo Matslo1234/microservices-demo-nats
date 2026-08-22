@@ -517,8 +517,31 @@ def saturation_summary(
         )
 
     final = rungs[-1]
-    saturated = bool(final.get("saturated"))
-    sustainable_rungs = rungs[:-1] if saturated else rungs
+    first_saturated_index = next(
+        (
+            index
+            for index, rung in enumerate(rungs)
+            if rung.get("saturated")
+        ),
+        None,
+    )
+    first_saturated = (
+        rungs[first_saturated_index]
+        if first_saturated_index is not None
+        else None
+    )
+    sustainable_rungs = (
+        rungs[:first_saturated_index]
+        if first_saturated_index is not None
+        else rungs
+    )
+    saturation_reason = None
+    if first_saturated is not None:
+        saturation_reason = first_saturated.get("saturation_reason")
+        if saturation_reason is None:
+            # Compatibility with artifacts written before saturation signals
+            # were separated from the reason the ladder stopped.
+            saturation_reason = first_saturated.get("stop_reason")
     return {
         "available": True,
         "start_requests_per_second": SATURATION_START_RATE,
@@ -528,10 +551,13 @@ def saturation_summary(
         "rapid_pending_growth_threshold_per_second": (
             RAPID_PENDING_GROWTH_PER_SECOND
         ),
-        "saturated": saturated,
+        "saturated": first_saturated is not None,
         "stop_reason": final.get("stop_reason"),
+        "saturation_reason": saturation_reason,
         "saturation_requests_per_second": (
-            final.get("target_requests_per_second") if saturated else None
+            first_saturated.get("target_requests_per_second")
+            if first_saturated is not None
+            else None
         ),
         "highest_sustainable_requests_per_second": (
             sustainable_rungs[-1].get("target_requests_per_second")

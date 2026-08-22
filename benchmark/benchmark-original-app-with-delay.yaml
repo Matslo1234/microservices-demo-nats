@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# GRPC application benchmark environment.
+# GRPC application benchmark environment with simulated provider latency.
 #
 # A default dynamic StorageClass is required. Install and wait for the standard
 # NATS configuration before applying this bundle. Benchmark run state and
@@ -23,7 +23,10 @@
 #   kubectl -n nats rollout status statefulset/nats --timeout=10m
 #   kubectl -n nats wait --for=condition=complete job/nats-global-bootstrap --timeout=10m
 #   kubectl -n nats wait --for=condition=complete job/nats-regional-bootstrap --timeout=10m
-#   kubectl apply -f benchmark/benchmark-original-app.yaml
+#   kubectl apply -f benchmark/benchmark-original-app-with-delay.yaml
+#
+# This variant adds 500 ms of payment authorization latency and 200 ms of
+# shipment-creation latency using delay-enabled original application images.
 #
 # Run Locust outside this cluster and use the external frontend and
 # benchmarkmetrics URLs to retain target-cluster resource samples.
@@ -722,7 +725,7 @@ spec:
               - ALL
           privileged: false
           readOnlyRootFilesystem: true
-        image: us-central1-docker.pkg.dev/online-boutique-ci/microservices-demo/paymentservice:v0.10.6
+        image: matslo123/paymentservice:v0.10.6-delay@sha256:a624a37dd2ee8bd84f7801d16b3e9ba985a4702f20303801f248a0bffb149056
         ports:
         - containerPort: 50051
         env:
@@ -730,6 +733,8 @@ spec:
           value: "50051"
         - name: DISABLE_PROFILER
           value: "1"
+        - name: PROCESSING_TIME_MS
+          value: "500"
         readinessProbe:
           grpc:
             port: 50051
@@ -795,7 +800,7 @@ spec:
               - ALL
           privileged: false
           readOnlyRootFilesystem: true
-        image: us-central1-docker.pkg.dev/online-boutique-ci/microservices-demo/shippingservice:v0.10.6
+        image: matslo123/shippingservice:v0.10.6-delay@sha256:d8c1054bf40a9df1917249358c272239a7685f12f9ce625d5aa5d9e0f2a3aeba
         ports:
         - containerPort: 50051
         env:
@@ -803,6 +808,8 @@ spec:
           value: "50051"
         - name: DISABLE_PROFILER
           value: "1"
+        - name: PROCESSING_TIME_MS
+          value: "200"
         readinessProbe:
           periodSeconds: 5
           grpc:

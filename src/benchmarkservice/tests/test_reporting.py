@@ -189,7 +189,7 @@ class ReportingTest(unittest.TestCase):
                 json.dumps(config.as_dict()), encoding="utf-8"
             )
             business = []
-            for rung, completed in ((0, 1), (1, 2)):
+            for rung, completed in ((0, 1), (1, 2), (2, 1)):
                 for _ in range(completed):
                     record = self._business(
                         "steady", "COMPLETED", 100 + rung, True, True
@@ -217,6 +217,17 @@ class ReportingTest(unittest.TestCase):
                     True,
                     "goodput_stopped_increasing",
                 ),
+                self._saturation_decision(
+                    2,
+                    30,
+                    20,
+                    30,
+                    1,
+                    False,
+                    None,
+                    stop=True,
+                    stop_reason="maximum_duration_reached",
+                ),
             ]
             (run / "saturation.jsonl").write_text(
                 "".join(json.dumps(record) + "\n" for record in decisions),
@@ -241,9 +252,16 @@ class ReportingTest(unittest.TestCase):
             self.assertTrue(saturation["saturated"])
             self.assertEqual(20, saturation["saturation_requests_per_second"])
             self.assertEqual(
+                "goodput_stopped_increasing",
+                saturation["saturation_reason"],
+            )
+            self.assertEqual(
+                "maximum_duration_reached", saturation["stop_reason"]
+            )
+            self.assertEqual(
                 10, saturation["highest_sustainable_requests_per_second"]
             )
-            self.assertEqual(2, len(saturation["rungs"]))
+            self.assertEqual(3, len(saturation["rungs"]))
             self.assertEqual(
                 2, saturation["rungs"][1]["business"]["completed"]
             )
@@ -260,6 +278,9 @@ class ReportingTest(unittest.TestCase):
         completed: int,
         saturated: bool,
         reason: str | None,
+        *,
+        stop: bool = False,
+        stop_reason: str | None = None,
     ) -> dict:
         return {
             "rung": rung,
@@ -273,9 +294,10 @@ class ReportingTest(unittest.TestCase):
             "pending_end": 0,
             "pending_growth": 0,
             "pending_growth_per_second": 0,
-            "stop": saturated,
+            "stop": stop,
             "saturated": saturated,
-            "stop_reason": reason,
+            "saturation_reason": reason,
+            "stop_reason": stop_reason,
         }
 
     @staticmethod

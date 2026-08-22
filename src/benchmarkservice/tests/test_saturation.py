@@ -150,7 +150,7 @@ class SaturationTest(unittest.TestCase):
         )
         self.assertEqual("RecordNotFound", missing_response["error_type"])
 
-    def test_goodput_plateau_stops_the_ladder(self) -> None:
+    def test_goodput_plateau_does_not_stop_the_ladder(self) -> None:
         increasing = evaluate_rung(
             application_type="GRPC",
             target_rate=20,
@@ -175,13 +175,14 @@ class SaturationTest(unittest.TestCase):
         )
 
         self.assertFalse(increasing["stop"])
-        self.assertTrue(plateau["stop"])
+        self.assertFalse(plateau["stop"])
         self.assertTrue(plateau["saturated"])
         self.assertEqual(
-            "goodput_stopped_increasing", plateau["stop_reason"]
+            "goodput_stopped_increasing", plateau["saturation_reason"]
         )
+        self.assertIsNone(plateau["stop_reason"])
 
-    def test_nats_rapid_pending_growth_stops_the_ladder(self) -> None:
+    def test_nats_rapid_pending_growth_does_not_stop_the_ladder(self) -> None:
         decision = evaluate_rung(
             application_type="NATS",
             target_rate=20,
@@ -194,11 +195,44 @@ class SaturationTest(unittest.TestCase):
             maximum_rate_reached=False,
         )
 
-        self.assertTrue(decision["stop"])
+        self.assertFalse(decision["stop"])
         self.assertEqual(
-            "nats_pending_increasing_rapidly", decision["stop_reason"]
+            "nats_pending_increasing_rapidly",
+            decision["saturation_reason"],
         )
         self.assertEqual(10, decision["pending_growth_per_second"])
+
+    def test_only_final_rung_stops_the_ladder(self) -> None:
+        maximum_rate = evaluate_rung(
+            application_type="GRPC",
+            target_rate=20,
+            duration_seconds=10,
+            completed=150,
+            previous_goodput=10,
+            pending_start=None,
+            pending_end=None,
+            final_rung=False,
+            maximum_rate_reached=True,
+        )
+        final = evaluate_rung(
+            application_type="GRPC",
+            target_rate=20,
+            duration_seconds=10,
+            completed=90,
+            previous_goodput=15,
+            pending_start=None,
+            pending_end=None,
+            final_rung=True,
+            maximum_rate_reached=True,
+        )
+
+        self.assertFalse(maximum_rate["stop"])
+        self.assertTrue(maximum_rate["maximum_rate_reached"])
+        self.assertTrue(final["stop"])
+        self.assertEqual("maximum_duration_reached", final["stop_reason"])
+        self.assertEqual(
+            "goodput_stopped_increasing", final["saturation_reason"]
+        )
 
     def test_pending_total_deduplicates_exporter_replicas(self) -> None:
         metrics = [

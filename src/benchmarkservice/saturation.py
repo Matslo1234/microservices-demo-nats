@@ -62,27 +62,24 @@ def evaluate_rung(
         pending_growth / duration if pending_growth is not None else None
     )
 
-    stop = False
     saturated = False
-    reason: str | None = None
+    saturation_reason: str | None = None
     if (
         application_type == "NATS"
         and pending_growth_per_second is not None
         and pending_growth_per_second >= RAPID_PENDING_GROWTH_PER_SECOND
     ):
-        stop = True
         saturated = True
-        reason = "nats_pending_increasing_rapidly"
+        saturation_reason = "nats_pending_increasing_rapidly"
     elif previous_goodput is not None and goodput <= previous_goodput:
-        stop = True
         saturated = True
-        reason = "goodput_stopped_increasing"
-    elif maximum_rate_reached:
-        stop = True
-        reason = "maximum_rate_reached"
-    elif final_rung:
-        stop = True
-        reason = "maximum_duration_reached"
+        saturation_reason = "goodput_stopped_increasing"
+
+    # Backlog growth and declining goodput are measurements, not control
+    # signals. Keep submitting through the configured steady interval, holding
+    # at the maximum rate when necessary, and only stop after its final rung.
+    stop = final_rung
+    stop_reason = "maximum_duration_reached" if final_rung else None
 
     return {
         "target_requests_per_second": target_rate,
@@ -105,9 +102,11 @@ def evaluate_rung(
         "rapid_pending_growth_threshold_per_second": (
             RAPID_PENDING_GROWTH_PER_SECOND
         ),
+        "maximum_rate_reached": maximum_rate_reached,
         "stop": stop,
         "saturated": saturated,
-        "stop_reason": reason,
+        "saturation_reason": saturation_reason,
+        "stop_reason": stop_reason,
     }
 
 

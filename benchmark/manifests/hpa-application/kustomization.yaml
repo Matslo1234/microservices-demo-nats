@@ -2,6 +2,7 @@ apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
 - ../../../kubernetes-manifests
+- ../../../kubernetes-manifests/autoscaling.yaml
 
 # The general release HPAs may use metrics supplied by a cluster-wide adapter.
 # This self-contained benchmark overlay keeps only signals produced by the

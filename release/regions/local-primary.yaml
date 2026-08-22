@@ -1255,14 +1255,18 @@ data:
 
       api_get /api/v1/namespaces/nats/secrets/nats-gateway-tls "${workdir}/existing-gateway-tls.json"
       gateway_status=$?
-      if [ "${gateway_status}" -eq 4 ] && [ "${NATS_SUPERCLUSTER_ENABLED}" = true ]; then
-        fail 'supercluster mode requires a pre-provisioned shared-trust nats-gateway-tls Secret'
+      if [ "${gateway_status}" -eq 4 ]; then
+        if [ "${NATS_SUPERCLUSTER_ENABLED}" = true ]; then
+          fail 'supercluster mode requires a pre-provisioned shared-trust nats-gateway-tls Secret'
+          return 1
+        fi
+        write_gateway_tls_secret "${workdir}/gateway-tls.json" || return 1
+        ensure_from_file secrets nats nats-gateway-tls "${workdir}/gateway-tls.json" || return 1
+      elif [ "${gateway_status}" -ne 0 ]; then
         return 1
-      elif [ "${gateway_status}" -ne 0 ] && [ "${gateway_status}" -ne 4 ]; then
-        return 1
+      else
+        log 'preserving existing secrets nats/nats-gateway-tls'
       fi
-      write_gateway_tls_secret "${workdir}/gateway-tls.json" || return 1
-      ensure_from_file secrets nats nats-gateway-tls "${workdir}/gateway-tls.json" || return 1
       for key in ca.crt tls.crt tls.key; do
         secret_data nats nats-gateway-tls "${key}" >/dev/null || return 1
       done
@@ -1595,7 +1599,13 @@ spec:
         - |
           export NATS_SERVER_NAME="${REGION_ID}-${POD_NAME}"
           export NATS_NODE_TAG="node:${NODE_NAME}"
-          export NATS_GATEWAY_ADVERTISE="${POD_NAME}.${NATS_GATEWAY_DOMAIN}:7222"
+          case "${POD_NAME}" in
+            nats-0) NATS_GATEWAY_ADVERTISE="${NATS_GATEWAY_ADVERTISE_0:-${POD_NAME}.${NATS_GATEWAY_DOMAIN}:7222}" ;;
+            nats-1) NATS_GATEWAY_ADVERTISE="${NATS_GATEWAY_ADVERTISE_1:-${POD_NAME}.${NATS_GATEWAY_DOMAIN}:7222}" ;;
+            nats-2) NATS_GATEWAY_ADVERTISE="${NATS_GATEWAY_ADVERTISE_2:-${POD_NAME}.${NATS_GATEWAY_DOMAIN}:7222}" ;;
+            *) echo "unexpected NATS pod name ${POD_NAME}" >&2; exit 1 ;;
+          esac
+          export NATS_GATEWAY_ADVERTISE
           sed \
             -e "s|__NATS_FRONTEND_LIVE_SUBJECT__|${NATS_FRONTEND_LIVE_SUBJECT}|g" \
             -e "s|__NATS_PROJECTION_PRODUCTS_SUBJECT__|${NATS_PROJECTION_PRODUCTS_SUBJECT}|g" \
@@ -2723,7 +2733,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-adservice
-        image: matslo123/adservice:v0.4.0@sha256:016ac2ddf41f7ac7b7fcf0ac04cfa4e59b169a60fe14bd3582c041594b5010d8
+        image: matslo123/adservice:v0.4.0@sha256:3856d1a4302a98e4a39e4be1e9e7995c315e177fc028fd5eb8542a4c33394fac
         livenessProbe:
           httpGet:
             path: /healthz
@@ -2832,7 +2842,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-benchmarkservice
-        image: matslo123/benchmarkservice:v0.4.0@sha256:f746fa15e19e2c6b32ca482f97c14bc48f57d7486350ac8c93821b19cddafff5
+        image: matslo123/benchmarkservice:v0.4.0@sha256:539021309a36a46c17a942e7c7a1b20f5d67360f787ffb8d2ef65f2f50173a87
         livenessProbe:
           httpGet:
             path: /healthz
@@ -2958,7 +2968,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-cartservice
-        image: matslo123/cartservice:v0.4.0@sha256:751cbd6b8fb98199757f722457853775304e51d20a57eae331cb60825dd524e2
+        image: matslo123/cartservice:v0.4.0@sha256:98812d26da5f93a29cffc8aa93801fb7b82517b703bade18876033385061c3a0
         livenessProbe:
           failureThreshold: 6
           httpGet:
@@ -3101,7 +3111,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-checkoutservice
-        image: matslo123/checkoutservice:v0.4.0@sha256:949a6a98bd4b24156e39fc60bf0bc1fdd4f9a5d7e381b1eef0ff7ed11c7e74fb
+        image: matslo123/checkoutservice:v0.4.0@sha256:14374b110125e8ce183db256c1357d98a1ae1769fca01a61c13267979dd34b0d
         livenessProbe:
           httpGet:
             path: /healthz
@@ -3228,7 +3238,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-currencyservice
-        image: matslo123/currencyservice:v0.4.0@sha256:e83f05d7d0dcfd22b8bbd9e8bb79630e740085bc4118229e4833f34988a647b3
+        image: matslo123/currencyservice:v0.4.0@sha256:1b676e316bfbb845411f4b5b02f376b780fe2ca3614c8a84065aa4a06be608f6
         livenessProbe:
           httpGet:
             path: /healthz
@@ -3246,7 +3256,7 @@ spec:
             cpu: 200m
             memory: 2Gi
           requests:
-            cpu: 5m
+            cpu: 100m
             memory: 64Mi
         securityContext:
           allowPrivilegeEscalation: false
@@ -3349,7 +3359,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-emailservice
-        image: matslo123/emailservice:v0.4.0@sha256:bd6ae1930f8cd96a201830910f513595e1c4c47fec228a9a9c75241fab84698d
+        image: matslo123/emailservice:v0.4.0@sha256:bff27de63900bb605ffa8082776fd866f65f56831fc15da72e6f62c29679c619
         livenessProbe:
           httpGet:
             path: /healthz
@@ -3521,7 +3531,7 @@ spec:
             name: nats-credentials-frontend
         - secretRef:
             name: global-application-secrets
-        image: matslo123/frontend:v0.4.0@sha256:9fa9292420bea28f676fa7f237ed22d9949629f1e2c7a9dbf5baf372aaa5914f
+        image: matslo123/frontend:v0.4.0@sha256:7d659542349ad1bf9ff80399a5f99f4af83c4bd4360b4e4e43f9e119e53ba2fd
         livenessProbe:
           failureThreshold: 6
           httpGet:
@@ -3674,7 +3684,7 @@ spec:
             name: nats-credentials-messageoperationsservice
         - secretRef:
             name: messageoperations-admin-api
-        image: matslo123/messageoperationsservice:v0.4.0@sha256:d5661b18a6adf5c4389111f35e796e026910499cad35db1a80d5f89227ffea75
+        image: matslo123/messageoperationsservice:v0.4.0@sha256:07abbd1a93fd51c9092f347d3d34bb58bc5a848ece8524d2a092105968d12b1f
         livenessProbe:
           failureThreshold: 6
           httpGet:
@@ -3809,7 +3819,7 @@ spec:
             name: nats-credentials-paymentservice
         - secretRef:
             name: global-application-secrets
-        image: matslo123/paymentservice:v0.4.0@sha256:7b62a5f15aed3d4e114eba9b02be53e38ba17f0375a25ed88124494b6ce73da2
+        image: matslo123/paymentservice:v0.4.0@sha256:a624a37dd2ee8bd84f7801d16b3e9ba985a4702f20303801f248a0bffb149056
         livenessProbe:
           failureThreshold: 6
           httpGet:
@@ -3932,7 +3942,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-productcatalogservice
-        image: matslo123/productcatalogservice:v0.4.0@sha256:9721c7972d03c4c4b035c872f3b879c856f3016989f317a4b965878f547ecc41
+        image: matslo123/productcatalogservice:v0.4.0@sha256:26d97784a6e105cf1586b2ff723772c583021491d5fa165ceaae6a3af12fe54d
         livenessProbe:
           httpGet:
             path: /healthz
@@ -4055,7 +4065,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-recommendationservice
-        image: matslo123/recommendationservice:v0.4.0@sha256:2f10eb25d40828c218dea63ae1ad323579d6204e5c49ace71c61b2bc84f9eabf
+        image: matslo123/recommendationservice:v0.4.0@sha256:7c056ea623ea3964eee7f21b7c4cc5e100d24abafeb3fe9f7b91ae26caa0544b
         livenessProbe:
           failureThreshold: 6
           httpGet:
@@ -4187,7 +4197,7 @@ spec:
             name: nats-credentials-shippingservice
         - secretRef:
             name: global-application-secrets
-        image: matslo123/shippingservice:v0.4.0@sha256:fc5433ddfa1b8463e6b253300f790ab66dc31991813cdd8c91e3aabd0008bc73
+        image: matslo123/shippingservice:v0.4.0@sha256:d8c1054bf40a9df1917249358c272239a7685f12f9ce625d5aa5d9e0f2a3aeba
         livenessProbe:
           failureThreshold: 6
           httpGet:
@@ -4311,7 +4321,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-storefrontprojectionservice
-        image: matslo123/storefrontprojectionservice:v0.4.0@sha256:ca046da94f8c8da01622179dabb5cb24d1d7d9719b27cbb73ab383575335a469
+        image: matslo123/storefrontprojectionservice:v0.4.0@sha256:13ff3ef9fb7a254e595f3ace2caad03b16384dbf1709843292f03a0b27d895af
         livenessProbe:
           failureThreshold: 6
           httpGet:
@@ -4927,443 +4937,6 @@ spec:
   selector:
     matchLabels:
       app: storefrontprojectionservice
----
-apiVersion: autoscaling/v2
-kind: HorizontalPodAutoscaler
-metadata:
-  labels:
-    boutique.online.io/k8s-cluster: local
-    boutique.online.io/region: local
-  name: adservice
-spec:
-  behavior:
-    scaleDown:
-      policies:
-      - periodSeconds: 60
-        type: Percent
-        value: 25
-      stabilizationWindowSeconds: 300
-    scaleUp:
-      policies:
-      - periodSeconds: 30
-        type: Percent
-        value: 100
-      stabilizationWindowSeconds: 0
-  maxReplicas: 10
-  metrics:
-  - resource:
-      name: cpu
-      target:
-        averageUtilization: 70
-        type: Utilization
-    type: Resource
-  - external:
-      metric:
-        name: boutique_jetstream_consumer_pending
-        selector:
-          matchLabels:
-            service: adservice
-      target:
-        averageValue: "25"
-        type: AverageValue
-    type: External
-  minReplicas: 2
-  scaleTargetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: adservice
----
-apiVersion: autoscaling/v2
-kind: HorizontalPodAutoscaler
-metadata:
-  labels:
-    boutique.online.io/k8s-cluster: local
-    boutique.online.io/region: local
-  name: benchmarkservice
-spec:
-  maxReplicas: 10
-  metrics:
-  - resource:
-      name: cpu
-      target:
-        averageUtilization: 70
-        type: Utilization
-    type: Resource
-  - external:
-      metric:
-        name: boutique_http_in_flight
-        selector:
-          matchLabels:
-            service: benchmarkservice
-      target:
-        averageValue: "20"
-        type: AverageValue
-    type: External
-  minReplicas: 2
-  scaleTargetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: benchmarkservice
----
-apiVersion: autoscaling/v2
-kind: HorizontalPodAutoscaler
-metadata:
-  labels:
-    boutique.online.io/k8s-cluster: local
-    boutique.online.io/region: local
-  name: cartservice
-spec:
-  maxReplicas: 10
-  metrics:
-  - resource:
-      name: cpu
-      target:
-        averageUtilization: 70
-        type: Utilization
-    type: Resource
-  - external:
-      metric:
-        name: boutique_jetstream_consumer_pending
-        selector:
-          matchLabels:
-            service: cartservice
-      target:
-        averageValue: "25"
-        type: AverageValue
-    type: External
-  - external:
-      metric:
-        name: boutique_handler_p95_latency_seconds
-        selector:
-          matchLabels:
-            service: cartservice
-      target:
-        averageValue: "1"
-        type: AverageValue
-    type: External
-  minReplicas: 2
-  scaleTargetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: cartservice
----
-apiVersion: autoscaling/v2
-kind: HorizontalPodAutoscaler
-metadata:
-  labels:
-    boutique.online.io/k8s-cluster: local
-    boutique.online.io/region: local
-  name: checkoutservice
-spec:
-  maxReplicas: 10
-  metrics:
-  - resource:
-      name: cpu
-      target:
-        averageUtilization: 70
-        type: Utilization
-    type: Resource
-  - external:
-      metric:
-        name: boutique_jetstream_consumer_pending
-        selector:
-          matchLabels:
-            service: checkoutservice
-      target:
-        averageValue: "25"
-        type: AverageValue
-    type: External
-  - external:
-      metric:
-        name: boutique_handler_p95_latency_seconds
-        selector:
-          matchLabels:
-            service: checkoutservice
-      target:
-        averageValue: "1"
-        type: AverageValue
-    type: External
-  minReplicas: 2
-  scaleTargetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: checkoutservice
----
-apiVersion: autoscaling/v2
-kind: HorizontalPodAutoscaler
-metadata:
-  labels:
-    boutique.online.io/k8s-cluster: local
-    boutique.online.io/region: local
-  name: currencyservice
-spec:
-  maxReplicas: 10
-  metrics:
-  - resource:
-      name: cpu
-      target:
-        averageUtilization: 70
-        type: Utilization
-    type: Resource
-  - external:
-      metric:
-        name: boutique_jetstream_consumer_pending
-        selector:
-          matchLabels:
-            service: currencyservice
-      target:
-        averageValue: "25"
-        type: AverageValue
-    type: External
-  minReplicas: 2
-  scaleTargetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: currencyservice
----
-apiVersion: autoscaling/v2
-kind: HorizontalPodAutoscaler
-metadata:
-  labels:
-    boutique.online.io/k8s-cluster: local
-    boutique.online.io/region: local
-  name: emailservice
-spec:
-  maxReplicas: 10
-  metrics:
-  - resource:
-      name: cpu
-      target:
-        averageUtilization: 70
-        type: Utilization
-    type: Resource
-  - external:
-      metric:
-        name: boutique_jetstream_consumer_pending
-        selector:
-          matchLabels:
-            service: emailservice
-      target:
-        averageValue: "25"
-        type: AverageValue
-    type: External
-  minReplicas: 2
-  scaleTargetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: emailservice
----
-apiVersion: autoscaling/v2
-kind: HorizontalPodAutoscaler
-metadata:
-  labels:
-    boutique.online.io/k8s-cluster: local
-    boutique.online.io/region: local
-  name: frontend
-spec:
-  maxReplicas: 10
-  metrics:
-  - resource:
-      name: cpu
-      target:
-        averageUtilization: 70
-        type: Utilization
-    type: Resource
-  - external:
-      metric:
-        name: boutique_http_in_flight
-        selector:
-          matchLabels:
-            service: frontend
-      target:
-        averageValue: "20"
-        type: AverageValue
-    type: External
-  - external:
-      metric:
-        name: boutique_http_p95_latency_seconds
-        selector:
-          matchLabels:
-            service: frontend
-      target:
-        averageValue: "1"
-        type: AverageValue
-    type: External
-  minReplicas: 2
-  scaleTargetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: frontend
----
-apiVersion: autoscaling/v2
-kind: HorizontalPodAutoscaler
-metadata:
-  labels:
-    boutique.online.io/k8s-cluster: local
-    boutique.online.io/region: local
-  name: paymentservice
-spec:
-  maxReplicas: 10
-  metrics:
-  - resource:
-      name: cpu
-      target:
-        averageUtilization: 70
-        type: Utilization
-    type: Resource
-  - external:
-      metric:
-        name: boutique_jetstream_consumer_pending
-        selector:
-          matchLabels:
-            service: paymentservice
-      target:
-        averageValue: "25"
-        type: AverageValue
-    type: External
-  minReplicas: 2
-  scaleTargetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: paymentservice
----
-apiVersion: autoscaling/v2
-kind: HorizontalPodAutoscaler
-metadata:
-  labels:
-    boutique.online.io/k8s-cluster: local
-    boutique.online.io/region: local
-  name: productcatalogservice
-spec:
-  maxReplicas: 10
-  metrics:
-  - resource:
-      name: cpu
-      target:
-        averageUtilization: 70
-        type: Utilization
-    type: Resource
-  - external:
-      metric:
-        name: boutique_jetstream_consumer_pending
-        selector:
-          matchLabels:
-            service: productcatalogservice
-      target:
-        averageValue: "25"
-        type: AverageValue
-    type: External
-  minReplicas: 2
-  scaleTargetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: productcatalogservice
----
-apiVersion: autoscaling/v2
-kind: HorizontalPodAutoscaler
-metadata:
-  labels:
-    boutique.online.io/k8s-cluster: local
-    boutique.online.io/region: local
-  name: recommendationservice
-spec:
-  maxReplicas: 10
-  metrics:
-  - resource:
-      name: cpu
-      target:
-        averageUtilization: 70
-        type: Utilization
-    type: Resource
-  - external:
-      metric:
-        name: boutique_jetstream_consumer_pending
-        selector:
-          matchLabels:
-            service: recommendationservice
-      target:
-        averageValue: "25"
-        type: AverageValue
-    type: External
-  minReplicas: 2
-  scaleTargetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: recommendationservice
----
-apiVersion: autoscaling/v2
-kind: HorizontalPodAutoscaler
-metadata:
-  labels:
-    boutique.online.io/k8s-cluster: local
-    boutique.online.io/region: local
-  name: shippingservice
-spec:
-  maxReplicas: 10
-  metrics:
-  - resource:
-      name: cpu
-      target:
-        averageUtilization: 70
-        type: Utilization
-    type: Resource
-  - external:
-      metric:
-        name: boutique_jetstream_consumer_pending
-        selector:
-          matchLabels:
-            service: shippingservice
-      target:
-        averageValue: "25"
-        type: AverageValue
-    type: External
-  minReplicas: 2
-  scaleTargetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: shippingservice
----
-apiVersion: autoscaling/v2
-kind: HorizontalPodAutoscaler
-metadata:
-  labels:
-    boutique.online.io/k8s-cluster: local
-    boutique.online.io/region: local
-  name: storefrontprojectionservice
-spec:
-  maxReplicas: 10
-  metrics:
-  - resource:
-      name: cpu
-      target:
-        averageUtilization: 70
-        type: Utilization
-    type: Resource
-  - external:
-      metric:
-        name: boutique_jetstream_consumer_pending
-        selector:
-          matchLabels:
-            service: storefrontprojectionservice
-      target:
-        averageValue: "25"
-        type: AverageValue
-    type: External
-  - external:
-      metric:
-        name: boutique_http_in_flight
-        selector:
-          matchLabels:
-            service: storefrontprojectionservice
-      target:
-        averageValue: "20"
-        type: AverageValue
-    type: External
-  minReplicas: 2
-  scaleTargetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: storefrontprojectionservice
 ---
 apiVersion: batch/v1
 kind: Job

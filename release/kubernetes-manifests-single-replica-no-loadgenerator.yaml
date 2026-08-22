@@ -249,7 +249,7 @@ metadata:
     app: adservice
   name: adservice
 spec:
-  replicas: 1
+  replicas: 2
   selector:
     matchLabels:
       app: adservice
@@ -368,7 +368,7 @@ metadata:
     app: benchmarkservice
   name: benchmarkservice
 spec:
-  replicas: 1
+  replicas: 2
   selector:
     matchLabels:
       app: benchmarkservice
@@ -410,7 +410,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-benchmarkservice
-        image: matslo123/benchmarkservice:v0.4.0@sha256:3662a5c6952479b51ef61b220c7dd3b418a59948ffa2154a87958d236383e7d4
+        image: matslo123/benchmarkservice:v0.4.0@sha256:539021309a36a46c17a942e7c7a1b20f5d67360f787ffb8d2ef65f2f50173a87
         livenessProbe:
           httpGet:
             path: /healthz
@@ -472,7 +472,7 @@ metadata:
     app: cartservice
   name: cartservice
 spec:
-  replicas: 1
+  replicas: 2
   selector:
     matchLabels:
       app: cartservice
@@ -595,7 +595,7 @@ metadata:
     app: checkoutservice
   name: checkoutservice
 spec:
-  replicas: 1
+  replicas: 2
   selector:
     matchLabels:
       app: checkoutservice
@@ -730,7 +730,7 @@ metadata:
     app: currencyservice
   name: currencyservice
 spec:
-  replicas: 1
+  replicas: 2
   selector:
     matchLabels:
       app: currencyservice
@@ -806,7 +806,7 @@ spec:
             cpu: 200m
             memory: 2Gi
           requests:
-            cpu: 5m
+            cpu: 100m
             memory: 64Mi
         securityContext:
           allowPrivilegeEscalation: false
@@ -845,7 +845,7 @@ metadata:
     app: emailservice
   name: emailservice
 spec:
-  replicas: 1
+  replicas: 2
   selector:
     matchLabels:
       app: emailservice
@@ -1000,7 +1000,7 @@ metadata:
     app: frontend
   name: frontend
 spec:
-  replicas: 1
+  replicas: 2
   selector:
     matchLabels:
       app: frontend
@@ -1279,7 +1279,7 @@ metadata:
     app: paymentservice
   name: paymentservice
 spec:
-  replicas: 1
+  replicas: 2
   selector:
     matchLabels:
       app: paymentservice
@@ -1404,7 +1404,7 @@ metadata:
     app: productcatalogservice
   name: productcatalogservice
 spec:
-  replicas: 1
+  replicas: 2
   selector:
     matchLabels:
       app: productcatalogservice
@@ -1519,7 +1519,7 @@ metadata:
     app: recommendationservice
   name: recommendationservice
 spec:
-  replicas: 1
+  replicas: 2
   selector:
     matchLabels:
       app: recommendationservice
@@ -1641,7 +1641,7 @@ metadata:
     app: shippingservice
   name: shippingservice
 spec:
-  replicas: 1
+  replicas: 2
   selector:
     matchLabels:
       app: shippingservice
@@ -1765,7 +1765,7 @@ metadata:
     app: storefrontprojectionservice
   name: storefrontprojectionservice
 spec:
-  replicas: 1
+  replicas: 2
   selector:
     matchLabels:
       app: storefrontprojectionservice

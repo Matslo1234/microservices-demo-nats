@@ -82,9 +82,10 @@ HTML = r"""<!doctype html>
     </div><div class="actions"><button id="start" type="submit">Start benchmark</button>
       <button id="stop" class="danger" type="button" disabled>Stop active run</button></div>
     <p class="muted">The saturation ladder starts at 10 orders/s and adds 10 every
-      10 seconds; the steady interval and maximum rate are safety bounds. Re-runs use
-      the same settings and produce separate results. Keep this browser tab open until
-      the sequence finishes.</p>
+      10 seconds for the complete steady interval, holding at the maximum rate once
+      reached. Backlog growth and falling goodput are recorded without ending the run.
+      Re-runs use the same settings and produce separate results. Keep this browser tab
+      open until the sequence finishes.</p>
     <p id="message" class="muted" role="status" aria-live="polite"></p></form>
   </section>
   <section class="card"><div class="card-heading"><h2>Runs</h2>

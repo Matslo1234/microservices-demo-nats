@@ -44,7 +44,7 @@ SERVICES = (
 )
 DEFAULT_IMAGE_DIGESTS = {
     "adservice": "3856d1a4302a98e4a39e4be1e9e7995c315e177fc028fd5eb8542a4c33394fac",
-    "benchmarkservice": "3662a5c6952479b51ef61b220c7dd3b418a59948ffa2154a87958d236383e7d4",
+    "benchmarkservice": "539021309a36a46c17a942e7c7a1b20f5d67360f787ffb8d2ef65f2f50173a87",
     "cartservice": "98812d26da5f93a29cffc8aa93801fb7b82517b703bade18876033385061c3a0",
     "checkoutservice": "14374b110125e8ce183db256c1357d98a1ae1769fca01a61c13267979dd34b0d",
     "currencyservice": "1b676e316bfbb845411f4b5b02f376b780fe2ca3614c8a84065aa4a06be608f6",
@@ -180,16 +180,19 @@ def main() -> None:
         RELEASE_HEADER,
         FOOTER,
     )
-    hpa_application = render("benchmark/manifests/hpa-application")
+    hpa_application = render(
+        "benchmark/manifests/hpa-application",
+        allow_external_resources=True,
+    )
     hpa_dependencies = render("benchmark/manifests/hpa-dependencies")
     target_metrics = render("benchmark/manifests/target-metrics")
-    single_replica_application = render(
+    fixed_replica_application = render(
         "benchmark/manifests/single-replica",
         allow_external_resources=True,
     )
     write(
         ROOT / "release" / "kubernetes-manifests-single-replica-no-loadgenerator.yaml",
-        single_replica_application,
+        fixed_replica_application,
         RELEASE_HEADER,
         FOOTER,
     )
@@ -197,8 +200,8 @@ def main() -> None:
         "benchmark/manifests/with-delay",
         allow_external_resources=True,
     )
-    single_replica_benchmark = (
-        single_replica_application + "---\n" + target_metrics
+    fixed_replica_benchmark = (
+        fixed_replica_application + "---\n" + target_metrics
     )
     benchmark = application + "---\n" + target_metrics
     delayed_benchmark = delayed_application + "---\n" + target_metrics
@@ -210,16 +213,17 @@ def main() -> None:
         + target_metrics
     )
     benchmark_variants = {
-        "benchmark-nats-single-replica.yaml": (
-            "Stateless NATS single-replica benchmark environment.",
+        "benchmark-nats.yaml": (
+            "Stateless NATS fixed-replica benchmark environment.",
             (
                 "A compatible NATS configuration must already be running in the cluster.",
-                "Every application and Redis store runs as one fixed replica.",
+                "Every application service runs as two fixed replicas; Redis stores use",
+                "their standalone single-replica topology. No application HPA is included.",
                 "Run Locust on a separate cluster or host and point it at the external",
                 "frontend and benchmarkmetrics URLs.",
                 "The small in-cluster metrics gateway reports target-cluster resources.",
             ),
-            single_replica_benchmark,
+            fixed_replica_benchmark,
         ),
         "benchmark-nats-hpa.yaml": (
             "Stateless NATS autoscaling benchmark environment.",
@@ -234,13 +238,13 @@ def main() -> None:
             hpa_benchmark,
         ),
         "benchmark-nats-multiple-replicas.yaml": (
-            "Stateless NATS replica-scaling benchmark environment.",
+            "Stateless NATS fixed-replica clustered-Redis benchmark environment.",
             (
                 "A compatible NATS configuration must already be running in the cluster.",
-                "The application Deployments start with multiple rolling replicas and are",
-                "governed by Phase 6 HPAs and disruption budgets. Run Locust outside this",
-                "cluster and use the external benchmarkmetrics URL to retain target-cluster",
-                "resource samples.",
+                "The application Deployments run as two fixed replicas without HPAs and",
+                "retain the clustered Redis topology and disruption budgets. Run Locust",
+                "outside this cluster and use the external benchmarkmetrics URL to retain",
+                "target-cluster resource samples.",
             ),
             benchmark,
         ),
@@ -249,7 +253,7 @@ def main() -> None:
             "simulated provider latency.",
             (
                 "A compatible NATS configuration must already be running in the cluster.",
-                "This uses the multiple-replica application topology and adds 500 ms of",
+                "This uses two fixed application replicas without HPAs and adds 500 ms of",
                 "payment authorization latency plus 200 ms of shipment-creation latency.",
                 "Run Locust outside this cluster and use the external benchmarkmetrics URL",
                 "to retain target-cluster resource samples.",

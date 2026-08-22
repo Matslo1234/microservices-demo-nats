@@ -44,10 +44,11 @@ the failure.
   outcomes do not reduce the requested arrival rate.
 - `saturation` runs an open-loop load ladder. After the optional warm-up at
   10 orders/s, it measures 10 orders/s for 10 seconds and adds 10 orders/s
-  every 10 seconds. It stops when observed goodput no longer increases. A NATS
-  run also stops when total application-consumer pending grows by at least 10
-  messages/s during a rung. `saturation_max_rate` and the steady duration are
-  safety bounds rather than fixed target rates.
+  every 10 seconds. It records the first rung where observed goodput no longer
+  increases or, for NATS, total application-consumer pending grows by at least
+  10 messages/s. These observations do not end the load schedule: it runs for
+  the complete steady interval and holds at `saturation_max_rate` if it reaches
+  that cap before the interval ends.
 
 For NATS runs, accepted checkouts are followed through the order SSE endpoint.
 `checkout_to_outcome` ends when the terminal order event is received by the
@@ -92,7 +93,7 @@ kubectl -n nats wait --for=condition=complete job/nats-regional-bootstrap --time
 You can then apply one benchmark bundle, for example:
 
 ```sh
-kubectl apply -f benchmark/benchmark-nats-multiple-replicas.yaml
+kubectl apply -f benchmark/benchmark-nats.yaml
 ```
 
 An existing regional or otherwise customized NATS installation is also valid

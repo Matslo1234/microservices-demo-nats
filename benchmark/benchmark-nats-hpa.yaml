@@ -540,7 +540,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-benchmarkservice
-        image: matslo123/benchmarkservice:v0.4.0@sha256:3662a5c6952479b51ef61b220c7dd3b418a59948ffa2154a87958d236383e7d4
+        image: matslo123/benchmarkservice:v0.4.0@sha256:539021309a36a46c17a942e7c7a1b20f5d67360f787ffb8d2ef65f2f50173a87
         livenessProbe:
           httpGet:
             path: /healthz
@@ -936,7 +936,7 @@ spec:
             cpu: 200m
             memory: 2Gi
           requests:
-            cpu: 5m
+            cpu: 100m
             memory: 64Mi
         securityContext:
           allowPrivilegeEscalation: false
@@ -4351,7 +4351,7 @@ spec:
               key: BENCHMARK_METRICS_TOKEN
               name: benchmark-metrics-auth
               optional: true
-        image: matslo123/benchmarkservice:v0.4.0@sha256:3662a5c6952479b51ef61b220c7dd3b418a59948ffa2154a87958d236383e7d4
+        image: matslo123/benchmarkservice:v0.4.0@sha256:539021309a36a46c17a942e7c7a1b20f5d67360f787ffb8d2ef65f2f50173a87
         imagePullPolicy: IfNotPresent
         livenessProbe:
           httpGet:

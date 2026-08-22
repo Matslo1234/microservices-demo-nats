@@ -31,7 +31,6 @@ resources:
  - redis-clusters.yaml
  - shippingservice.yaml
  - storefrontprojectionservice.yaml
- - autoscaling.yaml
  - network-policies.yaml
 patches:
 - target:
