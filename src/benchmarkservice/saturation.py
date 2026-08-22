@@ -5,12 +5,14 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import sys
 import time
 import uuid
 from pathlib import Path
 from typing import Any
 
-from shared_store import NatsSharedStore, RecordNotFound
+from shared_store import RecordNotFound
 
 
 APPLICATION_STREAMS = {"BOUTIQUE_COMMANDS", "BOUTIQUE_EVENTS"}
@@ -152,19 +154,104 @@ class _FileBackend(_CoordinationBackend):
 
 class _NatsBackend(_CoordinationBackend):
     def __init__(self) -> None:
-        self.store = NatsSharedStore(operation_timeout=10)
+        # Locust monkey-patches sockets and threads with gevent before this
+        # backend is constructed.  The asyncio NATS client cannot reliably
+        # complete a TLS connection in that mixed runtime, so keep it in a
+        # small, unpatched child process and use a line-oriented JSON protocol.
+        bridge = Path(__file__).with_name(
+            "saturation_nats_bridge.py"
+        ).resolve()
+        self.process = subprocess.Popen(
+            [sys.executable, "-u", str(bridge)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            bufsize=1,
+        )
+        self.request_id = 0
+
+    def _request(
+        self, operation: str, **arguments: Any
+    ) -> dict[str, Any]:
+        if self.process.poll() is not None:
+            raise RuntimeError(
+                "saturation NATS coordination process exited "
+                f"with code {self.process.returncode}"
+            )
+        if self.process.stdin is None or self.process.stdout is None:
+            raise RuntimeError(
+                "saturation NATS coordination pipes are unavailable"
+            )
+
+        self.request_id += 1
+        request = {
+            "id": self.request_id,
+            "operation": operation,
+            **arguments,
+        }
+        try:
+            self.process.stdin.write(
+                json.dumps(request, separators=(",", ":")) + "\n"
+            )
+            self.process.stdin.flush()
+            line = self.process.stdout.readline()
+        except (BrokenPipeError, OSError) as error:
+            raise RuntimeError(
+                "lost saturation NATS coordination process"
+            ) from error
+        if not line:
+            raise RuntimeError(
+                "saturation NATS coordination process closed its output"
+            )
+        try:
+            response = json.loads(line)
+        except json.JSONDecodeError as error:
+            raise RuntimeError(
+                "saturation NATS coordination process returned invalid JSON"
+            ) from error
+        if not isinstance(response, dict) or response.get("id") != self.request_id:
+            raise RuntimeError(
+                "saturation NATS coordination process returned an "
+                "unexpected response"
+            )
+        if response.get("ok") is not True:
+            if response.get("error_type") == "RecordNotFound":
+                raise RecordNotFound(arguments.get("name", ""))
+            detail = str(response.get("error", "unknown error"))
+            raise RuntimeError(
+                f"saturation NATS coordination {operation} failed: {detail}"
+            )
+        return response
 
     def put(self, name: str, value: dict[str, Any]) -> None:
-        self.store.put_object(name, json.dumps(value, sort_keys=True).encode())
+        self._request("put", name=name, value=value)
 
     def get(self, name: str) -> dict[str, Any]:
-        value = json.loads(self.store.get_object(name))
+        value = self._request("get", name=name).get("value")
         if not isinstance(value, dict):
             raise ValueError(f"coordination value {name} is not an object")
         return value
 
     def close(self) -> None:
-        self.store.close()
+        if self.process.poll() is None:
+            try:
+                self._request("close")
+            except Exception:
+                self.process.terminate()
+        if self.process.stdin is not None:
+            self.process.stdin.close()
+        if self.process.stdout is not None:
+            self.process.stdout.close()
+        try:
+            self.process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            self.process.terminate()
+            try:
+                self.process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+                self.process.wait(timeout=5)
 
 
 class SaturationCoordinator:

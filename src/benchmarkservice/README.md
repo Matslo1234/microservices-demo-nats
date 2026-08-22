@@ -208,6 +208,19 @@ Before it exits it uploads:
 - diagnostic `locust_*.csv` files; and
 - one ZIP archive containing the complete run.
 
+Downloaded summary files can be analyzed without additional Python packages:
+
+```sh
+python src/benchmarkservice/parse_results.py ./benchmark-results
+```
+
+For every saturation summary, the script writes an SVG of goodput against the
+requested rate beside the input file. NATS saturation summaries also get an
+SVG of maximum consumer-pending events. Closed-run summaries are grouped by
+worker count into `closed_results.tex` in the supplied results folder; the
+table reports total attempted orders, aggregate success rate, and the median
+and population standard deviation of run-level P95 outcome latency.
+
 The remote collector fetches kubelet summary statistics and NATS exporter
 metrics from the tested cluster's metrics gateway. It does not use the
 Kubernetes API or NATS exporter endpoints of the cluster hosting the worker.

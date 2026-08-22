@@ -376,6 +376,43 @@ async function main() {
   assert.equal(publishedMessageIDs.length, 32, 'worker did not publish every deterministic outcome');
   assert.equal(new Set(publishedMessageIDs).size, 32, 'worker reused an event message ID');
 
+  let activeBatches = 0;
+  let maximumActiveBatches = 0;
+  let releaseParallelBatches;
+  const parallelBatchesReady = new Promise(resolve => { releaseParallelBatches = resolve; });
+  const parallelSubscription = {
+    pull: () => {},
+    isClosed: () => false,
+    async *[Symbol.asyncIterator]() {
+      yield messages[0];
+      await new Promise(resolve => setTimeout(resolve, 30));
+      yield messages[1];
+      await new Promise(resolve => setTimeout(resolve, 30));
+    },
+  };
+  await runCommandConsumer(
+    parallelSubscription,
+    replicaAKeyring,
+    contracts,
+    {publish: async () => {}},
+    1000,
+    async batch => {
+      assert.equal(batch.length, 1, 'parallelism test did not split command batches');
+      activeBatches++;
+      maximumActiveBatches = Math.max(maximumActiveBatches, activeBatches);
+      if (activeBatches === 2) releaseParallelBatches();
+      let fallbackTimer;
+      await Promise.race([
+        parallelBatchesReady,
+        new Promise(resolve => { fallbackTimer = setTimeout(resolve, 250); }),
+      ]);
+      clearTimeout(fallbackTimer);
+      activeBatches--;
+    },
+  );
+  assert.equal(maximumActiveBatches, 2,
+    'payment command batches were serialized instead of processing in parallel');
+
   const watchdogPulls = [];
   const waitingSubscription = {
     pull: options => { watchdogPulls.push(options); },

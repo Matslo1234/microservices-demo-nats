@@ -1,12 +1,155 @@
 # Copyright 2026 Google LLC
 # Licensed under the Apache License, Version 2.0 (the "License");
 
+import json
 import unittest
+from unittest import mock
 
-from saturation import consumer_pending_total, evaluate_rung
+from saturation import _NatsBackend, consumer_pending_total, evaluate_rung
+from saturation_nats_bridge import dispatch
+from shared_store import RecordNotFound
+
+
+class _FakeInput:
+    def __init__(self, process: "_FakeProcess") -> None:
+        self.process = process
+
+    def write(self, value: str) -> int:
+        self.process.request = json.loads(value)
+        return len(value)
+
+    def flush(self) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+
+class _FakeOutput:
+    def __init__(self, process: "_FakeProcess") -> None:
+        self.process = process
+
+    def readline(self) -> str:
+        request = self.process.request
+        operation = request["operation"]
+        response: dict = {"id": request["id"], "ok": True}
+        if operation == "put":
+            self.process.values[request["name"]] = request["value"]
+        elif operation == "get":
+            name = request["name"]
+            if name in self.process.values:
+                response["value"] = self.process.values[name]
+            else:
+                response.update(
+                    {
+                        "ok": False,
+                        "error_type": "RecordNotFound",
+                        "error": name,
+                    }
+                )
+        elif operation == "close":
+            self.process.closing = True
+        return json.dumps(response) + "\n"
+
+    def close(self) -> None:
+        pass
+
+
+class _FakeProcess:
+    def __init__(self) -> None:
+        self.values: dict[str, dict] = {}
+        self.request: dict = {}
+        self.closing = False
+        self.returncode: int | None = None
+        self.stdin = _FakeInput(self)
+        self.stdout = _FakeOutput(self)
+
+    def poll(self) -> int | None:
+        return self.returncode
+
+    def wait(self, timeout: float) -> int:
+        self.returncode = 0
+        return self.returncode
+
+    def terminate(self) -> None:
+        self.returncode = -15
+
+    def kill(self) -> None:
+        self.returncode = -9
+
+
+class _FakeStore:
+    def __init__(self) -> None:
+        self.values: dict[str, bytes] = {}
+
+    def put_object(self, name: str, value: bytes) -> None:
+        self.values[name] = value
+
+    def get_object(self, name: str) -> bytes:
+        try:
+            return self.values[name]
+        except KeyError as error:
+            raise RecordNotFound(name) from error
 
 
 class SaturationTest(unittest.TestCase):
+    def test_nats_backend_uses_the_bridge_protocol(self) -> None:
+        process = _FakeProcess()
+        with mock.patch(
+            "saturation.subprocess.Popen", return_value=process
+        ) as popen:
+            backend = _NatsBackend()
+            backend.put("run/rung.json", {"completed": 5})
+
+            self.assertEqual(
+                {"completed": 5}, backend.get("run/rung.json")
+            )
+            with self.assertRaises(RecordNotFound):
+                backend.get("run/missing.json")
+            backend.close()
+
+        command = popen.call_args.args[0]
+        self.assertEqual("-u", command[1])
+        self.assertTrue(command[2].endswith("saturation_nats_bridge.py"))
+        self.assertTrue(process.closing)
+
+    def test_nats_bridge_dispatches_without_gevent_dependencies(self) -> None:
+        store = _FakeStore()
+
+        put_response, should_close = dispatch(
+            store,
+            {
+                "id": 1,
+                "operation": "put",
+                "name": "run/rung.json",
+                "value": {"completed": 5},
+            },
+        )
+        get_response, _ = dispatch(
+            store,
+            {
+                "id": 2,
+                "operation": "get",
+                "name": "run/rung.json",
+            },
+        )
+        missing_response, _ = dispatch(
+            store,
+            {
+                "id": 3,
+                "operation": "get",
+                "name": "run/missing.json",
+            },
+        )
+
+        self.assertEqual({"id": 1, "ok": True}, put_response)
+        self.assertFalse(should_close)
+        self.assertEqual(
+            {"id": 2, "ok": True, "value": {"completed": 5}},
+            get_response,
+        )
+        self.assertEqual("RecordNotFound", missing_response["error_type"])
+
     def test_goodput_plateau_stops_the_ladder(self) -> None:
         increasing = evaluate_rung(
             application_type="GRPC",

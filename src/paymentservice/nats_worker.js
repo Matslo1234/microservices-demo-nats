@@ -565,7 +565,7 @@ async function processCommandBatch(messages, keyring, contracts, js) {
 }
 
 async function runCommandConsumer(commandSubscription, keyring, contracts, js,
-    pullRefreshMs = COMMAND_PULL_REFRESH_MS) {
+    pullRefreshMs = COMMAND_PULL_REFRESH_MS, processBatch = processCommandBatch) {
   // Legacy pull subscriptions do not request messages merely by being
   // iterated. Pull requests can also be lost during a reconnect without
   // closing the subscription, so use expiring credit and refresh it while the
@@ -584,7 +584,11 @@ async function runCommandConsumer(commandSubscription, keyring, contracts, js,
   pullWatchdog.unref?.();
   let buffered = [];
   let flushTimer;
-  let processing = Promise.resolve();
+  // Batches are only an ingestion optimization. Keep them independent so a
+  // delayed authorization does not block the next batch; maxAckPending bounds
+  // the total number of commands in flight.
+  const inFlightBatches = new Set();
+  let processingError;
 
   const flush = () => {
     if (buffered.length === 0) return;
@@ -594,11 +598,16 @@ async function runCommandConsumer(commandSubscription, keyring, contracts, js,
     }
     const batch = buffered;
     buffered = [];
-    processing = processing
-      .then(() => processCommandBatch(batch, keyring, contracts, js))
+    let processing;
+    processing = processBatch(batch, keyring, contracts, js)
+      .catch(error => {
+        processingError ||= error;
+      })
       .finally(() => {
+        inFlightBatches.delete(processing);
         requestPull();
       });
+    inFlightBatches.add(processing);
   };
 
   try {
@@ -617,7 +626,8 @@ async function runCommandConsumer(commandSubscription, keyring, contracts, js,
       flushTimer = undefined;
     }
     flush();
-    await processing;
+    await Promise.all(inFlightBatches);
+    if (processingError) throw processingError;
   }
 }
 

@@ -1327,14 +1327,26 @@ class SaturationDriver(FastHttpUser):
 
     @task
     def schedule(self) -> None:
+        if getattr(self, "_saturation_started", False):
+            # A Locust task exception normally causes the same task to run
+            # again. Saturation is a one-shot schedule, so never start a new
+            # ladder (and new submissions) after a failed attempt.
+            self.environment.process_exit_code = 1
+            runner = self.environment.runner
+            if runner is not None:
+                gevent.spawn_later(0, runner.quit)
+            raise StopUser()
+        self._saturation_started = True
+
         active: set[gevent.Greenlet] = set()
-        coordinator = SaturationCoordinator(
-            application_type=CONFIG.application_type,
-            output_directory=runtime.OUTPUT_DIRECTORY,
-            worker_index=self.worker_index,
-            worker_count=self.worker_count,
-        )
+        coordinator: SaturationCoordinator | None = None
         try:
+            coordinator = SaturationCoordinator(
+                application_type=CONFIG.application_type,
+                output_directory=runtime.OUTPUT_DIRECTORY,
+                worker_index=self.worker_index,
+                worker_count=self.worker_count,
+            )
             if CONFIG.warmup_seconds:
                 self._schedule_window(
                     active=active,
@@ -1389,12 +1401,27 @@ class SaturationDriver(FastHttpUser):
             gevent.joinall(list(active), timeout=remaining_drain)
             for greenlet in list(active):
                 greenlet.kill(block=False)
+        except Exception:
+            # The Job runner uses this override as its process result. Without
+            # it, --exit-code-on-error=0 would make coordination failures look
+            # like successful benchmark workers.
+            self.environment.process_exit_code = 1
+            raise
         finally:
-            coordinator.close()
-
-        runner = self.environment.runner
-        if runner is not None:
-            gevent.spawn_later(0, runner.quit)
+            for greenlet in list(active):
+                greenlet.kill(block=False)
+            try:
+                if coordinator is not None:
+                    coordinator.close()
+            except Exception:
+                self.environment.process_exit_code = 1
+                raise
+            finally:
+                # Always stop the runner. Otherwise Locust catches a task
+                # failure and begins the complete saturation ladder again.
+                runner = self.environment.runner
+                if runner is not None:
+                    gevent.spawn_later(0, runner.quit)
         raise StopUser()
 
     def _schedule_window(

@@ -539,7 +539,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-benchmarkservice
-        image: matslo123/benchmarkservice:v0.4.0@sha256:b08f16c5add304b4b4e662c396e25cad978a2f7dc8e238a0b982d0585d76916e
+        image: matslo123/benchmarkservice:v0.4.0@sha256:3662a5c6952479b51ef61b220c7dd3b418a59948ffa2154a87958d236383e7d4
         livenessProbe:
           httpGet:
             path: /healthz
@@ -1476,7 +1476,7 @@ spec:
             name: nats-credentials-paymentservice
         - secretRef:
             name: global-application-secrets
-        image: matslo123/paymentservice:v0.4.0@sha256:7b62a5f15aed3d4e114eba9b02be53e38ba17f0375a25ed88124494b6ce73da2
+        image: matslo123/paymentservice:v0.4.0@sha256:a624a37dd2ee8bd84f7801d16b3e9ba985a4702f20303801f248a0bffb149056
         livenessProbe:
           failureThreshold: 6
           httpGet:
@@ -3584,7 +3584,7 @@ spec:
               key: BENCHMARK_METRICS_TOKEN
               name: benchmark-metrics-auth
               optional: true
-        image: matslo123/benchmarkservice:v0.4.0@sha256:b08f16c5add304b4b4e662c396e25cad978a2f7dc8e238a0b982d0585d76916e
+        image: matslo123/benchmarkservice:v0.4.0@sha256:3662a5c6952479b51ef61b220c7dd3b418a59948ffa2154a87958d236383e7d4
         imagePullPolicy: IfNotPresent
         livenessProbe:
           httpGet:
