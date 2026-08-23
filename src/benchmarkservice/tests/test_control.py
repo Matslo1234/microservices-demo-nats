@@ -7,6 +7,7 @@ import threading
 import unittest
 import zipfile
 
+from config import ConfigError
 from control import BenchmarkManager, RunConflict
 from kubernetes_jobs import JobNotFound
 from shared_store import RecordNotFound, RevisionConflict, StoredRecord
@@ -152,6 +153,16 @@ class BenchmarkControlTest(unittest.TestCase):
         self.assertEqual([3], jobs.worker_counts)
         self.assertEqual(3, result["status"]["worker_count"])
 
+    def test_fault_tolerance_requires_the_external_controller(self):
+        store, jobs = MemoryStore(), FakeJobs()
+
+        with self.assertRaisesRegex(ConfigError, "fault_tolerance.py"):
+            self.manager(store, jobs).start(
+                self.request(workload="fault_tolerance")
+            )
+
+        self.assertEqual([], jobs.worker_counts)
+
     def test_expired_lease_is_recovered_by_another_replica(self):
         now = [1000.0]
         store, jobs = MemoryStore(), FakeJobs()
@@ -184,6 +195,7 @@ class BenchmarkControlTest(unittest.TestCase):
         store.put_object(f"{run_id}/summary.json", b'{"ok":true}')
 
         self.assertEqual(b'{"ok":true}', manager.artifact(run_id, "summary.json"))
+        self.assertTrue(manager.list_runs()[0]["summary_available"])
 
     def test_combined_artifacts_are_flat_and_prefixed_by_run(self):
         store, jobs = MemoryStore(), FakeJobs()
@@ -230,6 +242,40 @@ class BenchmarkControlTest(unittest.TestCase):
             )
             self.assertFalse(
                 any("/" in name for name in combined.namelist())
+            )
+
+    def test_combined_summaries_contains_only_selected_json_files(self):
+        store, jobs = MemoryStore(), FakeJobs()
+        manager = self.manager(store, jobs)
+        run_ids = []
+        for number in range(2):
+            run_id = manager.start(self.request())["status"]["run_id"]
+            run_ids.append(run_id)
+            record = store.get("run." + run_id)
+            value = record.value
+            object_name = f"{run_id}/summary.json"
+            value["artifacts"] = {
+                "summary.json": {"object": object_name}
+            }
+            store.update("run." + run_id, value, record.revision)
+            store.put_object(object_name, f'{{"run":{number}}}'.encode())
+            manager._release_lease(run_id)
+
+        archive = manager.combined_summaries(
+            [run_ids[1], run_ids[0], run_ids[1]]
+        )
+
+        with zipfile.ZipFile(io.BytesIO(archive)) as combined:
+            self.assertEqual(
+                {
+                    f"{run_ids[0]}-summary.json",
+                    f"{run_ids[1]}-summary.json",
+                },
+                set(combined.namelist()),
+            )
+            self.assertEqual(
+                b'{"run":1}',
+                combined.read(f"{run_ids[1]}-summary.json"),
             )
 
 

@@ -112,6 +112,7 @@ def verify_benchmark_stores(rendered_nats: str, rendered_app: str) -> None:
         'ensure_kv "${BENCHMARK_RUNS_BUCKET}" 10 0s 0 536870912',
         'ensure_object "${BENCHMARK_ARTIFACTS_BUCKET}"',
         'user: "benchmarkservice", password: $BENCHMARKSERVICE_PASSWORD',
+        '"$JS.API.>", "$JS.FC.>", "__NATS_BENCHMARK_RUNS_SUBJECT__"',
         '"__NATS_BENCHMARK_RUNS_SUBJECT__"',
         '"__NATS_BENCHMARK_ARTIFACTS_SUBJECT__"',
         "benchmarkservice messageoperationsservice",

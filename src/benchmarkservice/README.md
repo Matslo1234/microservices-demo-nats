@@ -49,6 +49,11 @@ the failure.
   10 messages/s. These observations do not end the load schedule: it runs for
   the complete steady interval and holds at `saturation_max_rate` if it reaches
   that cap before the interval ends.
+- `fault_tolerance` uses the same absolute-rate scheduler as `open`, while the
+  dedicated standalone controller scales `paymentservice` and then
+  `shippingservice` to zero for configured intervals. It is intentionally not
+  available through the benchmarkservice API because the target cluster can be
+  remote and the API must not receive permission to mutate it.
 
 For NATS runs, accepted checkouts are followed through the order SSE endpoint.
 `checkout_to_outcome` ends when the terminal order event is received by the
@@ -59,13 +64,13 @@ retain `failure_code`, `safe_message`, `failure_message`, and
 `failure_received_at`; notification and cart-clear failures have their own
 receipt-time fields.
 
-Open-loop and saturation runs use one worker for every 100 requested orders/s.
-Closed-loop runs use one worker for every 1,000 users, and divide the requested
-user spawn rate evenly across those workers. Worker start times and saturation
-rung decisions are synchronized. Worker zero samples shared application
-resources once, then merges every worker's business and outstanding-order
-records into the run-level report. Individual Locust CSVs and logs remain in
-the complete artifact archive for diagnostics.
+Open-loop, saturation, and fault-tolerance runs use one worker for every 100
+requested orders/s. Closed-loop runs use one worker for every 1,000 users, and
+divide the requested user spawn rate evenly across those workers. Worker start
+times and saturation rung decisions are synchronized. Worker zero samples
+shared application resources once, then merges every worker's business and
+outstanding-order records into the run-level report. Individual Locust CSVs and
+logs remain in the complete artifact archive for diagnostics.
 
 Warm-up samples remain in raw artifacts but are excluded from summaries. After
 the steady interval, submission stops for the configured drain period.
@@ -133,8 +138,9 @@ python src/benchmarkservice/standalone.py \
 The same image can run as a Job in a separate cluster. A Kubernetes `command`
 of `python standalone.py` replaces the image's API entrypoint; pass the same
 arguments shown above. The standalone runner starts multiple synchronized
-Locust processes automatically above 100 open-loop/saturation orders/s or
-1,000 closed-loop users. For example, a saturation run can be started with:
+Locust processes automatically above 100 open-loop, saturation, or
+fault-tolerance orders/s, or 1,000 closed-loop users. For example, a saturation
+run can be started with:
 
 ```sh
 python src/benchmarkservice/standalone.py \
@@ -163,6 +169,56 @@ kubectl port-forward service/benchmarkmetrics-external 18080:80
 ```
 
 Then use `--metrics-url http://127.0.0.1:18080/snapshot`.
+
+## Fault-tolerance benchmark
+
+Run fault injection from a host that has `kubectl` access to the target
+cluster. The current kube context is used unless `--context` is supplied. The
+script validates both Deployments and records their replica counts before it
+starts load generation, then restores those counts after each fault and again
+on errors or interrupts.
+
+```sh
+python src/benchmarkservice/fault_tolerance.py \
+  --application-type NATS \
+  --url http://FRONTEND_EXTERNAL_IP \
+  --metrics-url http://BENCHMARKMETRICS_EXTERNAL_IP/snapshot \
+  --namespace default \
+  --arrival-rate 20 \
+  --startup-time 30 \
+  --disable-paymentservice-time 30 \
+  --between-disable-time 30 \
+  --disable-shippingservice-time 30 \
+  --recovery-time 60 \
+  --output ./benchmark-results
+```
+
+The account used by `kubectl` needs `get` access to Deployments and `update`
+access to their `scale` subresource in the application namespace. The script
+checks scale access itself; you can also verify it before starting:
+
+```sh
+kubectl auth can-i get deployments --namespace default
+kubectl auth can-i update deployment/paymentservice \
+  --subresource=scale --namespace default
+```
+
+Requests continue at the configured open-loop arrival rate through the
+baseline, both outages, and both recovery windows. Metrics are sampled every
+second. `summary.json` contains fault totals, the actual scale timestamps, a
+per-second series, and convergence results; `fault-tolerance.csv` contains the
+same time series in tabular form. Failed requests are recorded outcomes other
+than `COMPLETED`. Lost requests are scheduled arrivals for which no logical
+outcome record was written before the run ended.
+
+Convergence starts when the scale-up command is issued, so it includes pod
+startup. It is the first window of three seconds by default whose successfully
+processed request rate is at least 90% of the pre-fault baseline. NATS runs
+also require application-consumer pending events to return to the pre-fault
+level. These thresholds can be changed with
+`--convergence-stable-seconds`, `--convergence-success-fraction`, and
+`--convergence-pending-tolerance`. `--recovery-time` must leave enough traffic
+after the shipping fault to observe convergence.
 
 The gateway can require a bearer token. Create a Secret named
 `benchmark-metrics-auth` with the key `BENCHMARK_METRICS_TOKEN` in the target
@@ -199,12 +255,15 @@ ZIP archive, prefixing each filename with its run ID to prevent collisions.
 
 ## Artifacts and resource collection
 
-Each Job uses bounded `emptyDir` volumes only as disposable staging space.
-Before it exits it uploads:
+Each API Job uses bounded `emptyDir` volumes only as disposable staging space
+and uploads its artifacts before exiting. Standalone runs write the equivalent
+artifacts to their run directory. Depending on the workload, these include:
 
 - `business.jsonl` and `business.csv`;
 - `outstanding.jsonl` and `resources.jsonl`;
 - `saturation.jsonl` for saturation rung observations and stop decisions;
+- `fault-plan.json`, `faults.jsonl`, and `fault-tolerance.csv` for
+  fault-tolerance runs;
 - `summary.json`, `runner.log`, `config.json`, and `status.json`;
 - diagnostic `locust_*.csv` files; and
 - one ZIP archive containing the complete run.
@@ -215,12 +274,16 @@ Downloaded summary files can be analyzed without additional Python packages:
 python src/benchmarkservice/parse_results.py ./benchmark-results
 ```
 
-For every saturation summary, the script writes an SVG of goodput against the
-requested rate beside the input file. NATS saturation summaries also get an
-SVG of maximum consumer-pending events. Closed-run summaries are grouped by
-worker count into `closed_results.tex` in the supplied results folder; the
-table reports total attempted orders, aggregate success rate, and the median
-and population standard deviation of run-level P95 outcome latency.
+For every saturation summary, the script writes SVGs of goodput and P95 outcome
+latency against the requested rate beside the input file. Rungs without a P95
+latency sample are omitted from the latency graph. NATS saturation summaries
+also get an SVG of maximum consumer-pending events. Fault-tolerance summaries
+get an SVG of successfully processed requests per second; NATS fault-tolerance
+summaries also get an SVG of queued events per second. Closed-run summaries
+include the configured closed-loop user count and are grouped by that count
+into `closed_results.tex` in the supplied results folder; the table reports
+total attempted orders, aggregate success rate, and the median and population
+standard deviation of run-level P95 outcome latency.
 
 The remote collector fetches kubelet summary statistics and NATS exporter
 metrics from the tested cluster's metrics gateway. It does not use the

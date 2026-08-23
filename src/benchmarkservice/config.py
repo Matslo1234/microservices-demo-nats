@@ -10,7 +10,7 @@ from urllib.parse import urlparse
 
 
 APPLICATION_TYPES = {"GRPC", "NATS"}
-WORKLOADS = {"closed", "open", "saturation"}
+WORKLOADS = {"closed", "open", "saturation", "fault_tolerance"}
 MAX_OPEN_ARRIVAL_RATE_PER_WORKER = 100.0
 MAX_CLOSED_USERS_PER_WORKER = 1_000
 SATURATION_START_RATE = 10.0
@@ -136,7 +136,10 @@ class BenchmarkConfig:
 
         workload = str(values.get("workload", "closed")).strip().lower()
         if workload not in WORKLOADS:
-            raise ConfigError("workload must be closed, open, or saturation")
+            raise ConfigError(
+                "workload must be closed, open, saturation, or "
+                "fault_tolerance"
+            )
         target_url = normalize_target_url(
             str(values.get("target_url", ""))
         )
@@ -233,7 +236,7 @@ class BenchmarkConfig:
 
     @property
     def worker_count(self) -> int:
-        if self.workload == "open":
+        if self.workload in {"open", "fault_tolerance"}:
             return max(
                 1,
                 math.ceil(
@@ -277,7 +280,7 @@ class BenchmarkConfig:
             "collect_resources": self.collect_resources and index == 0,
             "collect_nats_metrics": self.collect_nats_metrics and index == 0,
         }
-        if self.workload == "open":
+        if self.workload in {"open", "fault_tolerance"}:
             return replace(
                 self,
                 arrival_rate=min(

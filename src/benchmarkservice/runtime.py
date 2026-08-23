@@ -136,11 +136,16 @@ class ArtifactRecorder:
             if not str(key).startswith("_")
         }
         timestamp = start_time or time.time()
+        recorded_at = time.time()
         phase = safe_context.get(
             "phase", phase_for_elapsed(max(0.0, timestamp - TEST_STARTED_EPOCH))
         )
         record = {
             "timestamp": timestamp,
+            "recorded_at": recorded_at,
+            "recorded_elapsed_seconds": round(
+                max(0.0, recorded_at - TEST_STARTED_EPOCH), 6
+            ),
             "phase": phase,
             "request_type": request_type,
             "name": name,

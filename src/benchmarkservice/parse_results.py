@@ -89,13 +89,18 @@ def _nested(document: dict[str, Any], *keys: str) -> Any:
 
 def saturation_points(
     result: Result,
-) -> tuple[list[tuple[float, float]], list[tuple[float, float]]]:
+) -> tuple[
+    list[tuple[float, float]],
+    list[tuple[float, float]],
+    list[tuple[float, float]],
+]:
     rungs = _nested(result.summary, "saturation", "rungs")
     if not isinstance(rungs, list) or not rungs:
         raise ResultError(f"{result.path}: saturation.rungs must be a non-empty list")
 
     goodput_points: list[tuple[float, float]] = []
     pending_points: list[tuple[float, float]] = []
+    p95_latency_points: list[tuple[float, float]] = []
     is_nats = str(result.summary.get("application_type", "")).upper() == "NATS"
     for index, rung in enumerate(rungs):
         if not isinstance(rung, dict):
@@ -121,6 +126,24 @@ def saturation_points(
             )
         )
 
+        p95_latency = _nested(
+            rung, "business", "checkout_to_outcome", "p95_ms"
+        )
+        if p95_latency is not None:
+            p95_latency_points.append(
+                (
+                    rate,
+                    _number(
+                        p95_latency,
+                        (
+                            f"saturation.rungs[{index}].business."
+                            "checkout_to_outcome.p95_ms"
+                        ),
+                        result.path,
+                    ),
+                )
+            )
+
         if is_nats:
             pending_points.append(
                 (
@@ -133,7 +156,75 @@ def saturation_points(
                 )
             )
 
-    return sorted(goodput_points), sorted(pending_points)
+    return (
+        sorted(goodput_points),
+        sorted(pending_points),
+        sorted(p95_latency_points),
+    )
+
+
+def fault_tolerance_points(
+    result: Result,
+) -> tuple[list[tuple[float, float]], list[tuple[float, float]]]:
+    samples = _nested(result.summary, "fault_tolerance", "per_second")
+    if not isinstance(samples, list) or not samples:
+        raise ResultError(
+            f"{result.path}: fault_tolerance.per_second must be a non-empty list"
+        )
+
+    successful_points: list[tuple[float, float]] = []
+    queued_points: list[tuple[float, float]] = []
+    is_nats = str(result.summary.get("application_type", "")).upper() == "NATS"
+    for index, sample in enumerate(samples):
+        if not isinstance(sample, dict):
+            raise ResultError(
+                f"{result.path}: fault_tolerance.per_second[{index}] "
+                "must be an object"
+            )
+        elapsed_seconds = _number(
+            sample.get("elapsed_seconds"),
+            f"fault_tolerance.per_second[{index}].elapsed_seconds",
+            result.path,
+        )
+        successful_field = "successfully_processed"
+        successful_value = sample.get(successful_field)
+        if successful_field not in sample:
+            # Fall back to outcomes attributed to their scheduled second when
+            # the summary does not contain observed completion counts.
+            successful_field = "successful_requests"
+            successful_value = sample.get(successful_field)
+        successful_points.append(
+            (
+                elapsed_seconds,
+                _number(
+                    successful_value,
+                    f"fault_tolerance.per_second[{index}].{successful_field}",
+                    result.path,
+                ),
+            )
+        )
+
+        if is_nats and sample.get("nats_waiting_events") is not None:
+            queued_points.append(
+                (
+                    elapsed_seconds,
+                    _number(
+                        sample["nats_waiting_events"],
+                        (
+                            f"fault_tolerance.per_second[{index}]."
+                            "nats_waiting_events"
+                        ),
+                        result.path,
+                    ),
+                )
+            )
+
+    if is_nats and not queued_points:
+        raise ResultError(
+            f"{result.path}: fault_tolerance.per_second must contain "
+            "NATS queued-event samples"
+        )
+    return sorted(successful_points), sorted(queued_points)
 
 
 def _display_number(value: float) -> str:
@@ -150,6 +241,7 @@ def write_svg_chart(
     *,
     title: str,
     y_label: str,
+    x_label: str = "Requests per second",
 ) -> None:
     if not points:
         raise ResultError(f"cannot create {destination}: graph has no points")
@@ -232,7 +324,7 @@ def write_svg_chart(
             (
                 f'  <text x="{left + plot_width / 2:g}" '
                 f'y="{height - 24}" font-size="16" '
-                'text-anchor="middle">Requests per second</text>'
+                f'text-anchor="middle">{escape(x_label)}</text>'
             ),
             (
                 f'  <text x="24" y="{top + plot_height / 2:g}" '
@@ -265,7 +357,7 @@ def write_svg_chart(
 
 
 def write_saturation_graphs(result: Result) -> list[Path]:
-    goodput, pending = saturation_points(result)
+    goodput, pending, p95_latency = saturation_points(result)
     base = result.path.with_suffix("")
     goodput_path = base.with_name(f"{base.name}_goodput.svg")
     write_svg_chart(
@@ -275,6 +367,15 @@ def write_saturation_graphs(result: Result) -> list[Path]:
         y_label="Goodput (orders/s)",
     )
     outputs = [goodput_path]
+    if p95_latency:
+        p95_latency_path = base.with_name(f"{base.name}_p95_latency.svg")
+        write_svg_chart(
+            p95_latency_path,
+            p95_latency,
+            title=f"{result.path.stem}: P95 outcome latency",
+            y_label="P95 outcome latency (ms)",
+        )
+        outputs.append(p95_latency_path)
     if pending:
         pending_path = base.with_name(f"{base.name}_max_pending_events.svg")
         write_svg_chart(
@@ -287,14 +388,37 @@ def write_saturation_graphs(result: Result) -> list[Path]:
     return outputs
 
 
+def write_fault_tolerance_graphs(result: Result) -> list[Path]:
+    successful, queued = fault_tolerance_points(result)
+    base = result.path.with_suffix("")
+    successful_path = base.with_name(f"{base.name}_successful_requests.svg")
+    write_svg_chart(
+        successful_path,
+        successful,
+        title=f"{result.path.stem}: successfully processed requests",
+        x_label="Elapsed time (s)",
+        y_label="Successful requests/s",
+    )
+    outputs = [successful_path]
+    if queued:
+        queued_path = base.with_name(f"{base.name}_queued_events.svg")
+        write_svg_chart(
+            queued_path,
+            queued,
+            title=f"{result.path.stem}: queued NATS events",
+            x_label="Elapsed time (s)",
+            y_label="Queued events",
+        )
+        outputs.append(queued_path)
+    return outputs
+
+
 def collect_closed_measurements(results: list[Result]) -> dict[int, ClosedMeasurements]:
     groups: dict[int, ClosedMeasurements] = {}
     for result in results:
-        worker_count = _integer(
-            result.summary.get("worker_count"), "worker_count", result.path
-        )
-        if worker_count < 1:
-            raise ResultError(f"{result.path}: worker_count must be positive")
+        users = _integer(result.summary.get("users"), "users", result.path)
+        if users < 1:
+            raise ResultError(f"{result.path}: users must be positive")
         business = result.summary["business"]
         submitted = _integer(
             business.get("submitted"), "business.submitted", result.path
@@ -307,7 +431,7 @@ def collect_closed_measurements(results: list[Result]) -> dict[int, ClosedMeasur
                 f"{result.path}: invalid submitted/completed order counts"
             )
 
-        group = groups.setdefault(worker_count, ClosedMeasurements())
+        group = groups.setdefault(users, ClosedMeasurements())
         group.orders += submitted
         group.completed += completed
         p95_value = _nested(business, "checkout_to_outcome", "p95_ms")
@@ -331,8 +455,8 @@ def write_closed_table(
         r"Users & Orders & Success rate & P95 & std \\",
         r"\hline",
     ]
-    for worker_count in sorted(groups):
-        group = groups[worker_count]
+    for users in sorted(groups):
+        group = groups[users]
         success_rate = (
             f"{group.completed / group.orders * 100:.2f}\\%"
             if group.orders
@@ -345,7 +469,7 @@ def write_closed_table(
             statistics.pstdev(group.p95_values) if group.p95_values else None
         )
         lines.append(
-            f"{worker_count * 1000} & {group.orders} & {success_rate} & "
+            f"{users} & {group.orders} & {success_rate} & "
             f"{_latex_number(median_p95)} & {_latex_number(p95_stddev)} \\\\"
         )
     lines.extend([r"\hline", r"\end{tabular}"])
@@ -356,7 +480,7 @@ def process_folder(folder: Path) -> list[Path]:
     results = find_results(folder)
     for result in results:
         workload = result.summary.get("workload")
-        if workload not in {"closed", "saturation"}:
+        if workload not in {"closed", "saturation", "fault_tolerance"}:
             raise ResultError(f"unsupported workload {workload}")
 
     outputs: list[Path] = []
@@ -373,6 +497,8 @@ def process_folder(folder: Path) -> list[Path]:
     for result in results:
         if result.summary["workload"] == "saturation":
             outputs.extend(write_saturation_graphs(result))
+        elif result.summary["workload"] == "fault_tolerance":
+            outputs.extend(write_fault_tolerance_graphs(result))
     return outputs
 
 

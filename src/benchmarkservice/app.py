@@ -28,7 +28,7 @@ HTML = r"""<!doctype html>
     :root { color-scheme:light; --ink:#17202a; --muted:#617080; --line:#d9e0e7;
       --paper:#fff; --bg:#f3f6f8; --brand:#174ea6; --bad:#b3261e; }
     * { box-sizing:border-box } body { margin:0; font:15px/1.5 system-ui,sans-serif;
-      color:var(--ink); background:var(--bg) } main { max-width:1100px; margin:auto;
+      color:var(--ink); background:var(--bg) } main { max-width:1240px; margin:auto;
       padding:32px 20px } h1,h2 { line-height:1.15 } .card { background:var(--paper);
       border:1px solid var(--line); border-radius:12px; padding:20px; margin:16px 0 }
     .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr));
@@ -43,6 +43,8 @@ HTML = r"""<!doctype html>
       border-radius:100px; padding:2px 8px; background:#e8eef8; font-size:12px }
     .card-heading { display:flex; align-items:center; justify-content:space-between;
       gap:12px; margin:.83em 0 } .card-heading h2 { margin:0 }
+    .run-actions { display:flex; gap:8px } .run-select { width:18px; height:18px;
+      padding:0 } #runs { overflow-x:auto }
     .error { color:var(--bad) } .muted { color:var(--muted) } pre { white-space:pre-wrap;
       overflow:auto; background:#f7f8fa; padding:12px; border-radius:8px }
   </style>
@@ -89,16 +91,21 @@ HTML = r"""<!doctype html>
     <p id="message" class="muted" role="status" aria-live="polite"></p></form>
   </section>
   <section class="card"><div class="card-heading"><h2>Runs</h2>
-    <button id="download-all" type="button" disabled>Download All</button></div>
+    <div class="run-actions"><button id="download-selected" type="button" disabled>
+      Download Selected JSONs</button>
+      <button id="download-all" type="button" disabled>Download All</button></div></div>
     <div id="runs"></div></section>
   <section class="card" id="details-card" hidden><h2>Result</h2><div id="details"></div></section>
 </main>
 <script>
 const ACTIVE_STATES=new Set(["submitted","starting","running","stopping"]);
-let activeRun=null, repeatPlan=null, sequenceRequestInFlight=false, refreshPromise=null;
+let activeRun=null, repeatPlan=null, sequenceRequestInFlight=false, refreshPromise=null,
+  selectedDownloadInFlight=false;
+const selectedRuns=new Set();
 const message=document.querySelector("#message"), startButton=document.querySelector("#start"),
   stopButton=document.querySelector("#stop"), rerunCount=document.querySelector("#rerun-count"),
   rerunDelay=document.querySelector("#rerun-delay"),
+  downloadSelectedButton=document.querySelector("#download-selected"),
   downloadAllButton=document.querySelector("#download-all");
 const fields=["warmup_seconds","duration_seconds","drain_seconds","users","spawn_rate",
   "arrival_rate","saturation_max_rate","outcome_timeout_seconds","settlement_timeout_seconds",
@@ -110,6 +117,15 @@ async function api(path,options={}) {
   }
   return data;
 }
+async function summaryArchive(runIds) {
+  const response=await fetch("/api/runs/summaries.zip",{method:"POST",
+    headers:{"Content-Type":"application/json"},body:JSON.stringify({run_ids:runIds})});
+  if(!response.ok) {
+    const data=await response.json().catch(()=>({error:response.statusText}));
+    const error=new Error(data.error||response.statusText); error.status=response.status; throw error;
+  }
+  return response.blob();
+}
 function esc(value) { return String(value??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",
   ">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
 function setMessage(text,isError=false) {
@@ -120,6 +136,7 @@ function updateControls() {
   stopButton.disabled=!activeRun&&!repeatPlan&&!sequenceRequestInFlight;
   stopButton.textContent=repeatPlan||sequenceRequestInFlight?
     "Stop benchmark sequence":"Stop active run";
+  downloadSelectedButton.disabled=selectedRuns.size===0||selectedDownloadInFlight;
 }
 async function submitSequenceRun() {
   const plan=repeatPlan; if(!plan||sequenceRequestInFlight)return null;
@@ -185,19 +202,53 @@ async function refreshPage() {
   const info=await api("/api/info"); document.querySelector("#application").textContent=info.application_type;
   const runs=await api("/api/runs");
   activeRun=runs.find(run=>ACTIVE_STATES.has(run.state))?.run_id||null;
+  const selectable=new Set(runs.filter(run=>run.summary_available).map(run=>run.run_id));
+  for(const runId of selectedRuns)if(!selectable.has(runId))selectedRuns.delete(runId);
   await advanceRepeatPlan(runs); updateControls();
   downloadAllButton.disabled=!runs.some(run=>run.artifacts_available);
-  document.querySelector("#runs").innerHTML=runs.length?`<table><thead><tr><th>Run</th>
+  document.querySelector("#runs").innerHTML=runs.length?`<table><thead><tr><th></th><th>Run</th>
     <th>Target</th><th>Workload</th><th>Status</th><th>Completed</th><th>p95</th><th></th></tr></thead>
-    <tbody>${runs.map(run=>`<tr><td><code>${esc(run.run_id)}</code></td><td>${esc(run.target_url)}</td><td>${esc(run.workload)}</td>
+    <tbody>${runs.map(run=>`<tr><td><input class="run-select" type="checkbox"
+    value="${esc(run.run_id)}" aria-label="Select run ${esc(run.run_id)}"
+    ${selectedRuns.has(run.run_id)?"checked":""} ${run.summary_available?"":"disabled"}></td>
+    <td><code>${esc(run.run_id)}</code></td><td>${esc(run.target_url)}</td><td>${esc(run.workload)}</td>
     <td><span class="pill">${esc(run.state)}</span></td><td>${esc(run.completed_orders)}</td>
-    <td>${run.p95_ms==null?"":esc(run.p95_ms)+" ms"}</td><td><button
-    onclick="showRun('${esc(run.run_id)}')">View</button></td></tr>`).join("")}</tbody></table>`:
+    <td>${run.p95_ms==null?"":esc(run.p95_ms)+" ms"}</td><td><div class="run-actions"><button
+    type="button" onclick="showRun('${esc(run.run_id)}')">View</button><button type="button"
+    onclick="downloadSummary('${esc(run.run_id)}')" ${run.summary_available?"":"disabled"}
+    title="Download summary JSON">JSON</button></div></td></tr>`).join("")}</tbody></table>`:
     `<p class="muted">No benchmark has been run.</p>`;
 }
 function refresh() {
   if(!refreshPromise)refreshPromise=refreshPage().finally(()=>{refreshPromise=null});
   return refreshPromise;
+}
+function downloadSummary(id) {
+  window.location.assign(`/api/runs/${encodeURIComponent(id)}/summary.json`);
+}
+async function downloadSelectedSummaries() {
+  const runIds=[...selectedRuns]; if(!runIds.length)return;
+  selectedDownloadInFlight=true; updateControls();
+  try {
+    let handle=null;
+    if(typeof window.showSaveFilePicker==="function") {
+      try {
+        handle=await window.showSaveFilePicker({suggestedName:"benchmark-summaries.zip",
+          types:[{description:"ZIP archive",accept:{"application/zip":[".zip"]}}]});
+      } catch(error) { if(error.name==="AbortError")return; throw error; }
+    }
+    const archive=await summaryArchive(runIds);
+    if(handle) {
+      const writable=await handle.createWritable();
+      await writable.write(archive); await writable.close();
+    } else {
+      const url=URL.createObjectURL(archive), link=document.createElement("a");
+      link.href=url; link.download="benchmark-summaries.zip"; document.body.appendChild(link);
+      link.click(); link.remove(); setTimeout(()=>URL.revokeObjectURL(url),1000);
+    }
+    setMessage(`Downloaded ${runIds.length} selected summary JSON${runIds.length===1?"":"s"}.`);
+  } catch(error) { setMessage(`Could not download selected summaries: ${error.message}`,true); }
+  finally { selectedDownloadInFlight=false; updateControls(); }
 }
 async function showRun(id) {
   const run=await api(`/api/runs/${id}`), card=document.querySelector("#details-card"); card.hidden=false;
@@ -241,6 +292,13 @@ stopButton.addEventListener("click",async()=>{
   } catch(error) { setMessage(error.message,true); await refresh().catch(()=>{}); }
 });
 function updateRerunDelay() { rerunDelay.disabled=Number(rerunCount.value||0)===0; }
+document.querySelector("#runs").addEventListener("change",event=>{
+  const checkbox=event.target;
+  if(!checkbox.classList.contains("run-select"))return;
+  if(checkbox.checked)selectedRuns.add(checkbox.value); else selectedRuns.delete(checkbox.value);
+  updateControls();
+});
+downloadSelectedButton.addEventListener("click",downloadSelectedSummaries);
 downloadAllButton.addEventListener("click",()=>{
   window.location.assign("/api/runs/artifacts.zip");
 });
@@ -300,6 +358,17 @@ class BenchmarkHandler(BaseHTTPRequestHandler):
     def _parts(self) -> list[str]:
         return [part for part in urlparse(self.path).path.split("/") if part]
 
+    def _read_json_object(self) -> dict[str, Any]:
+        length = int(self.headers.get("Content-Length", "0"))
+        if length <= 0 or length > 64 * 1024:
+            raise ConfigError(
+                "request body must contain a small JSON object"
+            )
+        payload = json.loads(self.rfile.read(length))
+        if not isinstance(payload, dict):
+            raise ConfigError("request body must be a JSON object")
+        return payload
+
     def do_GET(self) -> None:
         parts = self._parts()
         try:
@@ -356,16 +425,27 @@ class BenchmarkHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         parts = self._parts()
         try:
-            if parts == ["api", "runs"]:
-                length = int(self.headers.get("Content-Length", "0"))
-                if length <= 0 or length > 64 * 1024:
+            if parts == ["api", "runs", "summaries.zip"]:
+                run_ids = self._read_json_object().get("run_ids")
+                if (
+                    not isinstance(run_ids, list)
+                    or not run_ids
+                    or len(run_ids) > 1_000
+                    or any(not isinstance(run_id, str) for run_id in run_ids)
+                ):
                     raise ConfigError(
-                        "request body must contain a small JSON object"
+                        "run_ids must be a non-empty list of at most 1000 strings"
                     )
-                payload = json.loads(self.rfile.read(length))
-                if not isinstance(payload, dict):
-                    raise ConfigError("request body must be a JSON object")
-                self._json(HTTPStatus.CREATED, self.manager.start(payload))
+                self._send_download(
+                    self.manager.combined_summaries(run_ids),
+                    "application/zip",
+                    "benchmark-summaries.zip",
+                )
+            elif parts == ["api", "runs"]:
+                self._json(
+                    HTTPStatus.CREATED,
+                    self.manager.start(self._read_json_object()),
+                )
             elif (
                 len(parts) == 4
                 and parts[:2] == ["api", "runs"]

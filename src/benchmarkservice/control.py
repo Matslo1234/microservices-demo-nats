@@ -146,6 +146,13 @@ class BenchmarkManager:
         raise RunConflict(f"run {run_id} is being updated concurrently")
 
     def start(self, values: dict[str, Any]) -> dict[str, Any]:
+        if str(values.get("workload", "")).strip().lower() == (
+            "fault_tolerance"
+        ):
+            raise ConfigError(
+                "fault_tolerance must be run with fault_tolerance.py so "
+                "faults are injected into the target cluster"
+            )
         config = BenchmarkConfig.from_request(
             values, self.application_type
         )
@@ -266,6 +273,13 @@ class BenchmarkManager:
             status["p95_ms"] = business.get(
                 "checkout_to_outcome", {}
             ).get("p95_ms")
+            summary_artifact = record.get("artifacts", {}).get(
+                "summary.json"
+            )
+            status["summary_available"] = bool(
+                isinstance(summary_artifact, dict)
+                and summary_artifact.get("object")
+            )
             archive = record.get("artifacts", {}).get("artifacts.zip")
             status["artifacts_available"] = bool(
                 isinstance(archive, dict) and archive.get("object")
@@ -367,6 +381,33 @@ class BenchmarkManager:
                 archive_count += 1
         if archive_count == 0:
             raise RunNotFound("artifacts.zip")
+        return output.getvalue()
+
+    def combined_summaries(self, run_ids: list[str]) -> bytes:
+        output = io.BytesIO()
+        included: set[str] = set()
+        with zipfile.ZipFile(
+            output, "w", compression=zipfile.ZIP_DEFLATED
+        ) as combined:
+            for run_id in run_ids:
+                if (
+                    not isinstance(run_id, str)
+                    or not run_id
+                    or len(run_id) > 64
+                    or run_id in {".", ".."}
+                    or "/" in run_id
+                    or "\\" in run_id
+                ):
+                    raise RunNotFound(str(run_id))
+                if run_id in included:
+                    continue
+                included.add(run_id)
+                combined.writestr(
+                    f"{run_id}-summary.json",
+                    self.artifact(run_id, "summary.json"),
+                )
+        if not included:
+            raise RunNotFound("summaries.zip")
         return output.getvalue()
 
     def ready(self) -> bool:

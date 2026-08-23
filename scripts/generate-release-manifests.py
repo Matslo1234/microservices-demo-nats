@@ -44,7 +44,7 @@ SERVICES = (
 )
 DEFAULT_IMAGE_DIGESTS = {
     "adservice": "3856d1a4302a98e4a39e4be1e9e7995c315e177fc028fd5eb8542a4c33394fac",
-    "benchmarkservice": "539021309a36a46c17a942e7c7a1b20f5d67360f787ffb8d2ef65f2f50173a87",
+    "benchmarkservice": "9bc9eee1d096b84c4ded79c09d0eb8eb1d4f636b0187ce3ad7b603126ad787a2",
     "cartservice": "98812d26da5f93a29cffc8aa93801fb7b82517b703bade18876033385061c3a0",
     "checkoutservice": "14374b110125e8ce183db256c1357d98a1ae1769fca01a61c13267979dd34b0d",
     "currencyservice": "1b676e316bfbb845411f4b5b02f376b780fe2ca3614c8a84065aa4a06be608f6",

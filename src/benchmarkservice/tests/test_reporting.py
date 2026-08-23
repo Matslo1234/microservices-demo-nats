@@ -31,6 +31,7 @@ class ReportingTest(unittest.TestCase):
                     "warmup_seconds": 1,
                     "duration_seconds": 10,
                     "drain_seconds": 2,
+                    "users": 237,
                 },
                 "NATS",
             )
@@ -64,6 +65,7 @@ class ReportingTest(unittest.TestCase):
             self.assertEqual(2, summary["business"]["submitted"])
             self.assertEqual(1, summary["business"]["completed"])
             self.assertEqual(1, summary["worker_count"])
+            self.assertEqual(237, summary["users"])
             self.assertEqual(0.1, summary["business"]["goodput_orders_per_second"])
             self.assertEqual(
                 100.0, summary["business"]["checkout_to_outcome"]["p95_ms"]
@@ -171,6 +173,131 @@ class ReportingTest(unittest.TestCase):
             assessment["reasons"],
         )
 
+    def test_fault_tolerance_report_has_per_second_metrics_and_convergence(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            run = Path(temporary)
+            start_epoch = 1_000.0
+            config = BenchmarkConfig.from_request(
+                {
+                    "target_url": "http://frontend",
+                    "metrics_url": "http://benchmarkmetrics/snapshot",
+                    "workload": "fault_tolerance",
+                    "warmup_seconds": 0,
+                    "duration_seconds": 10,
+                    "drain_seconds": 2,
+                    "arrival_rate": 1,
+                    "resource_sample_interval_seconds": 1,
+                },
+                "NATS",
+            )
+            (run / "config.json").write_text(
+                json.dumps(config.as_dict()), encoding="utf-8"
+            )
+            plan = {
+                "schema_version": 1,
+                "start_epoch": start_epoch,
+                "duration_seconds": 10,
+                "convergence_stable_seconds": 1,
+                "convergence_success_fraction": 0.9,
+                "convergence_pending_tolerance": 0,
+                "faults": [
+                    {
+                        "service": "paymentservice",
+                        "deployment": "paymentservice",
+                        "original_replicas": 2,
+                    },
+                    {
+                        "service": "shippingservice",
+                        "deployment": "shippingservice",
+                        "original_replicas": 2,
+                    },
+                ],
+            }
+            (run / "fault-plan.json").write_text(
+                json.dumps(plan), encoding="utf-8"
+            )
+            fault_events = [
+                self._fault_event(
+                    start_epoch, 2, "paymentservice", "scale_down_started"
+                ),
+                self._fault_event(start_epoch, 3, "paymentservice", "scale_up_started"),
+                self._fault_event(start_epoch, 3, "paymentservice", "reenabled"),
+                self._fault_event(
+                    start_epoch, 5, "shippingservice", "scale_down_started"
+                ),
+                self._fault_event(
+                    start_epoch, 6, "shippingservice", "scale_up_started"
+                ),
+                self._fault_event(start_epoch, 6, "shippingservice", "reenabled"),
+            ]
+            (run / "faults.jsonl").write_text(
+                "".join(json.dumps(record) + "\n" for record in fault_events),
+                encoding="utf-8",
+            )
+            business = []
+            for second in range(10):
+                outcome = "REJECTED" if second == 2 else "COMPLETED"
+                record = self._business(
+                    "steady",
+                    outcome,
+                    100 + second,
+                    outcome == "COMPLETED",
+                    True,
+                )
+                record.update(
+                    {
+                        "timestamp": start_epoch + second,
+                        "recorded_at": start_epoch + second + 0.1,
+                    }
+                )
+                record["context"]["scheduled_at"] = start_epoch + second
+                business.append(record)
+            (run / "business.jsonl").write_text(
+                "".join(json.dumps(record) + "\n" for record in business),
+                encoding="utf-8",
+            )
+            resources = []
+            pending_by_second = {2: 5, 3: 2, 5: 4, 6: 2}
+            for second in range(12):
+                record = self._resource(
+                    start_epoch + second, 0, 0, 0, 0
+                )
+                record["elapsed_seconds"] = second
+                record["nats_metrics"] = [
+                    self._nats_metric(
+                        "jetstream_consumer_num_pending",
+                        pending_by_second.get(second, 0),
+                        "BOUTIQUE_EVENTS",
+                        "payment",
+                    )
+                ]
+                resources.append(record)
+            (run / "resources.jsonl").write_text(
+                "".join(json.dumps(record) + "\n" for record in resources),
+                encoding="utf-8",
+            )
+
+            summary = build_report(run)["fault_tolerance"]
+
+            self.assertTrue(summary["available"])
+            self.assertEqual(10, summary["totals"]["expected_requests"])
+            self.assertEqual(9, summary["totals"]["successful_requests"])
+            self.assertEqual(1, summary["totals"]["failed_requests"])
+            self.assertEqual(0, summary["totals"]["lost_requests"])
+            self.assertEqual(
+                "paymentservice_disabled", summary["per_second"][2]["phase"]
+            )
+            self.assertEqual(
+                5, summary["per_second"][2]["nats_waiting_events"]
+            )
+            self.assertEqual(
+                [1.0, 1.0],
+                [fault["convergence_seconds"] for fault in summary["faults"]],
+            )
+            self.assertTrue((run / "fault-tolerance.csv").exists())
+
     def test_saturation_report_keeps_per_rung_metrics(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             run = Path(temporary)
@@ -249,6 +376,7 @@ class ReportingTest(unittest.TestCase):
             summary = build_report(run)
 
             saturation = summary["saturation"]
+            self.assertNotIn("users", summary)
             self.assertTrue(saturation["saturated"])
             self.assertEqual(20, saturation["saturation_requests_per_second"])
             self.assertEqual(
@@ -298,6 +426,20 @@ class ReportingTest(unittest.TestCase):
             "saturated": saturated,
             "saturation_reason": reason,
             "stop_reason": stop_reason,
+        }
+
+    @staticmethod
+    def _fault_event(
+        start_epoch: float, elapsed: int, service: str, action: str
+    ) -> dict:
+        return {
+            "timestamp": start_epoch + elapsed,
+            "at": f"elapsed-{elapsed}",
+            "elapsed_seconds": elapsed,
+            "service": service,
+            "deployment": service,
+            "action": action,
+            "original_replicas": 2,
         }
 
     @staticmethod

@@ -120,6 +120,7 @@ def locust_command(config: BenchmarkConfig, run_directory: Path) -> list[str]:
     user_class = {
         "closed": "ClosedLoopUser",
         "open": "OpenLoopDriver",
+        "fault_tolerance": "OpenLoopDriver",
         "saturation": "SaturationDriver",
     }[config.workload]
     return [

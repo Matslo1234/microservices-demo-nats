@@ -330,14 +330,30 @@ fi
 for service in "${services[@]}"; do
   # Docker Hub names only require escaping dots when embedded in this ERE.
   image_pattern="${dockerhub_username//./\\.}/${service//./\\.}"
+  image_address_pattern="${image_pattern//\//\\/}"
   dictionary_key_pattern="${service//./\\.}"
   digest="${latest_digests["${service}"]}"
   digest_value="${digest#sha256:}"
 
+  # The original gRPC comparison uses separately built delayed provider
+  # images. Their tags must retain their own digests; replacing those digests
+  # with the latest NATS service image makes the new pods require NATS_URL.
+  protected_tag_pattern=""
+  case "${service}" in
+    paymentservice|shippingservice)
+      protected_tag_pattern='v0\.10\.6-(with-)?delay'
+      ;;
+  esac
+
   for manifest_file in "${manifest_files[@]}"; do
-    sed -E -i \
-      "s|^([[:space:]]*image:[[:space:]]+[\"']?${image_pattern})(:[^@[:space:]\"'#]+)?(@sha256:[[:xdigit:]]{64})?([\"']?[[:space:]]*(#.*)?)$|\\1\\2@${digest}\\4|" \
-      "${manifest_file}"
+    replacement="s|^([[:space:]]*image:[[:space:]]+[\"']?${image_pattern})(:[^@[:space:]\"'#]+)?(@sha256:[[:xdigit:]]{64})?([\"']?[[:space:]]*(#.*)?)$|\\1\\2@${digest}\\4|"
+    if [[ -n "${protected_tag_pattern}" ]]; then
+      sed -E -i \
+        "/${image_address_pattern}:${protected_tag_pattern}(@sha256:[[:xdigit:]]{64})?([\"']?[[:space:]]*(#.*)?)$/! ${replacement}" \
+        "${manifest_file}"
+    else
+      sed -E -i "${replacement}" "${manifest_file}"
+    fi
   done
 
   sed -E -i \

@@ -37,6 +37,7 @@ class ApplyLatestTest(unittest.TestCase):
                 textwrap.dedent(
                     """\
                     DEFAULT_IMAGE_DIGESTS = {
+                        "paymentservice": "0000000000000000000000000000000000000000000000000000000000000000",
                         "shippingservice": "0000000000000000000000000000000000000000000000000000000000000000",
                     }
                     """
@@ -46,7 +47,24 @@ class ApplyLatestTest(unittest.TestCase):
 
             manifest = release / "manifest.yaml"
             manifest.write_text(
-                "image: testuser/shippingservice:v0.4.0@sha256:" + ("0" * 64) + "\n",
+                "".join(
+                    (
+                        "image: testuser/shippingservice:v0.4.0@sha256:"
+                        + ("0" * 64)
+                        + "\n",
+                        "image: testuser/shippingservice:"
+                        "v0.10.6-with-delay@sha256:"
+                        + ("3" * 64)
+                        + "\n",
+                        "image: testuser/paymentservice:v0.4.0@sha256:"
+                        + ("0" * 64)
+                        + "\n",
+                        "image: testuser/paymentservice:"
+                        "v0.10.6-delay@sha256:"
+                        + ("4" * 64)
+                        + "\n",
+                    )
+                ),
                 encoding="utf-8",
             )
 
@@ -64,7 +82,7 @@ class ApplyLatestTest(unittest.TestCase):
                       https://auth.test/token)
                         printf '%s\\n' '{{"token":"test-token"}}'
                         ;;
-                      https://registry.test/v2/testuser/shippingservice/manifests/arbitrary-tag)
+                      https://registry.test/v2/testuser/*/manifests/arbitrary-tag)
                         printf 'HTTP/1.1 200 OK\\r\\nDocker-Content-Digest: sha256:{registry_digest}\\r\\n\\r\\n'
                         ;;
                       *)
@@ -104,7 +122,22 @@ class ApplyLatestTest(unittest.TestCase):
                 result.stdout,
             )
             self.assertEqual(
-                f"image: testuser/shippingservice:v0.4.0@sha256:{registry_digest}\n",
+                "".join(
+                    (
+                        "image: testuser/shippingservice:"
+                        f"v0.4.0@sha256:{registry_digest}\n",
+                        "image: testuser/shippingservice:"
+                        "v0.10.6-with-delay@sha256:"
+                        + ("3" * 64)
+                        + "\n",
+                        "image: testuser/paymentservice:"
+                        f"v0.4.0@sha256:{registry_digest}\n",
+                        "image: testuser/paymentservice:"
+                        "v0.10.6-delay@sha256:"
+                        + ("4" * 64)
+                        + "\n",
+                    )
+                ),
                 manifest.read_text(encoding="utf-8"),
             )
             self.assertNotIn(stale_digest, manifest.read_text(encoding="utf-8"))
@@ -112,6 +145,7 @@ class ApplyLatestTest(unittest.TestCase):
                 textwrap.dedent(
                     f"""\
                     DEFAULT_IMAGE_DIGESTS = {{
+                        "paymentservice": "{registry_digest}",
                         "shippingservice": "{registry_digest}",
                     }}
                     """

@@ -11,12 +11,13 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 import uuid
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from config import BenchmarkConfig, ConfigError
 from parallel import merge_worker_outputs
@@ -24,6 +25,7 @@ from reporting import build_report
 
 
 SOURCE_DIRECTORY = Path(__file__).resolve().parent
+RunController = Callable[[float, Path, threading.Event], None]
 
 
 def parser() -> argparse.ArgumentParser:
@@ -98,6 +100,7 @@ def locust_command(
     user_class = {
         "closed": "ClosedLoopUser",
         "open": "OpenLoopDriver",
+        "fault_tolerance": "OpenLoopDriver",
         "saturation": "SaturationDriver",
     }[config.workload]
     return [
@@ -139,7 +142,11 @@ def create_archive(run_directory: Path, run_id: str) -> None:
                 archive.write(path, path.relative_to(run_directory))
 
 
-def run(config: BenchmarkConfig, output_root: Path) -> tuple[int, Path]:
+def run(
+    config: BenchmarkConfig,
+    output_root: Path,
+    run_controller: RunController | None = None,
+) -> tuple[int, Path]:
     run_id = (
         datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         + "-"
@@ -152,15 +159,21 @@ def run(config: BenchmarkConfig, output_root: Path) -> tuple[int, Path]:
     processes: list[subprocess.Popen[bytes]] = []
     logs: list[Any] = []
     statuses: list[dict[str, Any]] = []
+    controller_stop = threading.Event()
+    controller_errors: list[Exception] = []
+    controller_thread: threading.Thread | None = None
 
     def request_stop(signum: int, frame: Any) -> None:
+        controller_stop.set()
         for process in processes:
             if process.poll() is None:
                 os.killpg(process.pid, signal.SIGINT)
 
     signal.signal(signal.SIGTERM, request_stop)
     signal.signal(signal.SIGINT, request_stop)
-    start_epoch = time.time() + (5 if config.worker_count > 1 else 0)
+    start_epoch = time.time() + (
+        5 if config.worker_count > 1 or run_controller is not None else 0
+    )
     worker_directories: list[Path] = []
     coordination_directory = run_directory / ".saturation-coordination"
     if config.workload == "saturation" and config.worker_count > 1:
@@ -209,6 +222,32 @@ def run(config: BenchmarkConfig, output_root: Path) -> tuple[int, Path]:
                 )
             )
 
+        if run_controller is not None:
+
+            def control_run() -> None:
+                try:
+                    run_controller(
+                        start_epoch, run_directory, controller_stop
+                    )
+                except Exception as error:
+                    controller_errors.append(error)
+                    print(
+                        f"benchmark run controller failed: {error}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    controller_stop.set()
+                    for active_process in processes:
+                        if active_process.poll() is None:
+                            os.killpg(active_process.pid, signal.SIGINT)
+
+            controller_thread = threading.Thread(
+                target=control_run,
+                name="benchmark-run-controller",
+                daemon=True,
+            )
+            controller_thread.start()
+
         for index, process in enumerate(processes):
             return_code = process.wait()
             status = {
@@ -224,6 +263,11 @@ def run(config: BenchmarkConfig, output_root: Path) -> tuple[int, Path]:
                 worker_directories[index] / "worker-status.json", status
             )
     finally:
+        controller_stop.set()
+        if controller_thread is not None:
+            # A controller can own rollback of external state. Do not abandon
+            # that rollback merely because the load process has exited.
+            controller_thread.join()
         for log in logs:
             log.close()
         for process in processes:
@@ -237,6 +281,9 @@ def run(config: BenchmarkConfig, output_root: Path) -> tuple[int, Path]:
     failed = [status for status in statuses if status["state"] != "completed"]
     state = "failed" if failed else "completed"
     message = None
+    if controller_errors:
+        state = "failed"
+        message = f"run controller failed: {controller_errors[0]}"
     summary = None
     try:
         summary = build_report(run_directory)

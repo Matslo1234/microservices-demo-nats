@@ -154,6 +154,25 @@ class BenchmarkConfigTest(unittest.TestCase):
             worker.spawn_rate for worker in workers
         ])
 
+    def test_fault_tolerance_uses_open_loop_worker_splitting(self):
+        config = BenchmarkConfig.from_request(
+            {
+                **self.URLS,
+                "workload": "fault_tolerance",
+                "arrival_rate": 250,
+            },
+            "NATS",
+        )
+
+        self.assertEqual(3, config.worker_count)
+        self.assertEqual(
+            [100.0, 100.0, 50.0],
+            [
+                config.for_worker(index).arrival_rate
+                for index in range(config.worker_count)
+            ],
+        )
+
     def test_threshold_values_keep_a_single_worker(self):
         open_config = BenchmarkConfig.from_request(
             {**self.URLS, "workload": "open", "arrival_rate": 100},

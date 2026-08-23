@@ -230,7 +230,7 @@ data:
             user: "benchmarkservice", password: $BENCHMARKSERVICE_PASSWORD,
             permissions: {
               publish: [
-                "$JS.API.>", "__NATS_BENCHMARK_RUNS_SUBJECT__",
+                "$JS.API.>", "$JS.FC.>", "__NATS_BENCHMARK_RUNS_SUBJECT__",
                 "__NATS_BENCHMARK_ARTIFACTS_SUBJECT__"
               ],
               subscribe: [

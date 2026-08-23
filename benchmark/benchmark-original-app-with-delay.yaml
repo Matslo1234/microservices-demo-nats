@@ -147,6 +147,8 @@ metadata:
   name: frontend-external
   labels:
     app: frontend
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
 spec:
   type: LoadBalancer
   selector:
@@ -725,7 +727,7 @@ spec:
               - ALL
           privileged: false
           readOnlyRootFilesystem: true
-        image: matslo123/paymentservice:v0.10.6-delay@sha256:a624a37dd2ee8bd84f7801d16b3e9ba985a4702f20303801f248a0bffb149056
+        image: matslo123/paymentservice:v0.10.6-delay@sha256:ab2ea71faae31b5a22be533b637c48bca4f4bfd7f31a8c87c9d194b1af97709e
         ports:
         - containerPort: 50051
         env:
@@ -800,7 +802,7 @@ spec:
               - ALL
           privileged: false
           readOnlyRootFilesystem: true
-        image: matslo123/shippingservice:v0.10.6-delay@sha256:d8c1054bf40a9df1917249358c272239a7685f12f9ce625d5aa5d9e0f2a3aeba
+        image: matslo123/shippingservice:v0.10.6-with-delay@sha256:c34798344567a6115bfd050d285058cc64ad75019c8f9597c198393b55c7d484
         ports:
         - containerPort: 50051
         env:
@@ -991,7 +993,7 @@ spec:
             app: benchmarkservice
       containers:
       - name: server
-        image: matslo123/benchmarkservice:v0.5.0@sha256:539021309a36a46c17a942e7c7a1b20f5d67360f787ffb8d2ef65f2f50173a87
+        image: matslo123/benchmarkservice:v0.5.0@sha256:9bc9eee1d096b84c4ded79c09d0eb8eb1d4f636b0187ce3ad7b603126ad787a2
         env:
         - name: PORT
           value: "8080"
@@ -1127,7 +1129,7 @@ spec:
           type: RuntimeDefault
       containers:
       - name: server
-        image: matslo123/benchmarkservice:v0.5.0@sha256:539021309a36a46c17a942e7c7a1b20f5d67360f787ffb8d2ef65f2f50173a87
+        image: matslo123/benchmarkservice:v0.5.0@sha256:9bc9eee1d096b84c4ded79c09d0eb8eb1d4f636b0187ce3ad7b603126ad787a2
         imagePullPolicy: IfNotPresent
         command: ["python", "metrics_server.py"]
         env:
