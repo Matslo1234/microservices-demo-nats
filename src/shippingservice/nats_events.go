@@ -30,10 +30,32 @@ const (
 	shippingCartConsumer      = "shipping-cart-quotes-v1"
 	shippingQuoteSubject      = "boutique.evt.shipping.cart-quote-updated.v1"
 	shippingCommandConsumer   = "shipping-commands-v1"
+	shippingCartMaxPending    = 1000
 	shippingCommandBatchSize  = 256
 	shippingCommandMaxPending = 512
 	shippingCommandWorkers    = 32
 )
+
+type shippingConsumerDefinition struct {
+	stream        string
+	durable       string
+	filterSubject string
+	maxPending    int
+}
+
+func shippingCartConsumerDefinition() shippingConsumerDefinition {
+	return shippingConsumerDefinition{
+		stream: "BOUTIQUE_EVENTS", durable: shippingCartConsumer,
+		filterSubject: "boutique.evt.cart.>", maxPending: shippingCartMaxPending,
+	}
+}
+
+func shippingCommandConsumerDefinition() shippingConsumerDefinition {
+	return shippingConsumerDefinition{
+		stream: "BOUTIQUE_COMMANDS", durable: shippingCommandConsumer,
+		filterSubject: "boutique.cmd.shipping.>", maxPending: shippingCommandMaxPending,
+	}
+}
 
 type shippingEventWorker struct {
 	nc                  *nats.Conn
@@ -117,37 +139,33 @@ func startShippingEvents() (*shippingEventWorker, error) {
 		nc.Close()
 		return nil, err
 	}
+	cartConsumer := shippingCartConsumerDefinition()
+	if err := worker.ensureConsumer(cartConsumer); err != nil {
+		nc.Close()
+		return nil, fmt.Errorf("ensure shipping cart consumer: %w", err)
+	}
 	worker.subscription, err = worker.js.PullSubscribe(
-		"boutique.evt.cart.>", shippingCartConsumer,
-		nats.BindStream("BOUTIQUE_EVENTS"), nats.ManualAck(), nats.AckExplicit(),
-		nats.DeliverAll(), nats.AckWait(30*time.Second), nats.MaxDeliver(10),
+		cartConsumer.filterSubject,
+		cartConsumer.durable,
+		nats.Bind(cartConsumer.stream, cartConsumer.durable),
 	)
 	if err != nil {
 		nc.Close()
-		return nil, fmt.Errorf("create shipping cart consumer: %w", err)
+		return nil, fmt.Errorf("bind shipping cart consumer: %w", err)
 	}
-	commandInfo, err := worker.js.ConsumerInfo("BOUTIQUE_COMMANDS", shippingCommandConsumer)
-	if err != nil && !errors.Is(err, nats.ErrConsumerNotFound) {
+	commandConsumer := shippingCommandConsumerDefinition()
+	if err := worker.ensureConsumer(commandConsumer); err != nil {
 		nc.Close()
-		return nil, fmt.Errorf("inspect shipping command consumer: %w", err)
-	}
-	if commandInfo != nil && commandInfo.Config.MaxAckPending != shippingCommandMaxPending {
-		config := commandInfo.Config
-		config.MaxAckPending = shippingCommandMaxPending
-		if _, err := worker.js.UpdateConsumer("BOUTIQUE_COMMANDS", &config); err != nil {
-			nc.Close()
-			return nil, fmt.Errorf("update shipping command consumer: %w", err)
-		}
+		return nil, fmt.Errorf("ensure shipping command consumer: %w", err)
 	}
 	worker.commandSubscription, err = worker.js.PullSubscribe(
-		"boutique.cmd.shipping.>", shippingCommandConsumer,
-		nats.BindStream("BOUTIQUE_COMMANDS"), nats.ManualAck(), nats.AckExplicit(),
-		nats.DeliverAll(), nats.AckWait(30*time.Second), nats.MaxDeliver(10),
-		nats.MaxAckPending(shippingCommandMaxPending),
+		commandConsumer.filterSubject,
+		commandConsumer.durable,
+		nats.Bind(commandConsumer.stream, commandConsumer.durable),
 	)
 	if err != nil {
 		nc.Close()
-		return nil, fmt.Errorf("create shipping command consumer: %w", err)
+		return nil, fmt.Errorf("bind shipping command consumer: %w", err)
 	}
 	worker.ready.Store(true)
 	go worker.run()
@@ -155,7 +173,74 @@ func startShippingEvents() (*shippingEventWorker, error) {
 	return worker, nil
 }
 
+func (worker *shippingEventWorker) ensureConsumer(definition shippingConsumerDefinition) error {
+	// A durable created by PullSubscribe is deleted by nats.go when its owning
+	// connection drains. Manage it separately so scale-down preserves its cursor.
+	config := &nats.ConsumerConfig{
+		Durable:       definition.durable,
+		DeliverPolicy: nats.DeliverAllPolicy,
+		AckPolicy:     nats.AckExplicitPolicy,
+		AckWait:       30 * time.Second,
+		MaxDeliver:    10,
+		MaxAckPending: definition.maxPending,
+		FilterSubject: definition.filterSubject,
+	}
+	for attempt := 0; attempt < 20; attempt++ {
+		info, err := worker.js.ConsumerInfo(definition.stream, definition.durable)
+		if errors.Is(err, nats.ErrConsumerNotFound) {
+			if _, addErr := worker.js.AddConsumer(definition.stream, config); addErr == nil {
+				return nil
+			} else if shippingConsumerSetupRace(addErr) {
+				time.Sleep(time.Duration(attempt+1) * 10 * time.Millisecond)
+				continue
+			} else {
+				return fmt.Errorf("create %s: %w", definition.durable, addErr)
+			}
+		}
+		if err != nil {
+			return fmt.Errorf("inspect %s: %w", definition.durable, err)
+		}
+		if info.Config.FilterSubject == definition.filterSubject &&
+			info.Config.MaxAckPending == definition.maxPending &&
+			info.Config.AckPolicy == nats.AckExplicitPolicy &&
+			info.Config.AckWait == 30*time.Second &&
+			info.Config.MaxDeliver == 10 &&
+			info.Config.DeliverPolicy == nats.DeliverAllPolicy {
+			return nil
+		}
+		next := info.Config
+		next.FilterSubject = definition.filterSubject
+		next.FilterSubjects = nil
+		next.MaxAckPending = definition.maxPending
+		next.AckPolicy = nats.AckExplicitPolicy
+		next.AckWait = 30 * time.Second
+		next.MaxDeliver = 10
+		next.DeliverPolicy = nats.DeliverAllPolicy
+		if _, updateErr := worker.js.UpdateConsumer(definition.stream, &next); updateErr == nil {
+			return nil
+		} else if shippingConsumerSetupRace(updateErr) {
+			time.Sleep(time.Duration(attempt+1) * 10 * time.Millisecond)
+			continue
+		} else {
+			return fmt.Errorf("update %s: %w", definition.durable, updateErr)
+		}
+	}
+	return fmt.Errorf("consumer %s setup conflicted too many times", definition.durable)
+}
+
+func shippingConsumerSetupRace(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return errors.Is(err, nats.ErrConsumerNotFound) ||
+		strings.Contains(message, "consumer already exists") ||
+		strings.Contains(message, "consumer name already in use") ||
+		strings.Contains(message, "stream sequence")
+}
+
 func (worker *shippingEventWorker) runCommands() {
+	consumer := shippingCommandConsumerDefinition()
 	for {
 		select {
 		case <-worker.stop:
@@ -168,8 +253,7 @@ func (worker *shippingEventWorker) runCommands() {
 		)
 		if err != nil {
 			if !shippingConsumerStopped(err) {
-				log.Errorf("shipping command fetch failed: %v", err)
-				time.Sleep(time.Second)
+				worker.handleConsumerError(consumer, "shipping command fetch", err)
 			}
 			continue
 		}
@@ -180,8 +264,7 @@ func (worker *shippingEventWorker) runCommands() {
 			worker.processCommandMessage,
 		)
 		if err := batch.Error(); err != nil && !shippingConsumerStopped(err) {
-			log.Errorf("shipping command stream failed: %v", err)
-			time.Sleep(time.Second)
+			worker.handleConsumerError(consumer, "shipping command stream", err)
 		}
 	}
 }
@@ -250,6 +333,7 @@ func shippingMessageLane(data []byte, lanes int) int {
 }
 
 func (worker *shippingEventWorker) run() {
+	consumer := shippingCartConsumerDefinition()
 	for {
 		select {
 		case <-worker.stop:
@@ -259,8 +343,7 @@ func (worker *shippingEventWorker) run() {
 		batch, err := worker.subscription.FetchBatch(32, nats.MaxWait(time.Second))
 		if err != nil {
 			if !shippingConsumerStopped(err) {
-				log.Errorf("shipping cart event fetch failed: %v", err)
-				time.Sleep(time.Second)
+				worker.handleConsumerError(consumer, "shipping cart event fetch", err)
 			}
 			continue
 		}
@@ -286,10 +369,22 @@ func (worker *shippingEventWorker) run() {
 			span.End()
 		}
 		if err := batch.Error(); err != nil && !shippingConsumerStopped(err) {
-			log.Errorf("shipping cart event stream failed: %v", err)
-			time.Sleep(time.Second)
+			worker.handleConsumerError(consumer, "shipping cart event stream", err)
 		}
 	}
+}
+
+func (worker *shippingEventWorker) handleConsumerError(definition shippingConsumerDefinition, operation string, err error) {
+	if shippingConsumerMissing(err) {
+		if ensureErr := worker.ensureConsumer(definition); ensureErr != nil {
+			log.WithError(ensureErr).Errorf("%s failed after %v; durable reconciliation failed", operation, err)
+		} else {
+			log.WithError(err).Warnf("%s interrupted; durable reconciled", operation)
+		}
+	} else {
+		log.Errorf("%s failed: %v", operation, err)
+	}
+	time.Sleep(time.Second)
 }
 
 func shippingConsumerStopped(err error) bool {
@@ -297,6 +392,12 @@ func shippingConsumerStopped(err error) bool {
 		errors.Is(err, nats.ErrConnectionClosed) ||
 		errors.Is(err, nats.ErrBadSubscription) ||
 		errors.Is(err, nats.ErrSubscriptionClosed)
+}
+
+func shippingConsumerMissing(err error) bool {
+	return errors.Is(err, nats.ErrConsumerDeleted) ||
+		errors.Is(err, nats.ErrConsumerNotFound) ||
+		errors.Is(err, nats.ErrNoResponders)
 }
 
 func shippingMessageLog(message *nats.Msg, kind string) *logrus.Entry {

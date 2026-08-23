@@ -24,6 +24,63 @@ const (
 	otherTestShippingSecret = "shipping-provider-secret-bbbbbbbbbbbbbbbbbbbbbbbb"
 )
 
+type shippingJetStreamStub struct {
+	nats.JetStreamContext
+	info          *nats.ConsumerInfo
+	infoErr       error
+	addedStream   string
+	addedConfig   *nats.ConsumerConfig
+	updatedStream string
+	updatedConfig *nats.ConsumerConfig
+}
+
+func (stub *shippingJetStreamStub) ConsumerInfo(string, string, ...nats.JSOpt) (*nats.ConsumerInfo, error) {
+	return stub.info, stub.infoErr
+}
+
+func (stub *shippingJetStreamStub) AddConsumer(stream string, config *nats.ConsumerConfig, _ ...nats.JSOpt) (*nats.ConsumerInfo, error) {
+	copy := *config
+	stub.addedStream = stream
+	stub.addedConfig = &copy
+	return &nats.ConsumerInfo{Config: copy}, nil
+}
+
+func (stub *shippingJetStreamStub) UpdateConsumer(stream string, config *nats.ConsumerConfig, _ ...nats.JSOpt) (*nats.ConsumerInfo, error) {
+	copy := *config
+	stub.updatedStream = stream
+	stub.updatedConfig = &copy
+	return &nats.ConsumerInfo{Config: copy}, nil
+}
+
+func TestShippingCreatesConsumersBeforeBinding(t *testing.T) {
+	tests := []shippingConsumerDefinition{
+		shippingCartConsumerDefinition(),
+		shippingCommandConsumerDefinition(),
+	}
+	for _, definition := range tests {
+		t.Run(definition.durable, func(t *testing.T) {
+			stub := &shippingJetStreamStub{infoErr: nats.ErrConsumerNotFound}
+			worker := &shippingEventWorker{js: stub}
+			if err := worker.ensureConsumer(definition); err != nil {
+				t.Fatal(err)
+			}
+			config := stub.addedConfig
+			if stub.addedStream != definition.stream || config == nil {
+				t.Fatalf("consumer was not added to %s", definition.stream)
+			}
+			if config.Durable != definition.durable ||
+				config.FilterSubject != definition.filterSubject ||
+				config.DeliverPolicy != nats.DeliverAllPolicy ||
+				config.AckPolicy != nats.AckExplicitPolicy ||
+				config.AckWait != 30*time.Second ||
+				config.MaxDeliver != 10 ||
+				config.MaxAckPending != definition.maxPending {
+				t.Fatalf("unexpected consumer config: %+v", *config)
+			}
+		})
+	}
+}
+
 func TestShippingProcessingTime(t *testing.T) {
 	tests := []struct {
 		name  string

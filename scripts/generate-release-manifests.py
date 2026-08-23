@@ -51,11 +51,11 @@ DEFAULT_IMAGE_DIGESTS = {
     "emailservice": "1397bee807f4bb7eeea23875d1ca50ba6112be26bbfbd7b9e022f406d3793601",
     "frontend": "4eda7b934e29cf538caed621a278f80581523d0058cfef86c8751caeba31ca53",
     "loadgenerator": "c66a188ecf8bf7507bd3982a5fa50ae3e9497f3239248dd48b275fc2aee0adb3",
-    "messageoperationsservice": "07abbd1a93fd51c9092f347d3d34bb58bc5a848ece8524d2a092105968d12b1f",
+    "messageoperationsservice": "1ebf10cc6b203bb6c3ab284ec267ee62a1a32a6cc56bb1425efb23f61fa6f627",
     "paymentservice": "b765a01c0122f54f73648aecfc722e6e8e90506b58fb11f6f2e5c2151997b5b0",
     "productcatalogservice": "26d97784a6e105cf1586b2ff723772c583021491d5fa165ceaae6a3af12fe54d",
     "recommendationservice": "473b1be5bc7785e8775c9410ac899716991ea5878b8b74b97cc52f8d225098dc",
-    "shippingservice": "d8c1054bf40a9df1917249358c272239a7685f12f9ce625d5aa5d9e0f2a3aeba",
+    "shippingservice": "53c37d125e0cece352446f3677e9c06dd78545c4c0f4fd9f7941719514a61632",
     "storefrontprojectionservice": "903ee29cfbb52eba074d58f2079c96ceb51bc546bbebabc499105c956f8e43bb",
 }
 

@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -67,12 +68,14 @@ func connectNATS() (*nats.Conn, nats.JetStreamContext, error) {
 }
 
 func startAdvisoryConsumer(ctx context.Context, js nats.JetStreamContext, operations *operationsService, logger *slog.Logger) (*nats.Subscription, error) {
+	if err := ensureAdvisoryConsumer(js); err != nil {
+		return nil, err
+	}
 	subscription, err := js.PullSubscribe(advisorySubject, advisoryDurable,
-		nats.BindStream(advisoryStream), nats.ManualAck(), nats.AckExplicit(),
-		nats.DeliverAll(), nats.AckWait(30*time.Second), nats.MaxAckPending(256),
+		nats.Bind(advisoryStream, advisoryDurable),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("create advisory consumer: %w", err)
+		return nil, fmt.Errorf("bind advisory consumer: %w", err)
 	}
 	go func() {
 		for ctx.Err() == nil {
@@ -82,7 +85,15 @@ func startAdvisoryConsumer(ctx context.Context, js nats.JetStreamContext, operat
 			}
 			if fetchErr != nil {
 				if ctx.Err() == nil {
-					logger.Error("fetch max-delivery advisories", "error", fetchErr)
+					if advisoryConsumerMissing(fetchErr) {
+						if ensureErr := ensureAdvisoryConsumer(js); ensureErr != nil {
+							logger.Error("reconcile missing advisory consumer", "fetch_error", fetchErr, "error", ensureErr)
+						} else {
+							logger.Warn("advisory consumer was missing and has been recreated", "fetch_error", fetchErr)
+						}
+					} else {
+						logger.Error("fetch max-delivery advisories", "error", fetchErr)
+					}
 					time.Sleep(time.Second)
 				}
 				continue
@@ -106,6 +117,78 @@ func startAdvisoryConsumer(ctx context.Context, js nats.JetStreamContext, operat
 		}
 	}()
 	return subscription, nil
+}
+
+func ensureAdvisoryConsumer(js nats.JetStreamContext) error {
+	// Keep consumer ownership separate from the subscription so connection drain
+	// does not delete the durable and lose its advisory cursor.
+	config := &nats.ConsumerConfig{
+		Durable:       advisoryDurable,
+		DeliverPolicy: nats.DeliverAllPolicy,
+		AckPolicy:     nats.AckExplicitPolicy,
+		AckWait:       30 * time.Second,
+		MaxDeliver:    -1,
+		MaxAckPending: 256,
+		FilterSubject: advisorySubject,
+	}
+	for attempt := 0; attempt < 20; attempt++ {
+		info, err := js.ConsumerInfo(advisoryStream, advisoryDurable)
+		if errors.Is(err, nats.ErrConsumerNotFound) {
+			if _, addErr := js.AddConsumer(advisoryStream, config); addErr == nil {
+				return nil
+			} else if advisoryConsumerSetupRace(addErr) {
+				time.Sleep(time.Duration(attempt+1) * 10 * time.Millisecond)
+				continue
+			} else {
+				return fmt.Errorf("create advisory consumer: %w", addErr)
+			}
+		}
+		if err != nil {
+			return fmt.Errorf("inspect advisory consumer: %w", err)
+		}
+		if info.Config.FilterSubject == advisorySubject &&
+			info.Config.MaxAckPending == 256 &&
+			info.Config.AckPolicy == nats.AckExplicitPolicy &&
+			info.Config.AckWait == 30*time.Second &&
+			info.Config.MaxDeliver == -1 &&
+			info.Config.DeliverPolicy == nats.DeliverAllPolicy {
+			return nil
+		}
+		next := info.Config
+		next.FilterSubject = advisorySubject
+		next.FilterSubjects = nil
+		next.MaxAckPending = 256
+		next.AckPolicy = nats.AckExplicitPolicy
+		next.AckWait = 30 * time.Second
+		next.MaxDeliver = -1
+		next.DeliverPolicy = nats.DeliverAllPolicy
+		if _, updateErr := js.UpdateConsumer(advisoryStream, &next); updateErr == nil {
+			return nil
+		} else if advisoryConsumerSetupRace(updateErr) {
+			time.Sleep(time.Duration(attempt+1) * 10 * time.Millisecond)
+			continue
+		} else {
+			return fmt.Errorf("update advisory consumer: %w", updateErr)
+		}
+	}
+	return errors.New("advisory consumer setup conflicted too many times")
+}
+
+func advisoryConsumerSetupRace(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return errors.Is(err, nats.ErrConsumerNotFound) ||
+		strings.Contains(message, "consumer already exists") ||
+		strings.Contains(message, "consumer name already in use") ||
+		strings.Contains(message, "stream sequence")
+}
+
+func advisoryConsumerMissing(err error) bool {
+	return errors.Is(err, nats.ErrConsumerDeleted) ||
+		errors.Is(err, nats.ErrConsumerNotFound) ||
+		errors.Is(err, nats.ErrNoResponders)
 }
 
 func main() {

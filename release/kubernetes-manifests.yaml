@@ -1340,7 +1340,7 @@ spec:
             name: nats-credentials-messageoperationsservice
         - secretRef:
             name: messageoperations-admin-api
-        image: matslo123/messageoperationsservice:v0.4.0@sha256:07abbd1a93fd51c9092f347d3d34bb58bc5a848ece8524d2a092105968d12b1f
+        image: matslo123/messageoperationsservice:v0.4.0@sha256:1ebf10cc6b203bb6c3ab284ec267ee62a1a32a6cc56bb1425efb23f61fa6f627
         livenessProbe:
           failureThreshold: 6
           httpGet:
@@ -1833,7 +1833,7 @@ spec:
             name: nats-credentials-shippingservice
         - secretRef:
             name: global-application-secrets
-        image: matslo123/shippingservice:v0.4.0@sha256:d8c1054bf40a9df1917249358c272239a7685f12f9ce625d5aa5d9e0f2a3aeba
+        image: matslo123/shippingservice:v0.4.0@sha256:53c37d125e0cece352446f3677e9c06dd78545c4c0f4fd9f7941719514a61632
         livenessProbe:
           failureThreshold: 6
           httpGet:
