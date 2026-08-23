@@ -27,6 +27,7 @@ class BenchmarkConfigTest(unittest.TestCase):
             "https://metrics.example/snapshot", config.metrics_url
         )
         self.assertEqual("closed", config.workload)
+        self.assertEqual(30, config.saturation_step_seconds)
         self.assertTrue(config.collect_nats_metrics)
         self.assertEqual(
             config.warmup_seconds
@@ -193,6 +194,7 @@ class BenchmarkConfigTest(unittest.TestCase):
                 "workload": "saturation",
                 "duration_seconds": 120,
                 "saturation_max_rate": 1_000,
+                "saturation_step_seconds": 10,
             },
             "NATS",
         )
@@ -207,6 +209,50 @@ class BenchmarkConfigTest(unittest.TestCase):
                 for index in range(config.worker_count)
             ],
         )
+
+    def test_saturation_rung_duration_is_configurable(self):
+        config = BenchmarkConfig.from_request(
+            {
+                **self.URLS,
+                "workload": "saturation",
+                "duration_seconds": 120,
+                "saturation_step_seconds": 30,
+            },
+            "NATS",
+        )
+
+        self.assertEqual(4, config.saturation_step_count)
+        self.assertEqual(40, config.saturation_effective_max_rate)
+        with self.assertRaisesRegex(ConfigError, "between 10 and 300"):
+            BenchmarkConfig.from_request(
+                {
+                    **self.URLS,
+                    "workload": "saturation",
+                    "saturation_step_seconds": 5,
+                },
+                "NATS",
+            )
+
+    def test_saturation_defaults_reach_past_the_observed_knee(self):
+        config = BenchmarkConfig.from_request(
+            {**self.URLS, "workload": "saturation"},
+            "NATS",
+        )
+
+        self.assertEqual(600, config.duration_seconds)
+        self.assertEqual(30, config.saturation_step_seconds)
+        self.assertEqual(200, config.saturation_effective_max_rate)
+
+    def test_old_serialized_config_keeps_legacy_rung_duration(self):
+        config = BenchmarkConfig.from_dict(
+            {
+                **self.URLS,
+                "application_type": "NATS",
+                "workload": "saturation",
+            }
+        )
+
+        self.assertEqual(10, config.saturation_step_seconds)
 
     def test_nats_saturation_requires_frequent_pending_samples(self):
         with self.assertRaisesRegex(ConfigError, "no more than 5"):

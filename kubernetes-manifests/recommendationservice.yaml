@@ -73,6 +73,10 @@ spec:
           value: "true"
         - name: NATS_REQUIRED_SUBSCRIPTIONS
           value: "recommendation-catalog-v1,recommendation-cart-v1,recommendation-page-views-v1"
+        - name: NATS_CONSUMER_BATCH_SIZE
+          value: "32"
+        - name: NATS_CONSUMER_CONCURRENCY
+          value: "8"
         envFrom:
         - configMapRef:
             name: nats-client-config

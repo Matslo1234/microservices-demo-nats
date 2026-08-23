@@ -8,6 +8,25 @@ from standalone import config_from_args, parser
 
 
 class StandaloneTest(unittest.TestCase):
+    def test_saturation_uses_longer_default_duration(self) -> None:
+        arguments = parser().parse_args(
+            [
+                "--url",
+                "https://shop.example",
+                "--metrics-url",
+                "https://metrics.example/snapshot",
+                "--application-type",
+                "NATS",
+                "--workload",
+                "saturation",
+            ]
+        )
+
+        config = config_from_args(arguments)
+
+        self.assertEqual(600, config.duration_seconds)
+        self.assertEqual(30, config.saturation_step_seconds)
+
     def test_required_urls_are_used_by_workers(self) -> None:
         arguments = parser().parse_args(
             [

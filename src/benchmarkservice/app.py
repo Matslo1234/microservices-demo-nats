@@ -70,6 +70,8 @@ HTML = r"""<!doctype html>
       <label>Open-loop orders/s<input name="arrival_rate" type="number" min=".01" step=".01" value="1"></label>
       <label>Saturation maximum orders/s<input name="saturation_max_rate"
         type="number" min="10" step="10" value="1000"></label>
+      <label>Saturation rung (seconds)<input name="saturation_step_seconds"
+        type="number" min="10" max="300" value="30"></label>
       <label>Outcome timeout (seconds)<input name="outcome_timeout_seconds" type="number" min="1" value="30"></label>
       <label>Settlement timeout (seconds)<input name="settlement_timeout_seconds" type="number" min="1" value="60"></label>
       <label>Resource sample interval<input name="resource_sample_interval_seconds" type="number" min="1" value="5"></label>
@@ -84,7 +86,7 @@ HTML = r"""<!doctype html>
     </div><div class="actions"><button id="start" type="submit">Start benchmark</button>
       <button id="stop" class="danger" type="button" disabled>Stop active run</button></div>
     <p class="muted">The saturation ladder starts at 10 orders/s and adds 10 every
-      10 seconds for the complete steady interval, holding at the maximum rate once
+      configured rung interval (30 seconds by default), holding at the maximum rate once
       reached. Backlog growth and falling goodput are recorded without ending the run.
       Re-runs use the same settings and produce separate results. Keep this browser tab
       open until the sequence finishes.</p>
@@ -105,10 +107,19 @@ const selectedRuns=new Set();
 const message=document.querySelector("#message"), startButton=document.querySelector("#start"),
   stopButton=document.querySelector("#stop"), rerunCount=document.querySelector("#rerun-count"),
   rerunDelay=document.querySelector("#rerun-delay"),
+  workload=document.querySelector('[name="workload"]'),
+  duration=document.querySelector('[name="duration_seconds"]'),
   downloadSelectedButton=document.querySelector("#download-selected"),
   downloadAllButton=document.querySelector("#download-all");
+let previousWorkload=workload.value;
+workload.addEventListener("change",()=>{
+  if(workload.value==="saturation"&&duration.value==="120") duration.value="600";
+  if(previousWorkload==="saturation"&&workload.value!=="saturation"&&duration.value==="600")
+    duration.value="120";
+  previousWorkload=workload.value;
+});
 const fields=["warmup_seconds","duration_seconds","drain_seconds","users","spawn_rate",
-  "arrival_rate","saturation_max_rate","outcome_timeout_seconds","settlement_timeout_seconds",
+  "arrival_rate","saturation_max_rate","saturation_step_seconds","outcome_timeout_seconds","settlement_timeout_seconds",
   "resource_sample_interval_seconds","seed"];
 async function api(path,options={}) {
   const response=await fetch(path,options), data=await response.json().catch(()=>({error:response.statusText}));

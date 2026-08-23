@@ -21,20 +21,23 @@ var (
 )
 
 type projectionConfig struct {
-	regionID          string
-	regionKey         string
-	k8sClusterName    string
-	natsClusterName   string
-	streamOwnerRegion string
-	eventStream       string
-	durable           string
-	productsBucket    string
-	cartsBucket       string
-	contextBucket     string
-	ordersBucket      string
-	operationsBucket  string
-	livePrefix        string
-	catchupTimeout    time.Duration
+	regionID            string
+	regionKey           string
+	k8sClusterName      string
+	natsClusterName     string
+	streamOwnerRegion   string
+	eventStream         string
+	durable             string
+	productsBucket      string
+	cartsBucket         string
+	contextBucket       string
+	ordersBucket        string
+	operationsBucket    string
+	livePrefix          string
+	catchupTimeout      time.Duration
+	queryConcurrency    int
+	cartCacheEntries    int
+	contextCacheEntries int
 }
 
 func requiredEnvironment(name string) (string, error) {
@@ -97,6 +100,18 @@ func loadProjectionConfig() (projectionConfig, error) {
 	if err != nil {
 		return projectionConfig{}, err
 	}
+	queryConcurrency, err := boundedEnvInt("STOREFRONT_QUERY_CONCURRENCY", 8, 1, 64)
+	if err != nil {
+		return projectionConfig{}, err
+	}
+	cartCacheEntries, err := boundedEnvInt("STOREFRONT_CART_CACHE_ENTRIES", 32768, 1, 262144)
+	if err != nil {
+		return projectionConfig{}, err
+	}
+	contextCacheEntries, err := boundedEnvInt("STOREFRONT_CONTEXT_CACHE_ENTRIES", 65536, 1, 524288)
+	if err != nil {
+		return projectionConfig{}, err
+	}
 	ownerRegion := strings.TrimSpace(os.Getenv("STREAM_OWNER_REGION"))
 	if ownerRegion == "" {
 		ownerRegion = values["REGION_ID"]
@@ -105,21 +120,39 @@ func loadProjectionConfig() (projectionConfig, error) {
 		return projectionConfig{}, fmt.Errorf("STREAM_OWNER_REGION must be a stable lower-case DNS label")
 	}
 	return projectionConfig{
-		regionID:          values["REGION_ID"],
-		regionKey:         values["REGION_KEY"],
-		k8sClusterName:    values["K8S_CLUSTER_NAME"],
-		natsClusterName:   values["NATS_CLUSTER_NAME"],
-		streamOwnerRegion: ownerRegion,
-		eventStream:       values["STOREFRONT_EVENT_STREAM"],
-		durable:           values["STOREFRONT_PROJECTION_DURABLE"],
-		productsBucket:    values["STOREFRONT_PRODUCTS_BUCKET"],
-		cartsBucket:       values["STOREFRONT_CARTS_BUCKET"],
-		contextBucket:     values["STOREFRONT_CONTEXT_BUCKET"],
-		ordersBucket:      values["STOREFRONT_ORDERS_BUCKET"],
-		operationsBucket:  values["STOREFRONT_OPERATIONS_BUCKET"],
-		livePrefix:        values["LIVE_OPERATION_PREFIX"],
-		catchupTimeout:    catchupTimeout,
+		regionID:            values["REGION_ID"],
+		regionKey:           values["REGION_KEY"],
+		k8sClusterName:      values["K8S_CLUSTER_NAME"],
+		natsClusterName:     values["NATS_CLUSTER_NAME"],
+		streamOwnerRegion:   ownerRegion,
+		eventStream:         values["STOREFRONT_EVENT_STREAM"],
+		durable:             values["STOREFRONT_PROJECTION_DURABLE"],
+		productsBucket:      values["STOREFRONT_PRODUCTS_BUCKET"],
+		cartsBucket:         values["STOREFRONT_CARTS_BUCKET"],
+		contextBucket:       values["STOREFRONT_CONTEXT_BUCKET"],
+		ordersBucket:        values["STOREFRONT_ORDERS_BUCKET"],
+		operationsBucket:    values["STOREFRONT_OPERATIONS_BUCKET"],
+		livePrefix:          values["LIVE_OPERATION_PREFIX"],
+		catchupTimeout:      catchupTimeout,
+		queryConcurrency:    queryConcurrency,
+		cartCacheEntries:    cartCacheEntries,
+		contextCacheEntries: contextCacheEntries,
 	}, nil
+}
+
+func boundedEnvInt(name string, fallback, minimum, maximum int) (int, error) {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, fmt.Errorf("invalid %s: %w", name, err)
+	}
+	if parsed < minimum || parsed > maximum {
+		return 0, fmt.Errorf("%s must be between %d and %d", name, minimum, maximum)
+	}
+	return parsed, nil
 }
 
 func envDuration(name string, fallback time.Duration) (time.Duration, error) {

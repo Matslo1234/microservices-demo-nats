@@ -15,7 +15,8 @@ MAX_OPEN_ARRIVAL_RATE_PER_WORKER = 100.0
 MAX_CLOSED_USERS_PER_WORKER = 1_000
 SATURATION_START_RATE = 10.0
 SATURATION_STEP_RATE = 10.0
-SATURATION_STEP_SECONDS = 10
+SATURATION_STEP_SECONDS = 30
+LEGACY_SATURATION_STEP_SECONDS = 10
 
 
 class ConfigError(ValueError):
@@ -104,6 +105,7 @@ class BenchmarkConfig:
     spawn_rate: float
     arrival_rate: float
     saturation_max_rate: float
+    saturation_step_seconds: int
     outcome_timeout_seconds: float
     settlement_timeout_seconds: float
     resource_sample_interval_seconds: float
@@ -177,7 +179,13 @@ class BenchmarkConfig:
             metrics_url=metrics_url,
             workload=workload,
             warmup_seconds=_integer(values, "warmup_seconds", 30, 0, 3600),
-            duration_seconds=_integer(values, "duration_seconds", 120, 1, 3600),
+            duration_seconds=_integer(
+                values,
+                "duration_seconds",
+                600 if workload == "saturation" else 120,
+                1,
+                3600,
+            ),
             drain_seconds=_integer(values, "drain_seconds", 60, 1, 1800),
             users=_integer(values, "users", 10, 1, 10_000),
             spawn_rate=_number(
@@ -195,6 +203,13 @@ class BenchmarkConfig:
                 SATURATION_START_RATE,
                 10_000.0,
             ),
+            saturation_step_seconds=_integer(
+                values,
+                "saturation_step_seconds",
+                SATURATION_STEP_SECONDS,
+                10,
+                300,
+            ),
             outcome_timeout_seconds=_number(
                 values, "outcome_timeout_seconds", 30.0, 1.0, 1800.0
             ),
@@ -211,6 +226,10 @@ class BenchmarkConfig:
 
     @classmethod
     def from_dict(cls, values: Mapping[str, Any]) -> "BenchmarkConfig":
+        values = dict(values)
+        values.setdefault(
+            "saturation_step_seconds", LEGACY_SATURATION_STEP_SECONDS
+        )
         return cls.from_request(
             values,
             str(values.get("application_type", "")),
@@ -220,6 +239,10 @@ class BenchmarkConfig:
     def from_worker_dict(
         cls, values: Mapping[str, Any]
     ) -> "BenchmarkConfig":
+        values = dict(values)
+        values.setdefault(
+            "saturation_step_seconds", LEGACY_SATURATION_STEP_SECONDS
+        )
         return cls._from_values(
             values,
             str(values.get("application_type", "")),
@@ -255,7 +278,9 @@ class BenchmarkConfig:
 
     @property
     def saturation_step_count(self) -> int:
-        return math.ceil(self.duration_seconds / SATURATION_STEP_SECONDS)
+        return math.ceil(
+            self.duration_seconds / self.saturation_step_seconds
+        )
 
     @property
     def saturation_effective_max_rate(self) -> float:

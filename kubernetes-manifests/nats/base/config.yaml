@@ -231,7 +231,8 @@ data:
             permissions: {
               publish: [
                 "$JS.API.>", "$JS.FC.>", "__NATS_BENCHMARK_RUNS_SUBJECT__",
-                "__NATS_BENCHMARK_ARTIFACTS_SUBJECT__"
+                "__NATS_BENCHMARK_ARTIFACTS_SUBJECT__", "$SRV.STATS",
+                "$SRV.STATS.>"
               ],
               subscribe: [
                 "_INBOX.>", "__NATS_BENCHMARK_RUNS_SUBJECT__",

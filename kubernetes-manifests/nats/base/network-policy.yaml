@@ -28,6 +28,7 @@ spec:
           operator: In
           values:
           - adservice
+          - benchmarkmetrics
           - benchmark-runner
           - benchmarkservice
           - cartservice

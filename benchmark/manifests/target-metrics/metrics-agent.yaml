@@ -71,6 +71,11 @@ spec:
               name: benchmark-metrics-auth
               key: BENCHMARK_METRICS_TOKEN
               optional: true
+        envFrom:
+        - configMapRef:
+            name: nats-client-config
+        - secretRef:
+            name: nats-credentials-benchmarkservice
         ports:
         - name: http
           containerPort: 8080
@@ -98,6 +103,14 @@ spec:
           capabilities:
             drop: ["ALL"]
           readOnlyRootFilesystem: true
+        volumeMounts:
+        - name: nats-ca
+          mountPath: /etc/nats-ca
+          readOnly: true
+      volumes:
+      - name: nats-ca
+        configMap:
+          name: nats-ca
 ---
 apiVersion: v1
 kind: Service
@@ -150,6 +163,8 @@ spec:
         matchLabels:
           app.kubernetes.io/name: nats
     ports:
+    - protocol: TCP
+      port: 4222
     - protocol: TCP
       port: 7777
   - to:

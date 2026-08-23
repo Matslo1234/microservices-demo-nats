@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"sort"
 	"strconv"
 	"sync"
@@ -284,6 +285,42 @@ func TestProductQueryCacheFallsBackForAJustCreatedKey(t *testing.T) {
 	if cache.hits.Load() != 1 || cache.misses.Load() != 1 {
 		t.Fatalf("unexpected cache counters: hits=%d misses=%d",
 			cache.hits.Load(), cache.misses.Load())
+	}
+}
+
+func TestCachedProjectionMissDoesNotReadAuthoritativeKV(t *testing.T) {
+	entries := newMemoryKV()
+	cache, err := newProjectionReadCache(entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(cache.Close)
+	entries.resetGetCount()
+
+	if _, err := cache.Cached("missing"); err != nats.ErrKeyNotFound {
+		t.Fatalf("unexpected cached miss error: %v", err)
+	}
+	if gets := entries.getCount(); gets != 0 {
+		t.Fatalf("cached miss performed %d authoritative reads", gets)
+	}
+}
+
+func TestBoundedProjectionCacheCapsRetainedEntries(t *testing.T) {
+	entries := newMemoryKV()
+	for index := 0; index < 5; index++ {
+		storeJSON(t, entries, fmt.Sprintf("key-%d", index), map[string]int{"value": index})
+	}
+	cache, err := newBoundedProjectionReadCache(entries, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(cache.Close)
+
+	cache.mu.RLock()
+	retained := len(cache.entries)
+	cache.mu.RUnlock()
+	if retained != 2 {
+		t.Fatalf("bounded cache retained %d entries, want 2", retained)
 	}
 }
 

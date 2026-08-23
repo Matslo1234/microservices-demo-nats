@@ -13,6 +13,7 @@ from reporting import (
     capacity_assessment,
     nats_summary,
     percentile,
+    resource_summary,
 )
 
 
@@ -105,6 +106,9 @@ class ReportingTest(unittest.TestCase):
                     "gnatsd_varz_jetstream_stats_storage", 20
                 ),
             ],
+            "nats_micro_endpoints": [
+                self._micro_endpoint(10, 1_000_000, 2),
+            ],
         }
         second = {
             "phase": "steady",
@@ -134,6 +138,9 @@ class ReportingTest(unittest.TestCase):
                     "gnatsd_varz_jetstream_stats_storage", 25
                 ),
             ],
+            "nats_micro_endpoints": [
+                self._micro_endpoint(14, 3_000_000, 5),
+            ],
         }
 
         summary = nats_summary([first, second])
@@ -142,6 +149,45 @@ class ReportingTest(unittest.TestCase):
         self.assertEqual(-2, summary["consumer_pending"]["change"])
         self.assertEqual(30, summary["storage_bytes"]["first"])
         self.assertEqual(40, summary["storage_bytes"]["last"])
+        endpoint = summary["micro_endpoints"]["by_endpoint"][
+            "PaymentTokenization/tokenize"
+        ]
+        self.assertEqual(4, endpoint["requests"])
+        self.assertEqual(0.0005, endpoint["average_processing_seconds"])
+        self.assertEqual(5, endpoint["max_pending_requests"])
+
+    def test_resource_summary_reports_throttling_and_disk_latency(self) -> None:
+        first = self._resource(1, 1_000_000_000, 100, 10, 20)
+        second = self._resource(3, 2_000_000_000, 100, 10, 20)
+        first_pod = first["pods"]["default/frontend-1"]
+        second_pod = second["pods"]["default/frontend-1"]
+        first_pod.update(
+            {
+                "cpu_cfs_periods_total": 100,
+                "cpu_cfs_throttled_periods_total": 10,
+                "cpu_cfs_throttled_seconds_total": 1.0,
+                "disk_io_operations_total": 20,
+                "disk_io_time_seconds_total": 2.0,
+                "disk_io_time_weighted_seconds_total": 0.2,
+            }
+        )
+        second_pod.update(
+            {
+                "cpu_cfs_periods_total": 150,
+                "cpu_cfs_throttled_periods_total": 20,
+                "cpu_cfs_throttled_seconds_total": 1.5,
+                "disk_io_operations_total": 40,
+                "disk_io_time_seconds_total": 2.4,
+                "disk_io_time_weighted_seconds_total": 0.5,
+            }
+        )
+
+        summary = resource_summary([first, second])
+
+        self.assertEqual(0.5, summary["cpu_throttled_seconds"])
+        self.assertEqual(0.2, summary["cpu_throttling_ratio"])
+        self.assertEqual(20, summary["disk_io_operations"])
+        self.assertEqual(0.015, summary["average_disk_latency_seconds"])
 
     def test_generator_saturation_is_reported_as_unsustainable(self) -> None:
         saturated = self._business(
@@ -497,6 +543,21 @@ class ReportingTest(unittest.TestCase):
         if consumer is not None:
             labels["consumer_name"] = consumer
         return {"name": name, "value": value, "labels": labels}
+
+    @staticmethod
+    def _micro_endpoint(
+        requests: int, processing_nanoseconds: int, pending: int
+    ) -> dict:
+        return {
+            "service_name": "PaymentTokenization",
+            "service_id": "payment-a",
+            "endpoint_name": "tokenize",
+            "subject": "boutique.qry.payment.tokenize.v1",
+            "num_requests": requests,
+            "num_errors": 0,
+            "processing_time_nanoseconds": processing_nanoseconds,
+            "pending_requests": pending,
+        }
 
 
 if __name__ == "__main__":

@@ -19,12 +19,14 @@ type projectionWatchReader interface {
 	WatchAll(...nats.WatchOpt) (nats.KeyWatcher, error)
 }
 
-// projectionReadCache mirrors one KV bucket through its ordered watch stream.
-// A miss still consults the authoritative bucket so a just-created key is not
-// temporarily reported as absent while its watch update is in flight.
+// projectionReadCache mirrors a KV bucket through its ordered watch stream.
+// Get falls back to the authoritative bucket on a miss. Cached deliberately
+// does not: it is used for latency-tolerant storefront context where an empty
+// or briefly stale value is preferable to a remote read on the request path.
 type projectionReadCache struct {
-	source  projectionReader
-	watcher nats.KeyWatcher
+	source     projectionReader
+	watcher    nats.KeyWatcher
+	maxEntries int
 
 	mu        sync.RWMutex
 	entries   map[string]cachedProjectionEntry
@@ -44,6 +46,18 @@ type cachedProjectionEntry struct {
 	operation nats.KeyValueOp
 }
 
+type cachedOnlyProjectionReader struct {
+	cache *projectionReadCache
+}
+
+func (reader cachedOnlyProjectionReader) Get(key string) (nats.KeyValueEntry, error) {
+	return reader.cache.Cached(key)
+}
+
+func (reader cachedOnlyProjectionReader) Keys(options ...nats.WatchOpt) ([]string, error) {
+	return reader.cache.Keys(options...)
+}
+
 func (entry cachedProjectionEntry) Bucket() string             { return entry.bucket }
 func (entry cachedProjectionEntry) Key() string                { return entry.key }
 func (entry cachedProjectionEntry) Value() []byte              { return entry.value }
@@ -53,12 +67,16 @@ func (entry cachedProjectionEntry) Delta() uint64              { return entry.de
 func (entry cachedProjectionEntry) Operation() nats.KeyValueOp { return entry.operation }
 
 func newProjectionReadCache(source projectionWatchReader) (*projectionReadCache, error) {
+	return newBoundedProjectionReadCache(source, 0)
+}
+
+func newBoundedProjectionReadCache(source projectionWatchReader, maxEntries int) (*projectionReadCache, error) {
 	watcher, err := source.WatchAll()
 	if err != nil {
 		return nil, err
 	}
 	cache := &projectionReadCache{
-		source: source, watcher: watcher,
+		source: source, watcher: watcher, maxEntries: maxEntries,
 		entries:   make(map[string]cachedProjectionEntry),
 		revisions: make(map[string]uint64),
 	}
@@ -69,7 +87,7 @@ func newProjectionReadCache(source projectionWatchReader) (*projectionReadCache,
 		case entry, ok := <-updates:
 			if !ok {
 				_ = watcher.Stop()
-				return nil, fmt.Errorf("product query cache watch closed during initialization")
+				return nil, fmt.Errorf("projection query cache watch closed during initialization")
 			}
 			if entry == nil {
 				select {
@@ -117,7 +135,7 @@ func (cache *projectionReadCache) follow(
 				continue
 			}
 			if watchErr != nil {
-				log.Printf("product query cache watch failed: %v", watchErr)
+				log.Printf("projection query cache watch failed: %v", watchErr)
 			}
 		}
 	}
@@ -134,6 +152,14 @@ func (cache *projectionReadCache) apply(entry nats.KeyValueEntry) {
 	if entry.Operation() == nats.KeyValueDelete || entry.Operation() == nats.KeyValuePurge {
 		delete(cache.entries, entry.Key())
 		return
+	}
+	if _, exists := cache.entries[entry.Key()]; !exists &&
+		cache.maxEntries > 0 && len(cache.entries) >= cache.maxEntries {
+		for key := range cache.entries {
+			delete(cache.entries, key)
+			delete(cache.revisions, key)
+			break
+		}
 	}
 	cache.entries[entry.Key()] = copyProjectionEntry(entry)
 }
@@ -171,6 +197,18 @@ func (cache *projectionReadCache) Get(key string) (nats.KeyValueEntry, error) {
 	return entry, nil
 }
 
+func (cache *projectionReadCache) Cached(key string) (nats.KeyValueEntry, error) {
+	cache.mu.RLock()
+	entry, ok := cache.entries[key]
+	cache.mu.RUnlock()
+	if !ok {
+		cache.misses.Add(1)
+		return nil, nats.ErrKeyNotFound
+	}
+	cache.hits.Add(1)
+	return entry, nil
+}
+
 func (cache *projectionReadCache) Keys(...nats.WatchOpt) ([]string, error) {
 	cache.mu.RLock()
 	keys := make([]string, 0, len(cache.entries))
@@ -190,7 +228,7 @@ func (cache *projectionReadCache) Close() {
 		if err := cache.watcher.Stop(); err != nil &&
 			err != nats.ErrBadSubscription &&
 			err != nats.ErrConnectionClosed {
-			log.Printf("product query cache stop failed: %v", err)
+			log.Printf("projection query cache stop failed: %v", err)
 		}
 	})
 }

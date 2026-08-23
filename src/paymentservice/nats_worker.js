@@ -333,7 +333,7 @@ function createTokenBatcher(keyring) {
     buffered = [];
     processTokenBatch(batch, keyring);
   };
-  return entry => {
+  const enqueue = entry => {
     buffered.push(entry);
     if (buffered.length >= TOKEN_BATCH_SIZE) {
       flush();
@@ -341,6 +341,8 @@ function createTokenBatcher(keyring) {
       flushTimer = setTimeout(flush, TOKEN_BATCH_DELAY_MS);
     }
   };
+  enqueue.pending = () => buffered.length;
+  return enqueue;
 }
 
 async function registerTokenizationService(nc, keyring) {
@@ -350,6 +352,7 @@ async function registerTokenizationService(nc, keyring) {
     version: '1.0.0',
     description: 'Ephemeral payment card tokenization',
     queue: 'payment-tokenize-v1',
+    statsHandler: async () => ({pending_requests: enqueueTokenization.pending()}),
   });
   let endpoint;
   try {

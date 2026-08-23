@@ -33,11 +33,16 @@ import java.security.cert.Certificate;
 import java.security.cert.CertificateFactory;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.TrustManagerFactory;
 import org.apache.logging.log4j.LogManager;
@@ -54,7 +59,10 @@ final class NatsEventWorker implements AutoCloseable {
   private final AdService service;
   private final boolean required;
   private final AtomicBoolean running = new AtomicBoolean();
+  private int batchSize;
+  private int concurrency;
   private Connection connection;
+  private ExecutorService eventExecutor;
   private Thread thread;
 
   NatsEventWorker(AdService service) {
@@ -78,6 +86,19 @@ final class NatsEventWorker implements AutoCloseable {
         throw new IOException(name + " is required when NATS_REQUIRED=true");
       }
     }
+    batchSize = boundedInteger("NATS_CONSUMER_BATCH_SIZE", 32, 1, 256);
+    concurrency = boundedInteger("NATS_CONSUMER_CONCURRENCY", 8, 1, 64);
+    AtomicInteger workerNumber = new AtomicInteger();
+    eventExecutor =
+        Executors.newFixedThreadPool(
+            concurrency,
+            task -> {
+              Thread worker =
+                  new Thread(
+                      task, "adservice-nats-page-view-worker-" + workerNumber.incrementAndGet());
+              worker.setDaemon(true);
+              return worker;
+            });
     running.set(true);
     thread = new Thread(this::connectAndConsume, "adservice-nats-page-views");
     thread.setDaemon(true);
@@ -115,14 +136,15 @@ final class NatsEventWorker implements AutoCloseable {
                 .maxDeliver(10)
                 .build();
         PullSubscribeOptions subscribeOptions =
-            PullSubscribeOptions.builder()
-                .stream("BOUTIQUE_EVENTS")
+            PullSubscribeOptions.builder().stream("BOUTIQUE_EVENTS")
                 .durable(DURABLE)
                 .configuration(consumer)
                 .build();
-        JetStreamSubscription subscription =
-            jetStream.subscribe(PAGE_SUBJECT, subscribeOptions);
-        logger.info("NATS page-view consumer is ready");
+        JetStreamSubscription subscription = jetStream.subscribe(PAGE_SUBJECT, subscribeOptions);
+        logger.info(
+            "NATS page-view consumer is ready batch_size={} concurrency={}",
+            batchSize,
+            concurrency);
         consume(jetStream, subscription);
       } catch (InterruptedException exception) {
         if (!running.get()) {
@@ -165,57 +187,64 @@ final class NatsEventWorker implements AutoCloseable {
   private void consume(JetStream jetStream, JetStreamSubscription subscription) {
     while (running.get()) {
       try {
-        Iterator<Message> messages = subscription.iterate(32, Duration.ofSeconds(1));
+        Iterator<Message> messages = subscription.iterate(batchSize, Duration.ofSeconds(1));
+        List<Future<?>> processing = new ArrayList<>();
         while (running.get() && messages.hasNext()) {
           Message message = messages.next();
-          ThreadContext.put("correlation_id", "unknown");
-          ThreadContext.put("message_id", "unknown");
-          MessageEnvelope source = null;
-          Exception decodeException = null;
-          try {
-            source = MessageEnvelope.parseFrom(message.getData());
-            if (!source.getCorrelationId().isBlank()) {
-              ThreadContext.put("correlation_id", source.getCorrelationId());
-            }
-            if (!source.getMessageId().isBlank()) {
-              ThreadContext.put("message_id", source.getMessageId());
-            }
-          } catch (Exception exception) {
-            decodeException = exception;
-          }
-          logger.debug(
-              "NATS event received topic={} message_id={} correlation_id={}",
-              message.getSubject(),
-              ThreadContext.get("message_id"),
-              ThreadContext.get("correlation_id"));
-          Telemetry.MessageSpan telemetry =
-              Telemetry.consumer(source, message.getSubject(), "event");
-          try {
-            if (decodeException != null) {
-              throw decodeException;
-            }
-            handle(jetStream, source);
-            message.ack();
-          } catch (Exception exception) {
-            telemetry.recordError(exception);
-            logger.warn(
-                "page-view event processing failed topic={} message_id={} correlation_id={}",
-                message.getSubject(),
-                ThreadContext.get("message_id"),
-                ThreadContext.get("correlation_id"),
-                exception);
-            message.nakWithDelay(Duration.ofSeconds(1));
-          } finally {
-            telemetry.close();
-            ThreadContext.remove("correlation_id");
-            ThreadContext.remove("message_id");
-          }
+          processing.add(eventExecutor.submit(() -> processMessage(jetStream, message)));
+        }
+        for (Future<?> task : processing) {
+          task.get();
         }
       } catch (Exception exception) {
         if (running.get()) {
           logger.warn("failed to fetch page-view events", exception);
         }
       }
+    }
+  }
+
+  private void processMessage(JetStream jetStream, Message message) {
+    ThreadContext.put("correlation_id", "unknown");
+    ThreadContext.put("message_id", "unknown");
+    MessageEnvelope source = null;
+    Exception decodeException = null;
+    try {
+      source = MessageEnvelope.parseFrom(message.getData());
+      if (!source.getCorrelationId().isBlank()) {
+        ThreadContext.put("correlation_id", source.getCorrelationId());
+      }
+      if (!source.getMessageId().isBlank()) {
+        ThreadContext.put("message_id", source.getMessageId());
+      }
+    } catch (Exception exception) {
+      decodeException = exception;
+    }
+    logger.debug(
+        "NATS event received topic={} message_id={} correlation_id={}",
+        message.getSubject(),
+        ThreadContext.get("message_id"),
+        ThreadContext.get("correlation_id"));
+    Telemetry.MessageSpan telemetry = Telemetry.consumer(source, message.getSubject(), "event");
+    try {
+      if (decodeException != null) {
+        throw decodeException;
+      }
+      handle(jetStream, source);
+      message.ack();
+    } catch (Exception exception) {
+      telemetry.recordError(exception);
+      logger.warn(
+          "page-view event processing failed topic={} message_id={} correlation_id={}",
+          message.getSubject(),
+          ThreadContext.get("message_id"),
+          ThreadContext.get("correlation_id"),
+          exception);
+      message.nakWithDelay(Duration.ofSeconds(1));
+    } finally {
+      telemetry.close();
+      ThreadContext.remove("correlation_id");
+      ThreadContext.remove("message_id");
     }
   }
 
@@ -235,8 +264,7 @@ final class NatsEventWorker implements AutoCloseable {
             : Instant.EPOCH;
     List<Ad> selected =
         service.selectAds(
-            pageView.getCategoryIdsList(),
-            seed(source.getMessageId() + "\0" + CONFIG_REVISION));
+            pageView.getCategoryIdsList(), seed(source.getMessageId() + "\0" + CONFIG_REVISION));
     AdSelectionGeneratedEvent.Builder payload =
         AdSelectionGeneratedEvent.newBuilder()
             .setSessionId(pageView.getSessionId())
@@ -251,11 +279,7 @@ final class NatsEventWorker implements AutoCloseable {
     }
     String messageId =
         UUID.nameUUIDFromBytes(
-                (RESULT_SUBJECT
-                        + "\0"
-                        + source.getMessageId()
-                        + "\0"
-                        + CONFIG_REVISION)
+                (RESULT_SUBJECT + "\0" + source.getMessageId() + "\0" + CONFIG_REVISION)
                     .getBytes(StandardCharsets.UTF_8))
             .toString();
     MessageEnvelope.Builder result =
@@ -286,12 +310,16 @@ final class NatsEventWorker implements AutoCloseable {
   }
 
   private static long seed(String messageId) throws Exception {
-    byte[] digest = MessageDigest.getInstance("SHA-256").digest(messageId.getBytes(StandardCharsets.UTF_8));
+    byte[] digest =
+        MessageDigest.getInstance("SHA-256").digest(messageId.getBytes(StandardCharsets.UTF_8));
     return ByteBuffer.wrap(digest).getLong();
   }
 
   private static Timestamp timestamp(Instant instant) {
-    return Timestamp.newBuilder().setSeconds(instant.getEpochSecond()).setNanos(instant.getNano()).build();
+    return Timestamp.newBuilder()
+        .setSeconds(instant.getEpochSecond())
+        .setNanos(instant.getNano())
+        .build();
   }
 
   private static SSLContext trustContext(String caFile) throws Exception {
@@ -333,11 +361,30 @@ final class NatsEventWorker implements AutoCloseable {
     return value == null || value.isBlank() ? fallback : Integer.parseInt(value);
   }
 
+  private static int boundedInteger(String name, int fallback, int minimum, int maximum) {
+    int value = integer(name, fallback);
+    if (value < minimum || value > maximum) {
+      throw new IllegalArgumentException(name + " must be between " + minimum + " and " + maximum);
+    }
+    return value;
+  }
+
   @Override
   public void close() {
     running.set(false);
     if (thread != null) {
       thread.interrupt();
+    }
+    if (eventExecutor != null) {
+      eventExecutor.shutdown();
+      try {
+        if (!eventExecutor.awaitTermination(10, TimeUnit.SECONDS)) {
+          eventExecutor.shutdownNow();
+        }
+      } catch (InterruptedException exception) {
+        eventExecutor.shutdownNow();
+        Thread.currentThread().interrupt();
+      }
     }
     if (connection != null) {
       try {

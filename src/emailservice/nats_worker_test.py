@@ -2,6 +2,7 @@
 # Copyright 2026 Google LLC
 # Licensed under the Apache License, Version 2.0 (the "License");
 
+import asyncio
 import logging
 import os
 import unittest
@@ -20,6 +21,7 @@ from nats_worker import (
     SENT_SUBJECT,
     _build_outcome,
     _fetch_message,
+    _process_messages,
     _process_message,
     _provider_idempotency_key,
     _ready,
@@ -233,6 +235,22 @@ class FetchRecoveryTest(unittest.IsolatedAsyncioTestCase):
         [{"batch": 1, "timeout": 1}, {"batch": 1, "timeout": 1}],
         subscription.requests)
     self.assertTrue(_ready.is_set())
+
+  async def test_batch_processing_is_concurrency_bounded(self):
+    active = 0
+    maximum_active = 0
+
+    async def process(*unused):
+      nonlocal active, maximum_active
+      active += 1
+      maximum_active = max(maximum_active, active)
+      await asyncio.sleep(0)
+      active -= 1
+
+    with mock.patch("nats_worker._process_message", side_effect=process):
+      await _process_messages([object(), object(), object()], None, "", 2)
+
+    self.assertEqual(2, maximum_active)
 
 
 class LoggerConfigurationTest(unittest.TestCase):

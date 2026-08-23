@@ -12,6 +12,8 @@ import (
 	"log/slog"
 	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	hipstershop "github.com/GoogleCloudPlatform/microservices-demo/hipstershop"
@@ -72,11 +74,24 @@ type queryResponse struct {
 type queryHandler func(queryRequest) (queryResponse, error)
 
 func (p *projector) registerQueries(nc *nats.Conn) (micro.Service, int, error) {
+	endpointPending := make(map[string]*atomic.Int64)
+	var endpointPendingMutex sync.RWMutex
 	service, err := micro.AddService(nc, micro.Config{
 		Name:        "StorefrontProjection",
 		Version:     "1.0.0",
 		Description: "Event-built storefront read model",
 		QueueGroup:  "storefront-projection-v1",
+		StatsHandler: func(endpoint *micro.Endpoint) any {
+			endpointPendingMutex.RLock()
+			pending, ok := endpointPending[endpoint.Name]
+			endpointPendingMutex.RUnlock()
+			if !ok {
+				return map[string]int64{"pending_requests": 0}
+			}
+			return map[string]int64{
+				"pending_requests": pending.Load(),
+			}
+		},
 	})
 	if err != nil {
 		return nil, 0, fmt.Errorf("register NATS service: %w", err)
@@ -92,10 +107,15 @@ func (p *projector) registerQueries(nc *nats.Conn) (micro.Service, int, error) {
 		"operation":    p.operationQuery,
 		"order":        p.orderQuery,
 	}
+	concurrency := p.config.queryConcurrency
+	if concurrency < 1 {
+		concurrency = 1
+	}
+	endpointCount := 0
 	for name, handler := range handlers {
 		name, handler := name, handler
 		subject := "boutique.qry.storefront." + name + ".v1"
-		if err := service.AddEndpoint(name, micro.HandlerFunc(func(request micro.Request) {
+		requestHandler := micro.HandlerFunc(func(request micro.Request) {
 			var decoded queryRequest
 			var decodeErr error
 			if len(request.Data()) > 0 {
@@ -140,16 +160,41 @@ func (p *projector) registerQueries(nc *nats.Conn) (micro.Service, int, error) {
 				log.Printf("storefront query processing failed topic=%q correlation_id=%q error_code=%q error=%v",
 					subject, correlationID, response.Error, err)
 			}
-		}), micro.WithEndpointSubject(subject)); err != nil {
-			_ = service.Stop()
-			return nil, 0, fmt.Errorf("register %s: %w", subject, err)
+		})
+		for slot := 0; slot < concurrency; slot++ {
+			endpointName := name
+			if concurrency > 1 {
+				endpointName = fmt.Sprintf("%s-%02d", name, slot+1)
+			}
+			pending := &atomic.Int64{}
+			endpointPendingMutex.Lock()
+			endpointPending[endpointName] = pending
+			endpointPendingMutex.Unlock()
+			endpointHandler := micro.HandlerFunc(func(request micro.Request) {
+				pending.Add(1)
+				defer pending.Add(-1)
+				requestHandler.Handle(request)
+			})
+			if err := service.AddEndpoint(
+				endpointName,
+				endpointHandler,
+				micro.WithEndpointSubject(subject),
+				micro.WithEndpointPendingLimits(64, 1024*1024),
+			); err != nil {
+				endpointPendingMutex.Lock()
+				delete(endpointPending, endpointName)
+				endpointPendingMutex.Unlock()
+				_ = service.Stop()
+				return nil, 0, fmt.Errorf("register %s slot %d: %w", subject, slot+1, err)
+			}
+			endpointCount++
 		}
 	}
 	if err := nc.Flush(); err != nil {
 		_ = service.Stop()
 		return nil, 0, err
 	}
-	return service, len(handlers), nil
+	return service, endpointCount, nil
 }
 
 func (p *projector) orderQuery(request queryRequest) (queryResponse, error) {
@@ -206,13 +251,28 @@ func (p *projector) homeQuery(request queryRequest) (queryResponse, error) {
 		response.CatalogRevision = max(response.CatalogRevision, product.CatalogRevision)
 		response.UpdatedAt = latest(response.UpdatedAt, product.UpdatedAt)
 	}
-	cart, err := p.cartView(request.UserID)
-	if err != nil {
-		return queryResponse{}, err
+	var cart *storefront.CartView
+	var cartErr error
+	var ad *hipstershop.Ad
+	var adStale []string
+	var wait sync.WaitGroup
+	wait.Add(2)
+	go func() {
+		defer wait.Done()
+		cart, cartErr = p.cartViewCached(request.UserID)
+	}()
+	go func() {
+		defer wait.Done()
+		ad = p.currentAdCached(request.UserID, &adStale)
+	}()
+	wait.Wait()
+	if cartErr != nil {
+		return queryResponse{}, cartErr
 	}
 	response.CartSize, response.CartVersion = cartSize(cart.Cart), cart.Cart.GetCartVersion()
 	response.UpdatedAt = latest(response.UpdatedAt, cart.UpdatedAt)
-	response.Ad = p.currentAd(request.UserID, &response.Stale)
+	response.Ad = ad
+	response.Stale = append(response.Stale, adStale...)
 	return response, nil
 }
 
@@ -233,18 +293,40 @@ func (p *projector) productQuery(request queryRequest) (queryResponse, error) {
 	if err != nil {
 		return queryResponse{}, err
 	}
-	cart, err := p.cartView(request.UserID)
-	if err != nil {
-		return queryResponse{}, err
+	var cart *storefront.CartView
+	var cartErr error
+	var recommendations []*hipstershop.Product
+	var ad *hipstershop.Ad
+	var recommendationStale, adStale []string
+	var wait sync.WaitGroup
+	wait.Add(3)
+	go func() {
+		defer wait.Done()
+		cart, cartErr = p.cartViewCached(request.UserID)
+	}()
+	go func() {
+		defer wait.Done()
+		recommendations = p.currentRecommendationsCached(
+			request.UserID, request.ProductID, &recommendationStale,
+		)
+	}()
+	go func() {
+		defer wait.Done()
+		ad = p.currentAdCached(request.UserID, &adStale)
+	}()
+	wait.Wait()
+	if cartErr != nil {
+		return queryResponse{}, cartErr
 	}
 	response := queryResponse{
 		Product: localized, Currencies: rates.SupportedCurrencies(),
 		CartSize: cartSize(cart.Cart), CartVersion: cart.Cart.GetCartVersion(),
 		CatalogRevision: product.CatalogRevision, RateRevision: rates.RateRevision,
-		UpdatedAt: latest(product.UpdatedAt, rates.UpdatedAt, cart.UpdatedAt),
+		UpdatedAt:       latest(product.UpdatedAt, rates.UpdatedAt, cart.UpdatedAt),
+		Recommendations: recommendations, Ad: ad,
 	}
-	response.Recommendations = p.currentRecommendations(request.UserID, request.ProductID, &response.Stale)
-	response.Ad = p.currentAd(request.UserID, &response.Stale)
+	response.Stale = append(response.Stale, recommendationStale...)
+	response.Stale = append(response.Stale, adStale...)
 	return response, nil
 }
 
@@ -281,7 +363,7 @@ func (p *projector) cartQuery(request queryRequest) (queryResponse, error) {
 		response.CatalogRevision = max(response.CatalogRevision, product.CatalogRevision)
 		response.UpdatedAt = latest(response.UpdatedAt, product.UpdatedAt)
 	}
-	response.Recommendations = p.currentRecommendations(request.UserID, "", &response.Stale)
+	response.Recommendations = p.currentRecommendationsCached(request.UserID, "", &response.Stale)
 	if len(cart.Cart.GetItems()) == 0 {
 		response.ShippingCost = &hipstershop.Money{CurrencyCode: request.CurrencyCode}
 		return response, nil
@@ -347,10 +429,21 @@ func (p *projector) currencyView(currencyCode string) (*storefront.CurrencyView,
 }
 
 func (p *projector) cartView(userID string) (*storefront.CartView, error) {
+	return p.cartViewFrom(p.carts, userID)
+}
+
+func (p *projector) cartViewCached(userID string) (*storefront.CartView, error) {
+	if p.cartCache == nil {
+		return p.cartView(userID)
+	}
+	return p.cartViewFrom(cachedOnlyProjectionReader{cache: p.cartCache}, userID)
+}
+
+func (p *projector) cartViewFrom(reader projectionReader, userID string) (*storefront.CartView, error) {
 	if userID == "" {
 		return &storefront.CartView{Cart: &commonv1.CartSnapshot{}}, nil
 	}
-	cart, revision, err := getJSONWithRevision[storefront.CartView](p.carts, userID)
+	cart, revision, err := getJSONWithRevision[storefront.CartView](reader, userID)
 	if errors.Is(err, nats.ErrKeyNotFound) {
 		return &storefront.CartView{Cart: &commonv1.CartSnapshot{UserId: userID}}, nil
 	}
@@ -362,7 +455,20 @@ func (p *projector) cartView(userID string) (*storefront.CartView, error) {
 }
 
 func (p *projector) currentRecommendations(sessionID, excludedProductID string, stale *[]string) []*hipstershop.Product {
-	view, revision, err := getJSONWithRevision[storefront.RecommendationView](p.context, storefront.RecommendationKey(sessionID))
+	return p.currentRecommendationsFrom(p.context, sessionID, excludedProductID, stale)
+}
+
+func (p *projector) currentRecommendationsCached(sessionID, excludedProductID string, stale *[]string) []*hipstershop.Product {
+	if p.contextCache == nil {
+		return p.currentRecommendations(sessionID, excludedProductID, stale)
+	}
+	return p.currentRecommendationsFrom(
+		cachedOnlyProjectionReader{cache: p.contextCache}, sessionID, excludedProductID, stale,
+	)
+}
+
+func (p *projector) currentRecommendationsFrom(reader projectionReader, sessionID, excludedProductID string, stale *[]string) []*hipstershop.Product {
+	view, revision, err := getJSONWithRevision[storefront.RecommendationView](reader, storefront.RecommendationKey(sessionID))
 	if err != nil || view.FailureCode != "" || expired(view.ExpiresAt) {
 		*stale = append(*stale, "recommendations")
 		return nil
@@ -386,7 +492,18 @@ func (p *projector) currentRecommendations(sessionID, excludedProductID string, 
 }
 
 func (p *projector) currentAd(sessionID string, stale *[]string) *hipstershop.Ad {
-	view, revision, err := getJSONWithRevision[storefront.AdView](p.context, storefront.AdKey(sessionID))
+	return p.currentAdFrom(p.context, sessionID, stale)
+}
+
+func (p *projector) currentAdCached(sessionID string, stale *[]string) *hipstershop.Ad {
+	if p.contextCache == nil {
+		return p.currentAd(sessionID, stale)
+	}
+	return p.currentAdFrom(cachedOnlyProjectionReader{cache: p.contextCache}, sessionID, stale)
+}
+
+func (p *projector) currentAdFrom(reader projectionReader, sessionID string, stale *[]string) *hipstershop.Ad {
+	view, revision, err := getJSONWithRevision[storefront.AdView](reader, storefront.AdKey(sessionID))
 	if err != nil || view.FailureCode != "" || expired(view.ExpiresAt) || len(view.Ads) == 0 {
 		*stale = append(*stale, "ad")
 		return nil

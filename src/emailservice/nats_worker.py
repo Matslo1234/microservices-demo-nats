@@ -143,10 +143,21 @@ def _build_outcome(envelope, failure_mode=None):
   }
 
 
-async def _fetch_message(subscription, retry_delay=0.1):
+def _bounded_integer_env(name, fallback, minimum, maximum):
+  raw = os.getenv(name)
+  try:
+    value = int(raw) if raw else fallback
+  except ValueError as error:
+    raise ValueError(f"{name} must be an integer") from error
+  if value < minimum or value > maximum:
+    raise ValueError(f"{name} must be between {minimum} and {maximum}")
+  return value
+
+
+async def _fetch_messages(subscription, batch_size, retry_delay=0.1):
   while not _stop.is_set():
     try:
-      messages = await subscription.fetch(batch=1, timeout=1)
+      messages = await subscription.fetch(batch=batch_size, timeout=1)
     except (NatsTimeoutError, asyncio.TimeoutError):
       _ready.set()
       continue
@@ -159,8 +170,14 @@ async def _fetch_message(subscription, retry_delay=0.1):
       continue
     _ready.set()
     if messages:
-      return messages[0]
-  return None
+      return messages
+  return []
+
+
+async def _fetch_message(subscription, retry_delay=0.1):
+  messages = await _fetch_messages(
+      subscription, batch_size=1, retry_delay=retry_delay)
+  return messages[0] if messages else None
 
 
 async def _process_message(message, js, failure_mode):
@@ -210,6 +227,16 @@ async def _process_message(message, js, failure_mode):
     await message.nak(delay=1)
 
 
+async def _process_messages(messages, js, failure_mode, concurrency):
+  slots = asyncio.Semaphore(concurrency)
+
+  async def process(message):
+    async with slots:
+      await _process_message(message, js, failure_mode)
+
+  await asyncio.gather(*(process(message) for message in messages))
+
+
 async def _consume_connection():
   tls_context = ssl.create_default_context(cafile=os.environ["NATS_CA_FILE"])
   if hasattr(ssl, "VERIFY_X509_STRICT"):
@@ -238,12 +265,17 @@ async def _consume_connection():
       stream="BOUTIQUE_EVENTS",
       config=config)
     failure_mode = os.getenv("EMAIL_FAILURE_MODE", "")
+    batch_size = _bounded_integer_env(
+        "NATS_CONSUMER_BATCH_SIZE", 32, 1, 256)
+    concurrency = _bounded_integer_env(
+        "NATS_CONSUMER_CONCURRENCY", 8, 1, 64)
     _ready.set()
     logger.info("Email order-completed consumer is ready")
     while not _stop.is_set():
-      message = await _fetch_message(subscription)
-      if message is not None:
-        await _process_message(message, js, failure_mode)
+      messages = await _fetch_messages(subscription, batch_size)
+      if messages:
+        await _process_messages(
+            messages, js, failure_mode, concurrency)
   finally:
     _ready.clear()
     await connection.drain()

@@ -207,3 +207,75 @@ func TestCartQueryUsesSynchronizedCatalogCache(t *testing.T) {
 		t.Fatalf("cart query performed %d authoritative product KV reads", gets)
 	}
 }
+
+func TestProductQueryUsesSessionCachesWithoutAuthoritativeReads(t *testing.T) {
+	products := newMemoryKV()
+	storeJSON(t, products, storefront.CurrencyKey, storefront.CurrencyView{
+		BaseCurrencyCode: "USD",
+		Rates:            []storefront.Rate{{CurrencyCode: "USD", UnitsPerBase: 1}},
+		RateRevision:     1,
+	})
+	storeJSON(t, products, storefront.ProductKey("sku"), storefront.ProductView{
+		Product: &commonv1.ProductSnapshot{
+			ProductId: "sku", PriceUsd: &commonv1.Money{CurrencyCode: "USD", Units: 10},
+		},
+		CatalogRevision: 1,
+	})
+	storeJSON(t, products, storefront.ProductKey("sku-2"), storefront.ProductView{
+		Product: &commonv1.ProductSnapshot{
+			ProductId: "sku-2", PriceUsd: &commonv1.Money{CurrencyCode: "USD", Units: 12},
+		},
+		CatalogRevision: 1,
+	})
+	catalog, err := newProjectionReadCache(products)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(catalog.Close)
+
+	carts := newMemoryKV()
+	storeJSON(t, carts, "user-1", storefront.CartView{
+		Cart: &commonv1.CartSnapshot{UserId: "user-1", CartVersion: 3},
+	})
+	cartCache, err := newBoundedProjectionReadCache(carts, 16)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(cartCache.Close)
+
+	context := newMemoryKV()
+	storeJSON(t, context, storefront.RecommendationKey("user-1"), storefront.RecommendationView{
+		ProductIDs: []string{"sku-2"},
+	})
+	storeJSON(t, context, storefront.AdKey("user-1"), storefront.AdView{
+		Ads: []storefront.Ad{{Text: "cached ad", RedirectURL: "/product/sku"}},
+	})
+	contextCache, err := newBoundedProjectionReadCache(context, 16)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(contextCache.Close)
+
+	products.resetGetCount()
+	carts.resetGetCount()
+	context.resetGetCount()
+	projector := &projector{
+		products: products, catalog: catalog,
+		carts: carts, cartCache: cartCache,
+		context: context, contextCache: contextCache,
+	}
+	response, err := projector.productQuery(queryRequest{
+		ProductID: "sku", UserID: "user-1", CurrencyCode: "USD",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.CartVersion != 3 || response.Ad == nil || response.Ad.Text != "cached ad" ||
+		len(response.Recommendations) != 1 {
+		t.Fatalf("unexpected cached product response: %#v", response)
+	}
+	if products.getCount() != 0 || carts.getCount() != 0 || context.getCount() != 0 {
+		t.Fatalf("product query performed authoritative reads: products=%d carts=%d context=%d",
+			products.getCount(), carts.getCount(), context.getCount())
+	}
+}

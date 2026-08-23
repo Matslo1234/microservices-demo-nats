@@ -51,6 +51,12 @@ spec:
           value: "storefront-projection-local-v1,boutique.qry.storefront.home.v1,boutique.qry.storefront.product.v1,boutique.qry.storefront.cart.v1,boutique.qry.storefront.currencies.v1,boutique.qry.storefront.product-meta.v1,boutique.qry.storefront.operation.v1,boutique.qry.storefront.order.v1"
         - name: GOMEMLIMIT
           value: "400MiB"
+        - name: STOREFRONT_QUERY_CONCURRENCY
+          value: "8"
+        - name: STOREFRONT_CART_CACHE_ENTRIES
+          value: "32768"
+        - name: STOREFRONT_CONTEXT_CACHE_ENTRIES
+          value: "65536"
         envFrom:
         - configMapRef:
             name: nats-client-config

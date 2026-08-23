@@ -216,14 +216,20 @@ class RemoteMetricsClient:
             raise RuntimeError("metrics endpoint returned non-object JSON")
         pods = value.get("pods", {})
         nats_metrics = value.get("nats_metrics", [])
+        nats_micro_endpoints = value.get("nats_micro_endpoints", [])
         errors = value.get("errors", [])
         if not isinstance(pods, dict):
             raise RuntimeError("metrics endpoint returned invalid pods")
-        if not isinstance(nats_metrics, list) or not isinstance(errors, list):
+        if (
+            not isinstance(nats_metrics, list)
+            or not isinstance(nats_micro_endpoints, list)
+            or not isinstance(errors, list)
+        ):
             raise RuntimeError("metrics endpoint returned invalid metric lists")
         return {
             "pods": pods,
             "nats_metrics": nats_metrics,
+            "nats_micro_endpoints": nats_micro_endpoints,
             "errors": [str(error) for error in errors],
         }
 
@@ -267,6 +273,7 @@ class ResourceSampler:
                 "phase": phase_now(),
                 "pods": {},
                 "nats_metrics": [],
+                "nats_micro_endpoints": [],
                 "errors": [],
             }
             if CONFIG.workload == "saturation":
@@ -284,6 +291,9 @@ class ResourceSampler:
                     record["pods"] = snapshot["pods"]
                 if CONFIG.collect_nats_metrics:
                     record["nats_metrics"] = snapshot["nats_metrics"]
+                    record["nats_micro_endpoints"] = snapshot[
+                        "nats_micro_endpoints"
+                    ]
                     self._latest_pending = consumer_pending_total(
                         snapshot["nats_metrics"]
                     )

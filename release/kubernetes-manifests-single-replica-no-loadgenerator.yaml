@@ -284,6 +284,10 @@ spec:
           value: "true"
         - name: NATS_REQUIRED_SUBSCRIPTIONS
           value: ad-page-views-v1
+        - name: NATS_CONSUMER_BATCH_SIZE
+          value: "32"
+        - name: NATS_CONSUMER_CONCURRENCY
+          value: "8"
         - name: ENABLE_TRACING
           value: "1"
         - name: COLLECTOR_SERVICE_ADDR
@@ -307,7 +311,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-adservice
-        image: matslo123/adservice:v0.4.0@sha256:3856d1a4302a98e4a39e4be1e9e7995c315e177fc028fd5eb8542a4c33394fac
+        image: matslo123/adservice:v0.4.0@sha256:2411796515dda050a5ef7381a605b840ed769b823e2d71d1c28420306fb940a1
         livenessProbe:
           httpGet:
             path: /healthz
@@ -326,10 +330,10 @@ spec:
           periodSeconds: 15
         resources:
           limits:
-            cpu: 300m
+            cpu: 500m
             memory: 2Gi
           requests:
-            cpu: 125m
+            cpu: 200m
             memory: 180Mi
         securityContext:
           allowPrivilegeEscalation: false
@@ -410,7 +414,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-benchmarkservice
-        image: matslo123/benchmarkservice:v0.4.0@sha256:9bc9eee1d096b84c4ded79c09d0eb8eb1d4f636b0187ce3ad7b603126ad787a2
+        image: matslo123/benchmarkservice:v0.4.0@sha256:b996bdc0fbf7907a2e0e733b35fda3e7af052721360b0b61a5ac0bc90b67b425
         livenessProbe:
           httpGet:
             path: /healthz
@@ -803,10 +807,10 @@ spec:
             port: health
         resources:
           limits:
-            cpu: 200m
+            cpu: 400m
             memory: 2Gi
           requests:
-            cpu: 100m
+            cpu: 200m
             memory: 64Mi
         securityContext:
           allowPrivilegeEscalation: false
@@ -880,6 +884,10 @@ spec:
           value: "true"
         - name: NATS_REQUIRED_SUBSCRIPTIONS
           value: email-order-completed-v1
+        - name: NATS_CONSUMER_BATCH_SIZE
+          value: "32"
+        - name: NATS_CONSUMER_CONCURRENCY
+          value: "8"
         - name: ENABLE_TRACING
           value: "1"
         - name: COLLECTOR_SERVICE_ADDR
@@ -903,7 +911,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-emailservice
-        image: matslo123/emailservice:v0.4.0@sha256:bff27de63900bb605ffa8082776fd866f65f56831fc15da72e6f62c29679c619
+        image: matslo123/emailservice:v0.4.0@sha256:1397bee807f4bb7eeea23875d1ca50ba6112be26bbfbd7b9e022f406d3793601
         livenessProbe:
           httpGet:
             path: /healthz
@@ -920,10 +928,10 @@ spec:
           periodSeconds: 5
         resources:
           limits:
-            cpu: 200m
+            cpu: 400m
             memory: 2Gi
           requests:
-            cpu: 175m
+            cpu: 200m
             memory: 64Mi
         securityContext:
           allowPrivilegeEscalation: false
@@ -1042,6 +1050,8 @@ spec:
           value: 400MiB
         - name: NATS_REQUEST_TIMEOUT
           value: 8s
+        - name: PAGE_VIEW_PUBLISH_MAX_PENDING
+          value: "512"
         - name: ENABLE_PROFILER
           value: "0"
         - name: ENABLE_TRACING
@@ -1069,7 +1079,7 @@ spec:
             name: nats-credentials-frontend
         - secretRef:
             name: global-application-secrets
-        image: matslo123/frontend:v0.4.0@sha256:7d659542349ad1bf9ff80399a5f99f4af83c4bd4360b4e4e43f9e119e53ba2fd
+        image: matslo123/frontend:v0.4.0@sha256:4eda7b934e29cf538caed621a278f80581523d0058cfef86c8751caeba31ca53
         livenessProbe:
           failureThreshold: 6
           httpGet:
@@ -1345,7 +1355,7 @@ spec:
             name: nats-credentials-paymentservice
         - secretRef:
             name: global-application-secrets
-        image: matslo123/paymentservice:v0.4.0@sha256:a624a37dd2ee8bd84f7801d16b3e9ba985a4702f20303801f248a0bffb149056
+        image: matslo123/paymentservice:v0.4.0@sha256:b765a01c0122f54f73648aecfc722e6e8e90506b58fb11f6f2e5c2151997b5b0
         livenessProbe:
           failureThreshold: 6
           httpGet:
@@ -1556,6 +1566,10 @@ spec:
           value: "true"
         - name: NATS_REQUIRED_SUBSCRIPTIONS
           value: recommendation-catalog-v1,recommendation-cart-v1,recommendation-page-views-v1
+        - name: NATS_CONSUMER_BATCH_SIZE
+          value: "32"
+        - name: NATS_CONSUMER_CONCURRENCY
+          value: "8"
         - name: ENABLE_TRACING
           value: "1"
         - name: COLLECTOR_SERVICE_ADDR
@@ -1579,7 +1593,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-recommendationservice
-        image: matslo123/recommendationservice:v0.4.0@sha256:7c056ea623ea3964eee7f21b7c4cc5e100d24abafeb3fe9f7b91ae26caa0544b
+        image: matslo123/recommendationservice:v0.4.0@sha256:473b1be5bc7785e8775c9410ac899716991ea5878b8b74b97cc52f8d225098dc
         livenessProbe:
           failureThreshold: 6
           httpGet:
@@ -1800,6 +1814,12 @@ spec:
           value: storefront-projection-local-v1,boutique.qry.storefront.home.v1,boutique.qry.storefront.product.v1,boutique.qry.storefront.cart.v1,boutique.qry.storefront.currencies.v1,boutique.qry.storefront.product-meta.v1,boutique.qry.storefront.operation.v1,boutique.qry.storefront.order.v1
         - name: GOMEMLIMIT
           value: 400MiB
+        - name: STOREFRONT_QUERY_CONCURRENCY
+          value: "8"
+        - name: STOREFRONT_CART_CACHE_ENTRIES
+          value: "32768"
+        - name: STOREFRONT_CONTEXT_CACHE_ENTRIES
+          value: "65536"
         - name: ENABLE_TRACING
           value: "1"
         - name: COLLECTOR_SERVICE_ADDR
@@ -1823,7 +1843,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-storefrontprojectionservice
-        image: matslo123/storefrontprojectionservice:v0.4.0@sha256:13ff3ef9fb7a254e595f3ace2caad03b16384dbf1709843292f03a0b27d895af
+        image: matslo123/storefrontprojectionservice:v0.4.0@sha256:903ee29cfbb52eba074d58f2079c96ceb51bc546bbebabc499105c956f8e43bb
         livenessProbe:
           failureThreshold: 6
           httpGet:

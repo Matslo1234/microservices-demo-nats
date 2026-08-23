@@ -7,6 +7,13 @@ import "testing"
 
 func setValidProjectionEnvironment(t *testing.T) {
 	t.Helper()
+	for _, name := range []string{
+		"STOREFRONT_QUERY_CONCURRENCY",
+		"STOREFRONT_CART_CACHE_ENTRIES",
+		"STOREFRONT_CONTEXT_CACHE_ENTRIES",
+	} {
+		t.Setenv(name, "")
+	}
 	for name, value := range map[string]string{
 		"REGION_ID":                     "eu-central-1",
 		"REGION_KEY":                    "EU_CENTRAL_1",
@@ -35,6 +42,18 @@ func TestLoadProjectionConfigAcceptsRegionQualifiedAssets(t *testing.T) {
 	if config.regionID != "eu-central-1" || config.eventStream != "BOUTIQUE_EVENTS" ||
 		config.productsBucket != "STOREFRONT_PRODUCTS_EU_CENTRAL_1" {
 		t.Fatalf("unexpected projection config: %+v", config)
+	}
+	if config.queryConcurrency != 8 || config.cartCacheEntries != 32768 ||
+		config.contextCacheEntries != 65536 {
+		t.Fatalf("unexpected performance defaults: %+v", config)
+	}
+}
+
+func TestLoadProjectionConfigRejectsInvalidPerformanceBounds(t *testing.T) {
+	setValidProjectionEnvironment(t)
+	t.Setenv("STOREFRONT_QUERY_CONCURRENCY", "0")
+	if _, err := loadProjectionConfig(); err == nil {
+		t.Fatal("zero query concurrency was accepted")
 	}
 }
 

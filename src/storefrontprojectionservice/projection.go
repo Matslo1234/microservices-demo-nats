@@ -45,15 +45,17 @@ var projectionFilterSubjects = []string{
 }
 
 type projector struct {
-	js          nats.JetStreamContext
-	config      projectionConfig
-	products    projectionKV
-	catalog     *projectionReadCache
-	carts       projectionKV
-	context     projectionKV
-	operations  projectionKV
-	orders      projectionKV
-	publishLive func(string, []byte) error
+	js           nats.JetStreamContext
+	config       projectionConfig
+	products     projectionKV
+	catalog      *projectionReadCache
+	carts        projectionKV
+	cartCache    *projectionReadCache
+	context      projectionKV
+	contextCache *projectionReadCache
+	operations   projectionKV
+	orders       projectionKV
+	publishLive  func(string, []byte) error
 
 	kvConflictRetries  atomic.Uint64
 	staleEventSkips    atomic.Uint64
@@ -91,24 +93,41 @@ func newProjector(js nats.JetStreamContext, config projectionConfig) (*projector
 		catalog.Close()
 		return nil, fmt.Errorf("open cart KV: %w", err)
 	}
+	cartCache, err := newBoundedProjectionReadCache(carts, config.cartCacheEntries)
+	if err != nil {
+		catalog.Close()
+		return nil, fmt.Errorf("initialize cart query cache: %w", err)
+	}
 	context, err := js.KeyValue(config.contextBucket)
 	if err != nil {
 		catalog.Close()
+		cartCache.Close()
 		return nil, fmt.Errorf("open context KV: %w", err)
+	}
+	contextCache, err := newBoundedProjectionReadCache(context, config.contextCacheEntries)
+	if err != nil {
+		catalog.Close()
+		cartCache.Close()
+		return nil, fmt.Errorf("initialize context query cache: %w", err)
 	}
 	operations, err := js.KeyValue(config.operationsBucket)
 	if err != nil {
 		catalog.Close()
+		cartCache.Close()
+		contextCache.Close()
 		return nil, fmt.Errorf("open operations KV: %w", err)
 	}
 	orders, err := js.KeyValue(config.ordersBucket)
 	if err != nil {
 		catalog.Close()
+		cartCache.Close()
+		contextCache.Close()
 		return nil, fmt.Errorf("open orders KV: %w", err)
 	}
 	return &projector{
 		js: js, config: config, products: products, catalog: catalog, carts: carts,
-		context: context, operations: operations, orders: orders,
+		cartCache: cartCache, context: context, contextCache: contextCache,
+		operations: operations, orders: orders,
 	}, nil
 }
 
@@ -122,6 +141,12 @@ func (p *projector) catalogReader() projectionReader {
 func (p *projector) close() {
 	if p.catalog != nil {
 		p.catalog.Close()
+	}
+	if p.cartCache != nil {
+		p.cartCache.Close()
+	}
+	if p.contextCache != nil {
+		p.contextCache.Close()
 	}
 }
 

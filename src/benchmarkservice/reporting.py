@@ -15,7 +15,6 @@ from config import (
     BenchmarkConfig,
     SATURATION_START_RATE,
     SATURATION_STEP_RATE,
-    SATURATION_STEP_SECONDS,
 )
 from saturation import RAPID_PENDING_GROWTH_PER_SECOND
 
@@ -229,6 +228,11 @@ def resource_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
         return {"available": False, "reason": "fewer than two steady-state samples"}
 
     cpu_ns = memory_byte_seconds = rx_bytes = tx_bytes = 0.0
+    cpu_periods = cpu_throttled_periods = 0
+    cpu_throttled_seconds = 0.0
+    disk_operations = 0
+    disk_latency_operations = 0
+    disk_io_seconds = disk_weighted_seconds = 0.0
     max_memory = 0
     elapsed = 0.0
     by_service: dict[str, dict[str, float]] = defaultdict(
@@ -237,6 +241,13 @@ def resource_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
             "memory_byte_seconds": 0.0,
             "network_rx_bytes": 0.0,
             "network_tx_bytes": 0.0,
+            "cpu_periods": 0.0,
+            "cpu_throttled_periods": 0.0,
+            "cpu_throttled_seconds": 0.0,
+            "disk_operations": 0.0,
+            "disk_latency_operations": 0.0,
+            "disk_io_seconds": 0.0,
+            "disk_weighted_seconds": 0.0,
         }
     )
 
@@ -274,6 +285,63 @@ def resource_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
                 int(current_pod.get("network_tx_bytes", 0))
                 - int(previous_pod.get("network_tx_bytes", 0)),
             )
+            cpu_period_delta = max(
+                0,
+                int(current_pod.get("cpu_cfs_periods_total", 0))
+                - int(previous_pod.get("cpu_cfs_periods_total", 0)),
+            )
+            cpu_throttled_period_delta = max(
+                0,
+                int(
+                    current_pod.get("cpu_cfs_throttled_periods_total", 0)
+                )
+                - int(
+                    previous_pod.get("cpu_cfs_throttled_periods_total", 0)
+                ),
+            )
+            cpu_throttled_seconds_delta = max(
+                0.0,
+                float(
+                    current_pod.get("cpu_cfs_throttled_seconds_total", 0)
+                )
+                - float(
+                    previous_pod.get("cpu_cfs_throttled_seconds_total", 0)
+                ),
+            )
+            disk_operations_delta = max(
+                0,
+                int(current_pod.get("disk_io_operations_total", 0))
+                - int(previous_pod.get("disk_io_operations_total", 0)),
+            )
+            disk_io_seconds_delta = max(
+                0.0,
+                float(current_pod.get("disk_io_time_seconds_total", 0))
+                - float(previous_pod.get("disk_io_time_seconds_total", 0)),
+            )
+            has_disk_latency = all(
+                name in current_pod and name in previous_pod
+                for name in (
+                    "disk_io_operations_total",
+                    "disk_io_time_weighted_seconds_total",
+                )
+            )
+            disk_weighted_seconds_delta = (
+                max(
+                    0.0,
+                    float(
+                        current_pod[
+                            "disk_io_time_weighted_seconds_total"
+                        ]
+                    )
+                    - float(
+                        previous_pod[
+                            "disk_io_time_weighted_seconds_total"
+                        ]
+                    ),
+                )
+                if has_disk_latency
+                else 0.0
+            )
             average_memory = (
                 int(previous_pod.get("memory_working_set_bytes", 0))
                 + int(current_pod.get("memory_working_set_bytes", 0))
@@ -281,12 +349,36 @@ def resource_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
             cpu_ns += cpu_delta
             rx_bytes += rx_delta
             tx_bytes += tx_delta
+            cpu_periods += cpu_period_delta
+            cpu_throttled_periods += cpu_throttled_period_delta
+            cpu_throttled_seconds += cpu_throttled_seconds_delta
+            disk_operations += disk_operations_delta
+            if has_disk_latency:
+                disk_latency_operations += disk_operations_delta
+            disk_io_seconds += disk_io_seconds_delta
+            disk_weighted_seconds += disk_weighted_seconds_delta
             by_service[service]["cpu_nanoseconds"] += cpu_delta
             by_service[service]["memory_byte_seconds"] += (
                 average_memory * delta_seconds
             )
             by_service[service]["network_rx_bytes"] += rx_delta
             by_service[service]["network_tx_bytes"] += tx_delta
+            by_service[service]["cpu_periods"] += cpu_period_delta
+            by_service[service][
+                "cpu_throttled_periods"
+            ] += cpu_throttled_period_delta
+            by_service[service][
+                "cpu_throttled_seconds"
+            ] += cpu_throttled_seconds_delta
+            by_service[service]["disk_operations"] += disk_operations_delta
+            if has_disk_latency:
+                by_service[service][
+                    "disk_latency_operations"
+                ] += disk_operations_delta
+            by_service[service]["disk_io_seconds"] += disk_io_seconds_delta
+            by_service[service][
+                "disk_weighted_seconds"
+            ] += disk_weighted_seconds_delta
 
     normalized_services: dict[str, dict[str, Any]] = {}
     for service, values in sorted(by_service.items()):
@@ -300,6 +392,25 @@ def resource_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
             else None,
             "network_rx_bytes": int(values["network_rx_bytes"]),
             "network_tx_bytes": int(values["network_tx_bytes"]),
+            "cpu_throttled_seconds": round(
+                values["cpu_throttled_seconds"], 6
+            ),
+            "cpu_throttled_periods": int(values["cpu_throttled_periods"]),
+            "cpu_periods": int(values["cpu_periods"]),
+            "cpu_throttling_ratio": round(
+                values["cpu_throttled_periods"] / values["cpu_periods"], 6
+            )
+            if values["cpu_periods"]
+            else None,
+            "disk_io_operations": int(values["disk_operations"]),
+            "disk_io_seconds": round(values["disk_io_seconds"], 6),
+            "average_disk_latency_seconds": round(
+                values["disk_weighted_seconds"]
+                / values["disk_latency_operations"],
+                9,
+            )
+            if values["disk_latency_operations"]
+            else None,
         }
 
     return {
@@ -313,6 +424,22 @@ def resource_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
         "max_sampled_memory_bytes": max_memory,
         "network_rx_bytes": int(rx_bytes),
         "network_tx_bytes": int(tx_bytes),
+        "cpu_throttled_seconds": round(cpu_throttled_seconds, 6),
+        "cpu_throttled_periods": cpu_throttled_periods,
+        "cpu_periods": cpu_periods,
+        "cpu_throttling_ratio": round(
+            cpu_throttled_periods / cpu_periods, 6
+        )
+        if cpu_periods
+        else None,
+        "disk_io_operations": disk_operations,
+        "disk_io_seconds": round(disk_io_seconds, 6),
+        "disk_latency_available": bool(disk_latency_operations),
+        "average_disk_latency_seconds": round(
+            disk_weighted_seconds / disk_latency_operations, 9
+        )
+        if disk_latency_operations
+        else None,
         "by_service": normalized_services,
     }
 
@@ -380,7 +507,83 @@ def nats_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
         }
         for consumer, metrics in sorted(consumers.items())
     }
+    result["micro_endpoints"] = nats_micro_summary(steady)
     return result
+
+
+def nats_micro_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
+    by_instance: dict[
+        tuple[str, str, str], list[dict[str, Any]]
+    ] = defaultdict(list)
+    pending_by_record: dict[str, list[int]] = defaultdict(list)
+    subjects: dict[str, str] = {}
+
+    for record in records:
+        record_pending: dict[str, int] = defaultdict(int)
+        for endpoint in record.get("nats_micro_endpoints", []):
+            service = str(endpoint.get("service_name", ""))
+            instance = str(endpoint.get("service_id", ""))
+            name = str(endpoint.get("endpoint_name", ""))
+            if not service or not instance or not name:
+                continue
+            logical_key = f"{service}/{name}"
+            subjects[logical_key] = str(endpoint.get("subject", ""))
+            by_instance[(service, instance, name)].append(endpoint)
+            pending = endpoint.get("pending_requests")
+            if pending is not None:
+                record_pending[logical_key] += max(0, int(pending))
+        for logical_key, pending in record_pending.items():
+            pending_by_record[logical_key].append(pending)
+
+    totals: dict[str, dict[str, float]] = defaultdict(
+        lambda: {
+            "requests": 0.0,
+            "errors": 0.0,
+            "processing_nanoseconds": 0.0,
+        }
+    )
+    for (service, _, name), observations in by_instance.items():
+        first = observations[0]
+        last = observations[-1]
+        logical_key = f"{service}/{name}"
+        totals[logical_key]["requests"] += max(
+            0,
+            int(last.get("num_requests", 0))
+            - int(first.get("num_requests", 0)),
+        )
+        totals[logical_key]["errors"] += max(
+            0,
+            int(last.get("num_errors", 0))
+            - int(first.get("num_errors", 0)),
+        )
+        totals[logical_key]["processing_nanoseconds"] += max(
+            0,
+            int(last.get("processing_time_nanoseconds", 0))
+            - int(first.get("processing_time_nanoseconds", 0)),
+        )
+
+    if not totals:
+        return {"available": False, "reason": "no NATS micro endpoint samples"}
+
+    by_endpoint: dict[str, dict[str, Any]] = {}
+    for logical_key, values in sorted(totals.items()):
+        requests = int(values["requests"])
+        processing_seconds = values["processing_nanoseconds"] / 1_000_000_000
+        pending = pending_by_record.get(logical_key, [])
+        by_endpoint[logical_key] = {
+            "subject": subjects.get(logical_key, ""),
+            "requests": requests,
+            "errors": int(values["errors"]),
+            "processing_seconds": round(processing_seconds, 9),
+            "average_processing_seconds": round(
+                processing_seconds / requests, 9
+            )
+            if requests
+            else None,
+            "max_pending_requests": max(pending) if pending else None,
+            "last_pending_requests": pending[-1] if pending else None,
+        }
+    return {"available": True, "by_endpoint": by_endpoint}
 
 
 def outstanding_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1073,7 +1276,7 @@ def saturation_summary(
         "available": True,
         "start_requests_per_second": SATURATION_START_RATE,
         "step_requests_per_second": SATURATION_STEP_RATE,
-        "step_seconds": SATURATION_STEP_SECONDS,
+        "step_seconds": config.saturation_step_seconds,
         "maximum_requests_per_second": config.saturation_max_rate,
         "rapid_pending_growth_threshold_per_second": (
             RAPID_PENDING_GROWTH_PER_SECOND

@@ -203,6 +203,11 @@ func main() {
 	if err := server.Shutdown(shutdownContext); err != nil {
 		log.WithError(err).Warn("frontend HTTP drain failed")
 	}
+	select {
+	case <-svc.natsJS.PublishAsyncComplete():
+	case <-shutdownContext.Done():
+		log.WithError(shutdownContext.Err()).Warn("frontend async page-view drain timed out")
+	}
 	if err := svc.natsConn.Drain(); err != nil {
 		log.WithError(err).Warn("frontend NATS drain failed")
 	}

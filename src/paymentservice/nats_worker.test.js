@@ -173,7 +173,9 @@ async function main() {
     version: '1.0.0',
     description: 'Ephemeral payment card tokenization',
     queue: 'payment-tokenize-v1',
+    statsHandler: serviceConfig.statsHandler,
   });
+  assert.equal(typeof serviceConfig.statsHandler, 'function');
   assert.equal(endpointRegistration.name, 'tokenize');
   assert.equal(endpointRegistration.options.subject, 'boutique.qry.payment.tokenize.v1');
   assert.equal(typeof endpointRegistration.options.handler, 'function');
@@ -190,6 +192,11 @@ async function main() {
     string: () => JSON.stringify(microRequest),
     respond: encoded => microResponses.push(JSON.parse(encoded)),
   });
+  assert.deepEqual(
+    await serviceConfig.statsHandler(),
+    {pending_requests: 1},
+    'NATS micro stats did not expose queued tokenization requests',
+  );
   await new Promise(resolve => setTimeout(resolve, 30));
   assert.equal(microResponses.length, 1, 'NATS micro endpoint did not respond');
   assert.doesNotThrow(

@@ -26,8 +26,9 @@ class Result:
 
 @dataclass
 class ClosedMeasurements:
-    orders: int = 0
+    submitted: int = 0
     completed: int = 0
+    runs: int = 0
     p95_values: list[float] = field(default_factory=list)
 
 
@@ -432,8 +433,9 @@ def collect_closed_measurements(results: list[Result]) -> dict[int, ClosedMeasur
             )
 
         group = groups.setdefault(users, ClosedMeasurements())
-        group.orders += submitted
+        group.submitted += submitted
         group.completed += completed
+        group.runs += 1
         p95_value = _nested(business, "checkout_to_outcome", "p95_ms")
         if p95_value is not None:
             group.p95_values.append(
@@ -458,10 +460,12 @@ def write_closed_table(
     for users in sorted(groups):
         group = groups[users]
         success_rate = (
-            f"{group.completed / group.orders * 100:.2f}\\%"
-            if group.orders
+            f"{group.completed / group.submitted * 100:.2f}\\%"
+            if group.submitted
             else "--"
         )
+        average_orders = group.submitted / group.runs
+        average_orders_text = f"{average_orders:.3f}".rstrip("0").rstrip(".")
         median_p95 = (
             statistics.median(group.p95_values) if group.p95_values else None
         )
@@ -469,7 +473,7 @@ def write_closed_table(
             statistics.pstdev(group.p95_values) if group.p95_values else None
         )
         lines.append(
-            f"{users} & {group.orders} & {success_rate} & "
+            f"{users} & {average_orders_text} & {success_rate} & "
             f"{_latex_number(median_p95)} & {_latex_number(p95_stddev)} \\\\"
         )
     lines.extend([r"\hline", r"\end{tabular}"])

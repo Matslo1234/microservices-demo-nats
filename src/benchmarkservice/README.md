@@ -43,8 +43,11 @@ the failure.
   Submission scheduling is independent of completion tracking, so slow
   outcomes do not reduce the requested arrival rate.
 - `saturation` runs an open-loop load ladder. After the optional warm-up at
-  10 orders/s, it measures 10 orders/s for 10 seconds and adds 10 orders/s
-  every 10 seconds. It records the first rung where observed goodput no longer
+  10 orders/s, it measures 10 orders/s for 30 seconds by default and adds 10
+  orders/s each rung. The rung duration is configurable with
+  `saturation_step_seconds` (or `--saturation-step-seconds` in standalone
+  mode). Saturation runs default to a 600-second steady interval, which reaches
+  200 orders/s with the default ladder. It records the first rung where observed goodput no longer
   increases or, for NATS, total application-consumer pending grows by at least
   10 messages/s. These observations do not end the load schedule: it runs for
   the complete steady interval and holds at `saturation_max_rate` if it reaches
@@ -282,11 +285,12 @@ get an SVG of successfully processed requests per second; NATS fault-tolerance
 summaries also get an SVG of queued events per second. Closed-run summaries
 include the configured closed-loop user count and are grouped by that count
 into `closed_results.tex` in the supplied results folder; the table reports
-total attempted orders, aggregate success rate, and the median and population
-standard deviation of run-level P95 outcome latency.
+the average attempted orders per run, aggregate success rate, and the median
+and population standard deviation of run-level P95 outcome latency.
 
-The remote collector fetches kubelet summary statistics and NATS exporter
-metrics from the tested cluster's metrics gateway. It does not use the
-Kubernetes API or NATS exporter endpoints of the cluster hosting the worker.
+The remote collector fetches kubelet summary and cAdvisor statistics, NATS
+exporter metrics, and NATS micro endpoint statistics from the tested cluster's
+metrics gateway. It does not use the Kubernetes API or NATS endpoints of the
+cluster hosting the worker.
 API pod restarts do not affect active Jobs, run visibility, or completed
 artifacts.

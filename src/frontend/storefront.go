@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	stdlog "log"
 	"os"
 	"strconv"
 	"time"
@@ -97,6 +98,13 @@ func connectFrontendNATS(regionalConfig frontendRegionalConfig) (*nats.Conn, nat
 	if err != nil {
 		return nil, nil, 0, 0, err
 	}
+	pageViewMaxPending, err := intEnv("PAGE_VIEW_PUBLISH_MAX_PENDING", 512)
+	if err != nil {
+		return nil, nil, 0, 0, err
+	}
+	if pageViewMaxPending < 1 || pageViewMaxPending > 8192 {
+		return nil, nil, 0, 0, fmt.Errorf("PAGE_VIEW_PUBLISH_MAX_PENDING must be between 1 and 8192")
+	}
 	pingInterval, err := durationEnv("NATS_PING_INTERVAL", 20*time.Second)
 	if err != nil {
 		return nil, nil, 0, 0, err
@@ -118,7 +126,17 @@ func connectFrontendNATS(regionalConfig frontendRegionalConfig) (*nats.Conn, nat
 	if err != nil {
 		return nil, nil, 0, 0, fmt.Errorf("connect frontend to NATS: %w", err)
 	}
-	js, err := nc.JetStream(nats.PublishAsyncMaxPending(128))
+	js, err := nc.JetStream(
+		nats.PublishAsyncMaxPending(pageViewMaxPending),
+		nats.PublishAsyncTimeout(publishTimeout),
+		nats.PublishAsyncErrHandler(func(_ nats.JetStream, message *nats.Msg, publishErr error) {
+			messageID := "unknown"
+			if message != nil {
+				messageID = message.Header.Get("Nats-Msg-Id")
+			}
+			stdlog.Printf("frontend async page-view publish failed message_id=%q error=%v", messageID, publishErr)
+		}),
+	)
 	if err != nil {
 		nc.Close()
 		return nil, nil, 0, 0, fmt.Errorf("create frontend JetStream context: %w", err)
@@ -233,12 +251,14 @@ func (fe *frontendServer) publishPageView(ctx context.Context, session, pageType
 		telemetry.RecordError(span, err)
 		return err
 	}
-	publishContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), fe.natsPublishTimeout)
-	defer cancel()
 	message := &nats.Msg{Subject: pageViewedSubject, Data: encoded, Header: nats.Header{}}
 	message.Header.Set("Nats-Msg-Id", messageID)
 	message.Header.Set("Content-Type", "application/protobuf")
-	_, err = fe.natsJS.PublishMsg(message, nats.Context(publishContext), nats.MsgId(messageID))
+	_, err = fe.natsJS.PublishMsgAsync(
+		message,
+		nats.MsgId(messageID),
+		nats.StallWait(5*time.Millisecond),
+	)
 	if err != nil {
 		telemetry.RecordError(span, err)
 		return err

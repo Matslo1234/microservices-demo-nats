@@ -2,6 +2,7 @@
 # Copyright 2026 Google LLC
 # Licensed under the Apache License, Version 2.0 (the "License");
 
+import asyncio
 import unittest
 from unittest.mock import patch
 
@@ -64,10 +65,41 @@ class StreamingConsumerTests(unittest.IsolatedAsyncioTestCase):
       await _consume(subscription, handler)
 
     self.assertEqual([message], processed)
-    self.assertEqual([{"batch": 1, "timeout": 1}], subscription.requests)
+    self.assertEqual([{"batch": 32, "timeout": 1}], subscription.requests)
     self.assertEqual(1, message.acks)
     self.assertEqual(0, message.naks)
     message_context.assert_not_called()
+
+  async def test_processes_a_batch_with_bounded_concurrency(self):
+    messages = [Message(), Message(), Message()]
+    subscription = Subscription(messages[0])
+    subscription.message = messages
+    active = 0
+    maximum_active = 0
+    processed = []
+
+    async def fetch(**request):
+      subscription.requests.append(request)
+      return messages
+
+    async def handler(received):
+      nonlocal active, maximum_active
+      active += 1
+      maximum_active = max(maximum_active, active)
+      await asyncio.sleep(0)
+      processed.append(received)
+      active -= 1
+      if len(processed) == len(messages):
+        _stop.set()
+
+    subscription.fetch = fetch
+    await _consume(
+        subscription, handler, batch_size=3, concurrency=2)
+
+    self.assertEqual(3, len(processed))
+    self.assertEqual(2, maximum_active)
+    self.assertEqual([{"batch": 3, "timeout": 1}], subscription.requests)
+    self.assertTrue(all(message.acks == 1 for message in messages))
 
   async def test_empty_catalog_bucket_has_no_keys(self):
     store = _NATSCatalogStore(EmptyBucket())

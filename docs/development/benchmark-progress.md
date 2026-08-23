@@ -64,13 +64,15 @@ implemented and validated without deploying it or starting a benchmark.
   for completed, rejected, cancelled, manual-review, timeout, and incomplete
   outcomes.
 - Notification and cart-clear terminal outcomes are reported independently.
-- A low-frequency embedded collector reads kubelet summary data through the
-  Kubernetes API and calculates steady-state CPU-seconds, memory byte-seconds,
-  memory, and receive/transmit bytes for the application footprint. The
-  benchmark pod itself is excluded.
+- A low-frequency embedded collector reads kubelet summary and cAdvisor data
+  through the Kubernetes API and calculates steady-state CPU, throttling,
+  memory, network, and disk-I/O measurements for the application footprint.
+  The benchmark pod itself is excluded.
 - NATS runs scrape the three existing exporter sidecars for JetStream consumer
   pending and acknowledgement-pending messages, redeliveries, and storage.
   Replicated consumer series are de-duplicated by stream/consumer.
+- NATS runs also query `$SRV.STATS` and retain per-instance micro endpoint
+  pending and processing-time statistics.
 - Open-loop summaries make a sustainability assessment. They do not declare a
   configuration sustainable when transactions remain incomplete or
   outstanding, or when NATS consumer pending messages increase. Missing NATS

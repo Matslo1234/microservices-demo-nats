@@ -100,6 +100,10 @@ spec:
           value: "true"
         - name: NATS_REQUIRED_SUBSCRIPTIONS
           value: "email-order-completed-v1"
+        - name: NATS_CONSUMER_BATCH_SIZE
+          value: "32"
+        - name: NATS_CONSUMER_CONCURRENCY
+          value: "8"
         envFrom:
         - configMapRef:
             name: nats-client-config
@@ -121,10 +125,10 @@ spec:
             port: health
         resources:
           requests:
-            cpu: 175m
+            cpu: 200m
             memory: 64Mi
           limits:
-            cpu: 200m
+            cpu: 400m
             memory: 2Gi
       volumes:
       - name: nats-ca

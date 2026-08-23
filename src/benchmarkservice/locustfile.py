@@ -21,7 +21,6 @@ import runtime
 from config import (
     SATURATION_START_RATE,
     SATURATION_STEP_RATE,
-    SATURATION_STEP_SECONDS,
 )
 from runtime import (
     CONFIG,
@@ -111,6 +110,30 @@ def failure_message(
     return BusinessFailure(
         outcome,
         detail,
+        received_monotonic=received_monotonic,
+        received_epoch=received_epoch,
+    )
+
+
+def http_status_failure(
+    status_code: int,
+    fallback_outcome: str,
+    operation: str,
+    *,
+    received_monotonic: float | None = None,
+    received_epoch: float | None = None,
+) -> BusinessFailure:
+    """Classify Locust's synthetic status 0 as a transport timeout."""
+    if status_code == 0:
+        return failure_message(
+            "TIMEOUT",
+            f"{operation} timed out",
+            received_monotonic=received_monotonic,
+            received_epoch=received_epoch,
+        )
+    return failure_message(
+        fallback_outcome,
+        f"{operation} status {status_code}",
         received_monotonic=received_monotonic,
         received_epoch=received_epoch,
     )
@@ -256,7 +279,13 @@ class StorefrontAdapter:
         return headers
 
     def home(self) -> None:
-        self.client.get("/", headers=self.headers())
+        with self.client.get(
+            "/", headers=self.headers(), catch_response=True
+        ) as response:
+            if response.status_code == 0:
+                response.failure(
+                    str(http_status_failure(0, "HTTP_FAILURE", "home request"))
+                )
 
     def set_currency(self) -> None:
         with self.client.post(
@@ -268,32 +297,55 @@ class StorefrontAdapter:
             name="/setCurrency",
         ) as response:
             if response.status_code not in (302, 303):
-                response.failure(
-                    f"unexpected currency status {response.status_code}"
+                error = http_status_failure(
+                    response.status_code, "HTTP_FAILURE", "currency request"
                 )
+                response.failure(str(error))
 
     def browse_product(self) -> None:
-        self.client.get(
+        with self.client.get(
             "/product/" + self.random.choice(PRODUCTS),
             headers=self.headers(),
+            catch_response=True,
             name="/product/[id]",
-        )
+        ) as response:
+            if response.status_code == 0:
+                response.failure(
+                    str(
+                        http_status_failure(
+                            0, "HTTP_FAILURE", "product request"
+                        )
+                    )
+                )
 
     def view_cart(self) -> None:
-        self.client.get("/cart", headers=self.headers())
+        with self.client.get(
+            "/cart", headers=self.headers(), catch_response=True
+        ) as response:
+            if response.status_code == 0:
+                response.failure(
+                    str(http_status_failure(0, "HTTP_FAILURE", "cart request"))
+                )
 
-    def add_item(self) -> bool:
+    def add_item(self) -> BusinessFailure | None:
         product = self.random.choice(PRODUCTS)
-        response = self.client.get(
+        with self.client.get(
             "/product/" + product,
             headers=self.headers(),
+            catch_response=True,
             name="/product/[id]",
-        )
-        issued = issued_session_cookie(response)
-        if issued is not None:
-            self.session_cookie = issued
-        if response.status_code != 200:
-            return False
+        ) as response:
+            if response.status_code != 200:
+                error = http_status_failure(
+                    response.status_code,
+                    "PRECONDITION_FAILED",
+                    "product request",
+                )
+                response.failure(str(error))
+                return error
+            issued = issued_session_cookie(response)
+            if issued is not None:
+                self.session_cookie = issued
         return self._submit_cart_add(
             {
                 "product_id": product,
@@ -301,7 +353,9 @@ class StorefrontAdapter:
             }
         )
 
-    def _submit_cart_add(self, data: dict[str, Any]) -> bool:
+    def _submit_cart_add(
+        self, data: dict[str, Any]
+    ) -> BusinessFailure | None:
         raise NotImplementedError
 
     def checkout_data(self) -> dict[str, Any]:
@@ -368,6 +422,7 @@ class StorefrontAdapter:
         schedule_delay_ms: float | None = None,
         saturation_rung: int | None = None,
         target_requests_per_second: float | None = None,
+        failure: BusinessFailure | None = None,
     ) -> None:
         context = self.base_context(
             scheduled_at,
@@ -375,13 +430,15 @@ class StorefrontAdapter:
             saturation_rung,
             target_requests_per_second,
         )
-        context["outcome"] = "PRECONDITION_FAILED"
+        error = failure or failure_message(
+            "PRECONDITION_FAILED", "could not prepare cart"
+        )
+        context["outcome"] = error.outcome
+        context["failure_message"] = error.detail or str(error)
         with self.user.environment.events.request.measure(
             "BUSINESS", "checkout_to_outcome", context=context
         ) as measurement:
-            measurement["exception"] = failure_message(
-                "PRECONDITION_FAILED", "could not prepare cart"
-            )
+            measurement["exception"] = error
 
     def record_generator_saturation(
         self,
@@ -417,7 +474,9 @@ class StorefrontAdapter:
 
 
 class GrpcAdapter(StorefrontAdapter):
-    def _submit_cart_add(self, data: dict[str, Any]) -> bool:
+    def _submit_cart_add(
+        self, data: dict[str, Any]
+    ) -> BusinessFailure | None:
         with self.client.post(
             "/cart",
             data,
@@ -427,10 +486,15 @@ class GrpcAdapter(StorefrontAdapter):
             name="/cart",
         ) as response:
             if response.status_code not in (302, 303):
-                response.failure(f"unexpected cart status {response.status_code}")
-                return False
+                error = http_status_failure(
+                    response.status_code,
+                    "PRECONDITION_FAILED",
+                    "cart request",
+                )
+                response.failure(str(error))
+                return error
             response.success()
-            return True
+            return None
 
     def checkout(
         self,
@@ -459,13 +523,14 @@ class GrpcAdapter(StorefrontAdapter):
                 name="/cart/checkout",
             ) as response:
                 if response.status_code != 200:
-                    response.failure(
-                        f"unexpected checkout status {response.status_code}"
+                    error = http_status_failure(
+                        response.status_code,
+                        "HTTP_FAILURE",
+                        "checkout request",
                     )
-                    context["outcome"] = "HTTP_FAILURE"
-                    measurement["exception"] = failure_message(
-                        "HTTP_FAILURE", f"status {response.status_code}"
-                    )
+                    response.failure(str(error))
+                    context["outcome"] = error.outcome
+                    measurement["exception"] = error
                     return
                 response.success()
                 context["accepted"] = True
@@ -473,7 +538,9 @@ class GrpcAdapter(StorefrontAdapter):
 
 
 class NatsAdapter(StorefrontAdapter):
-    def _submit_cart_add(self, data: dict[str, Any]) -> bool:
+    def _submit_cart_add(
+        self, data: dict[str, Any]
+    ) -> BusinessFailure | None:
         with self.client.post(
             "/cart",
             data,
@@ -484,15 +551,23 @@ class NatsAdapter(StorefrontAdapter):
         ) as response:
             if response.status_code in (302, 303):
                 response.success()
-                return True
+                return None
             if response.status_code != 202:
-                response.failure(f"unexpected cart status {response.status_code}")
-                return False
+                error = http_status_failure(
+                    response.status_code,
+                    "PRECONDITION_FAILED",
+                    "cart request",
+                )
+                response.failure(str(error))
+                return error
             location = response.headers.get("Location")
             delay = retry_after_seconds(response)
             if not location:
                 response.failure("202 cart operation omitted Location")
-                return False
+                return failure_message(
+                    "PRECONDITION_FAILED",
+                    "cart operation Location is missing",
+                )
             response.success()
 
         deadline = min(
@@ -512,22 +587,31 @@ class NatsAdapter(StorefrontAdapter):
                     status_response.success()
                     continue
                 if status_response.status_code != 200:
-                    status_response.failure(
-                        "unexpected operation status "
-                        f"{status_response.status_code}"
+                    error = http_status_failure(
+                        status_response.status_code,
+                        "PRECONDITION_FAILED",
+                        "cart operation request",
                     )
-                    return False
+                    status_response.failure(str(error))
+                    return error
                 try:
                     operation = status_response.json()
                 except Exception:
                     status_response.failure("operation response is not JSON")
-                    return False
+                    return failure_message(
+                        "PRECONDITION_FAILED",
+                        "cart operation response is not JSON",
+                    )
                 status_response.success()
                 if operation.get("status") == "SUCCEEDED":
-                    return True
+                    return None
                 if operation.get("status") == "REJECTED":
-                    return False
-        return False
+                    return failure_message(
+                        "PRECONDITION_FAILED", "cart operation was rejected"
+                    )
+        return failure_message(
+            "PRECONDITION_FAILED", "cart operation did not complete"
+        )
 
     def checkout(
         self,
@@ -687,15 +771,14 @@ class NatsAdapter(StorefrontAdapter):
                     name="/cart/checkout",
                 ) as response:
                     if response.status_code != 202:
-                        response.failure(
-                            "unexpected checkout status "
-                            f"{response.status_code}"
+                        error = http_status_failure(
+                            response.status_code,
+                            "HTTP_FAILURE",
+                            "checkout request",
                         )
-                        context["outcome"] = "HTTP_FAILURE"
-                        acceptance_context["outcome"] = "HTTP_FAILURE"
-                        error = failure_message(
-                            "HTTP_FAILURE", f"status {response.status_code}"
-                        )
+                        response.failure(str(error))
+                        context["outcome"] = error.outcome
+                        acceptance_context["outcome"] = error.outcome
                         acceptance_measurement["exception"] = error
                     else:
                         location = response.headers.get("Location")
@@ -943,17 +1026,16 @@ class NatsAdapter(StorefrontAdapter):
                 close_stream_response(status_response)
                 return None, None
             if status_response.status_code != 200:
-                status_response.failure(
-                    "unexpected order event stream status "
-                    f"{status_response.status_code}"
-                )
-                close_stream_response(status_response)
-                return None, failure_message(
+                error = http_status_failure(
+                    status_response.status_code,
                     "STATUS_ERROR",
-                    f"SSE status {status_response.status_code}",
+                    "SSE",
                     received_monotonic=received_monotonic,
                     received_epoch=received_epoch,
                 )
+                status_response.failure(str(error))
+                close_stream_response(status_response)
+                return None, error
             content_type = status_response.headers.get("Content-Type", "")
             if not is_event_stream_content_type(content_type):
                 status_response.failure(
@@ -1205,8 +1287,9 @@ class ClosedLoopUser(FastHttpUser):
     @task(1)
     def checkout(self) -> None:
         self.ensure_submission_window()
-        if not self.adapter.add_item():
-            self.adapter.record_precondition_failure()
+        preparation_error = self.adapter.add_item()
+        if preparation_error is not None:
+            self.adapter.record_precondition_failure(failure=preparation_error)
             return
         self.adapter.checkout()
 
@@ -1287,9 +1370,12 @@ class OpenLoopDriver(FastHttpUser):
             CONFIG.seed + index + 1,
             session_id=f"benchmark-{uuid.uuid4()}",
         )
-        if not adapter.add_item():
+        preparation_error = adapter.add_item()
+        if preparation_error is not None:
             adapter.record_precondition_failure(
-                scheduled_at, schedule_delay_ms
+                scheduled_at,
+                schedule_delay_ms,
+                failure=preparation_error,
             )
             return
         adapter.checkout(
@@ -1358,7 +1444,9 @@ class SaturationDriver(FastHttpUser):
             remaining = float(CONFIG.duration_seconds)
             rung = 0
             while remaining > 0:
-                duration = min(float(SATURATION_STEP_SECONDS), remaining)
+                duration = min(
+                    float(CONFIG.saturation_step_seconds), remaining
+                )
                 target_rate = min(
                     CONFIG.saturation_max_rate,
                     SATURATION_START_RATE + rung * SATURATION_STEP_RATE,
@@ -1491,12 +1579,14 @@ class SaturationDriver(FastHttpUser):
             CONFIG.seed + (rung or 0) * 1_000_003 + ordinal + 1,
             session_id=f"benchmark-{uuid.uuid4()}",
         )
-        if not adapter.add_item():
+        preparation_error = adapter.add_item()
+        if preparation_error is not None:
             adapter.record_precondition_failure(
                 scheduled_at,
                 schedule_delay_ms,
                 rung,
                 target_rate,
+                failure=preparation_error,
             )
             return
         adapter.checkout(

@@ -29,7 +29,26 @@ class ParseResultsTest(unittest.TestCase):
             table = outputs[0].read_text(encoding="utf-8")
             self.assertIn("Users & Orders & Success rate & P95 & std", table)
             self.assertIn(r"10 & 5 & 100.00\% & 50.000 & 0.000", table)
-            self.assertIn(r"1500 & 40 & 75.00\% & 200.000 & 100.000", table)
+            self.assertIn(r"1500 & 20 & 75.00\% & 200.000 & 100.000", table)
+
+    def test_closed_order_average_can_be_fractional(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            folder = Path(temporary)
+            submitted_per_run = (1_100, 1_100, 1_100, 1_100, 1_099)
+            for run, submitted in enumerate(submitted_per_run):
+                self._write_result(
+                    folder / f"run-{run}.json",
+                    "closed",
+                    100,
+                    submitted,
+                    submitted,
+                    10,
+                )
+
+            outputs = process_folder(folder)
+
+            table = outputs[0].read_text(encoding="utf-8")
+            self.assertIn(r"100 & 1099.8 & 100.00\%", table)
 
     def test_writes_independent_saturation_graphs(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

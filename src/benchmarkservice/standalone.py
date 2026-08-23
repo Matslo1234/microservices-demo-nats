@@ -46,12 +46,13 @@ def parser() -> argparse.ArgumentParser:
         default="closed",
     )
     result.add_argument("--warmup-seconds", type=int, default=30)
-    result.add_argument("--duration-seconds", type=int, default=120)
+    result.add_argument("--duration-seconds", type=int)
     result.add_argument("--drain-seconds", type=int, default=60)
     result.add_argument("--users", type=int, default=10)
     result.add_argument("--spawn-rate", type=float, default=1.0)
     result.add_argument("--arrival-rate", type=float, default=1.0)
     result.add_argument("--saturation-max-rate", type=float, default=1_000.0)
+    result.add_argument("--saturation-step-seconds", type=int, default=30)
     result.add_argument("--outcome-timeout-seconds", type=float, default=30.0)
     result.add_argument(
         "--settlement-timeout-seconds", type=float, default=60.0
@@ -78,6 +79,8 @@ def parser() -> argparse.ArgumentParser:
 
 def config_from_args(arguments: argparse.Namespace) -> BenchmarkConfig:
     values = vars(arguments).copy()
+    if values["duration_seconds"] is None:
+        del values["duration_seconds"]
     values["collect_nats_metrics"] = (
         arguments.collect_nats_metrics
         if arguments.application_type == "NATS"

@@ -287,10 +287,28 @@ async def _process_message(message, handler):
         await message.nak(delay=1)
 
 
-async def _consume(subscription, handler):
+async def _consume(subscription, handler, batch_size=None, concurrency=None):
+    batch_size = (
+        _integer("NATS_CONSUMER_BATCH_SIZE", 32)
+        if batch_size is None else batch_size
+    )
+    concurrency = (
+        _integer("NATS_CONSUMER_CONCURRENCY", 8)
+        if concurrency is None else concurrency
+    )
+    if batch_size < 1 or batch_size > 256:
+        raise ValueError("NATS_CONSUMER_BATCH_SIZE must be between 1 and 256")
+    if concurrency < 1 or concurrency > 64:
+        raise ValueError("NATS_CONSUMER_CONCURRENCY must be between 1 and 64")
+    slots = asyncio.Semaphore(concurrency)
+
+    async def process(message):
+        async with slots:
+            await _process_message(message, handler)
+
     while not _stop.is_set():
         try:
-            messages = await subscription.fetch(batch=1, timeout=1)
+            messages = await subscription.fetch(batch=batch_size, timeout=1)
         except (NatsTimeoutError, asyncio.TimeoutError):
             continue
         except (nats.errors.Error, ServiceUnavailableError):
@@ -306,7 +324,7 @@ async def _consume(subscription, handler):
                 "NATS event received",
                 extra={"message_kind": "event"},
             )
-            await _process_message(messages[0], handler)
+            await asyncio.gather(*(process(message) for message in messages))
 
 
 async def _durable(js, subject, durable):
@@ -381,7 +399,12 @@ async def _run():
     )
     try:
         await asyncio.gather(
-            _consume(catalog, lambda message: _apply_catalog(catalog_store, message)),
+            _consume(
+                catalog,
+                lambda message: _apply_catalog(catalog_store, message),
+                batch_size=1,
+                concurrency=1,
+            ),
             _consume(cart, lambda message: _handle_trigger(js, catalog_store, message)),
             _consume(page, lambda message: _handle_trigger(js, catalog_store, message)),
         )

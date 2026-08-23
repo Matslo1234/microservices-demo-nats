@@ -58,6 +58,10 @@ spec:
           value: "true"
         - name: NATS_REQUIRED_SUBSCRIPTIONS
           value: "ad-page-views-v1"
+        - name: NATS_CONSUMER_BATCH_SIZE
+          value: "32"
+        - name: NATS_CONSUMER_CONCURRENCY
+          value: "8"
         envFrom:
         - configMapRef:
             name: nats-client-config
@@ -69,10 +73,10 @@ spec:
           readOnly: true
         resources:
           requests:
-            cpu: 125m
+            cpu: 200m
             memory: 180Mi
           limits:
-            cpu: 300m
+            cpu: 500m
             memory: 2Gi
         readinessProbe:
           initialDelaySeconds: 20
