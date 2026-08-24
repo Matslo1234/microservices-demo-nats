@@ -249,14 +249,17 @@ class ParseResultsTest(unittest.TestCase):
             for output in outputs:
                 self.assert_png(output)
 
-    def test_uses_observed_goodput_for_saturation_graph(self) -> None:
-        summary = self._saturation_summary("GRPC")
+    def test_uses_submitted_and_observed_goodput_for_saturation_graph(
+        self,
+    ) -> None:
+        summary = self._saturation_summary("NATS")
 
-        goodput, _, _ = saturation_points(
+        submitted, observed, _, _ = saturation_points(
             Result(path=Path("summary.json"), summary=summary)
         )
 
-        self.assertEqual([(10.0, 9.0), (20.0, 17.0)], goodput)
+        self.assertEqual([(10.0, 9.5), (20.0, 18.5)], submitted)
+        self.assertEqual([(10.0, 9.0), (20.0, 17.0)], observed)
 
     def test_writes_single_rung_nats_saturation_pngs(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

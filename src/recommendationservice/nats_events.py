@@ -311,14 +311,12 @@ async def _consume(subscription, handler, batch_size=None, concurrency=None):
             messages = await subscription.fetch(batch=batch_size, timeout=1)
         except (NatsTimeoutError, asyncio.TimeoutError):
             continue
-        except (nats.errors.Error, ServiceUnavailableError):
-            # A JetStream leader transition must not permanently stop the
-            # background worker and leave a healthy-looking process idle.
+        except (nats.errors.Error, ServiceUnavailableError) as error:
+            # A failed pull subscription is not made healthy by an otherwise
+            # connected socket. Let the outer supervisor rebuild the
+            # connection and all three durable subscriptions.
             _ready.clear()
-            await asyncio.sleep(0.1)
-            if _connection and _connection.is_connected:
-                _ready.set()
-            continue
+            raise RuntimeError("NATS durable subscription fetch failed") from error
         if messages:
             logger.debug(
                 "NATS event received",
@@ -397,18 +395,24 @@ async def _run():
         "NATS event consumers and shared catalog KV are ready",
         extra={"catalog_bucket": CATALOG_BUCKET},
     )
+    consumers = [
+        asyncio.create_task(_consume(
+            catalog,
+            lambda message: _apply_catalog(catalog_store, message),
+            batch_size=1,
+            concurrency=1,
+        )),
+        asyncio.create_task(_consume(
+            cart, lambda message: _handle_trigger(js, catalog_store, message))),
+        asyncio.create_task(_consume(
+            page, lambda message: _handle_trigger(js, catalog_store, message))),
+    ]
     try:
-        await asyncio.gather(
-            _consume(
-                catalog,
-                lambda message: _apply_catalog(catalog_store, message),
-                batch_size=1,
-                concurrency=1,
-            ),
-            _consume(cart, lambda message: _handle_trigger(js, catalog_store, message)),
-            _consume(page, lambda message: _handle_trigger(js, catalog_store, message)),
-        )
+        await asyncio.gather(*consumers)
     finally:
+        for consumer in consumers:
+            consumer.cancel()
+        await asyncio.gather(*consumers, return_exceptions=True)
         if not _connection.is_closed:
             await _connection.drain()
 

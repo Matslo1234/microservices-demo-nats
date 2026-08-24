@@ -140,12 +140,11 @@ func (fe *frontendServer) orderHandler(response http.ResponseWriter, request *ht
 			})
 		})
 	if err != nil {
-		response.Header().Set("Retry-After", orderAPIPollRetryAfter)
 		if errors.Is(err, errProjectionNotFound) {
-			http.Error(response, "order not found", http.StatusNotFound)
+			writeRetryableOrderError(response, "order not found", http.StatusNotFound)
 			return
 		}
-		http.Error(response, "order status unavailable", http.StatusServiceUnavailable)
+		writeRetryableOrderError(response, "order status unavailable", http.StatusServiceUnavailable)
 		return
 	}
 	if !acceptsHTML(request) {
@@ -174,14 +173,14 @@ func (fe *frontendServer) orderEventsHandler(response http.ResponseWriter, reque
 	updates := make(chan *nats.Msg, orderSSEChannelSize)
 	subscription, err := fe.natsConn.ChanSubscribe(subject, updates)
 	if err != nil {
-		http.Error(response, "order updates unavailable", http.StatusServiceUnavailable)
+		writeRetryableOrderError(response, "order updates unavailable", http.StatusServiceUnavailable)
 		return
 	}
 	defer func() { _ = subscription.Unsubscribe() }()
 	// Ensure the subscription is active before reading the current view. Any
 	// notification racing with the query will then be buffered rather than lost.
 	if err := fe.natsConn.Flush(); err != nil {
-		http.Error(response, "order updates unavailable", http.StatusServiceUnavailable)
+		writeRetryableOrderError(response, "order updates unavailable", http.StatusServiceUnavailable)
 		return
 	}
 
@@ -190,14 +189,14 @@ func (fe *frontendServer) orderEventsHandler(response http.ResponseWriter, reque
 	})
 	if err != nil {
 		if errors.Is(err, errProjectionNotFound) {
-			http.Error(response, "order not found", http.StatusNotFound)
+			writeRetryableOrderError(response, "order not found", http.StatusNotFound)
 			return
 		}
-		http.Error(response, "order status unavailable", http.StatusServiceUnavailable)
+		writeRetryableOrderError(response, "order status unavailable", http.StatusServiceUnavailable)
 		return
 	}
 	if view.Order == nil {
-		http.Error(response, "order status unavailable", http.StatusServiceUnavailable)
+		writeRetryableOrderError(response, "order status unavailable", http.StatusServiceUnavailable)
 		return
 	}
 
@@ -250,6 +249,11 @@ func (fe *frontendServer) orderEventsHandler(response http.ResponseWriter, reque
 			}
 		}
 	}
+}
+
+func writeRetryableOrderError(response http.ResponseWriter, message string, status int) {
+	response.Header().Set("Retry-After", orderAPIPollRetryAfter)
+	http.Error(response, message, status)
 }
 
 func liveOperationSubject(prefix, operationID string) (string, error) {

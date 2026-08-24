@@ -155,6 +155,7 @@ def _bounded_integer_env(name, fallback, minimum, maximum):
 
 
 async def _fetch_messages(subscription, batch_size, retry_delay=0.1):
+  del retry_delay  # Recovery is owned by the outer connection supervisor.
   while not _stop.is_set():
     try:
       messages = await subscription.fetch(batch=batch_size, timeout=1)
@@ -164,10 +165,9 @@ async def _fetch_messages(subscription, batch_size, retry_delay=0.1):
     except (nats.errors.Error, ServiceUnavailableError) as error:
       _ready.clear()
       logger.warning(
-          "Email consumer fetch interrupted; retrying",
-          extra={"error": str(error), "retry_delay_seconds": retry_delay})
-      await asyncio.sleep(retry_delay)
-      continue
+          "Email consumer fetch interrupted; rebuilding subscription",
+          extra={"error": str(error)})
+      raise RuntimeError("email durable subscription fetch failed") from error
     _ready.set()
     if messages:
       return messages

@@ -89,6 +89,21 @@ class BenchmarkConfigTest(unittest.TestCase):
         with self.assertRaisesRegex(ConfigError, "absolute HTTP"):
             normalize_target_url("frontend:80")
 
+    def test_local_targets_use_the_runner_cluster(self) -> None:
+        config = BenchmarkConfig.from_request(
+            {"target_url": " local ", "metrics_url": "local"},
+            "NATS",
+        )
+
+        self.assertEqual("http://frontend:80", config.target_url)
+        self.assertEqual("local", config.metrics_url)
+
+        with self.assertRaisesRegex(ConfigError, "absolute HTTP"):
+            BenchmarkConfig.from_request(
+                {"target_url": "LOCAL", "metrics_url": "local"},
+                "NATS",
+            )
+
     def test_urls_are_required_for_remote_collection(self) -> None:
         with self.assertRaisesRegex(ConfigError, "target_url is required"):
             BenchmarkConfig.from_request({}, "GRPC")

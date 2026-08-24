@@ -955,6 +955,31 @@ subjects:
 - kind: ServiceAccount
   name: benchmarkservice
 ---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: online-boutique-benchmark-runner
+rules:
+- apiGroups: [""]
+  resources: ["nodes"]
+  verbs: ["get", "list"]
+- apiGroups: [""]
+  resources: ["nodes/proxy"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: online-boutique-benchmark-runner
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: online-boutique-benchmark-runner
+subjects:
+- kind: ServiceAccount
+  name: benchmark-runner
+  namespace: default
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -993,7 +1018,7 @@ spec:
             app: benchmarkservice
       containers:
       - name: server
-        image: matslo123/benchmarkservice:v0.5.0@sha256:fadc20a6dec5b018046692d01f437b46cd6ba6a57ddc7ab3e4e8342695f3945e
+        image: matslo123/benchmarkservice:v0.5.0@sha256:c1817d9dcd6c57f9858c85a8ef9693da8264f43ca940be7d4787e7d8e487ab36
         env:
         - name: PORT
           value: "8080"
@@ -1063,6 +1088,23 @@ spec:
     port: 8080
     targetPort: http
 ---
+apiVersion: v1
+kind: Service
+metadata:
+  name: benchmarkservice-external
+  labels:
+    app: benchmarkservice
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
+spec:
+  type: LoadBalancer
+  selector:
+    app: benchmarkservice
+  ports:
+  - name: http
+    port: 80
+    targetPort: http
+---
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
@@ -1129,7 +1171,7 @@ spec:
           type: RuntimeDefault
       containers:
       - name: server
-        image: matslo123/benchmarkservice:v0.5.0@sha256:fadc20a6dec5b018046692d01f437b46cd6ba6a57ddc7ab3e4e8342695f3945e
+        image: matslo123/benchmarkservice:v0.5.0@sha256:c1817d9dcd6c57f9858c85a8ef9693da8264f43ca940be7d4787e7d8e487ab36
         imagePullPolicy: IfNotPresent
         command: ["python", "metrics_server.py"]
         env:

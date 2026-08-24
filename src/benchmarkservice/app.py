@@ -52,13 +52,13 @@ HTML = r"""<!doctype html>
 <body><main>
   <h1>Online Boutique benchmark</h1>
   <p class="muted">Application type: <strong id="application"></strong>. Each run targets
-    an explicit application URL and reads metrics from the cluster being tested.</p>
+    an explicit application location and reads metrics from the cluster being tested.</p>
   <section class="card"><h2>New run</h2>
     <form id="run-form"><div class="grid">
-      <label>Target application URL<input name="target_url" type="url"
-        placeholder="https://shop.example.com" required></label>
-      <label>Target metrics URL<input name="metrics_url" type="url"
-        placeholder="https://metrics.example.com/snapshot" required></label>
+      <label>Target application URL<input name="target_url" type="text"
+        inputmode="url" placeholder="local or https://shop.example.com" required></label>
+      <label>Target metrics URL<input name="metrics_url" type="text"
+        inputmode="url" placeholder="local or https://metrics.example.com/snapshot" required></label>
       <label>Workload<select name="workload"><option value="closed">Closed-loop users</option>
         <option value="open">Open-loop capacity</option>
         <option value="saturation">Open-loop saturation ladder</option></select></label>
@@ -85,6 +85,8 @@ HTML = r"""<!doctype html>
         Runtime resources</span></label>
     </div><div class="actions"><button id="start" type="submit">Start benchmark</button>
       <button id="stop" class="danger" type="button" disabled>Stop active run</button></div>
+    <p class="muted">Use <code>local</code> for either target to use the application
+      or collect metrics in the cluster running benchmarkservice.</p>
     <p class="muted">The saturation ladder starts at 10 orders/s and adds 10 every
       configured rung interval (30 seconds by default), holding at the maximum rate once
       reached. Backlog growth and falling goodput are recorded without ending the run.

@@ -2345,6 +2345,28 @@ rules:
   - delete
 ---
 apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    boutique.online.io/k8s-cluster: local
+    boutique.online.io/region: local
+  name: online-boutique-benchmark-runner
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - nodes
+  verbs:
+  - get
+  - list
+- apiGroups:
+  - ""
+  resources:
+  - nodes/proxy
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   labels:
@@ -2358,6 +2380,22 @@ roleRef:
 subjects:
 - kind: ServiceAccount
   name: benchmarkservice
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  labels:
+    boutique.online.io/k8s-cluster: local
+    boutique.online.io/region: local
+  name: online-boutique-benchmark-runner
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: online-boutique-benchmark-runner
+subjects:
+- kind: ServiceAccount
+  name: benchmark-runner
+  namespace: default
 ---
 apiVersion: v1
 data:
@@ -2532,6 +2570,25 @@ spec:
     targetPort: http
   selector:
     app: benchmarkservice
+---
+apiVersion: v1
+kind: Service
+metadata:
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
+  labels:
+    app: benchmarkservice
+    boutique.online.io/k8s-cluster: local
+    boutique.online.io/region: local
+  name: benchmarkservice-external
+spec:
+  ports:
+  - name: http
+    port: 80
+    targetPort: http
+  selector:
+    app: benchmarkservice
+  type: LoadBalancer
 ---
 apiVersion: v1
 kind: Service
@@ -2739,7 +2796,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-adservice
-        image: matslo123/adservice:v0.4.0@sha256:3856d1a4302a98e4a39e4be1e9e7995c315e177fc028fd5eb8542a4c33394fac
+        image: matslo123/adservice:v0.4.0@sha256:2411796515dda050a5ef7381a605b840ed769b823e2d71d1c28420306fb940a1
         livenessProbe:
           httpGet:
             path: /healthz
@@ -2848,7 +2905,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-benchmarkservice
-        image: matslo123/benchmarkservice:v0.4.0@sha256:8481203eef2849c1f4de6fb1cc35c592bc9140621caf72c68160010b8241f2ee
+        image: matslo123/benchmarkservice:v0.4.0@sha256:46e153c2a90a3d765fba32b3bbfcc6f746c112a9afe6325721eb800f78a6ead6
         livenessProbe:
           httpGet:
             path: /healthz
@@ -3696,7 +3753,7 @@ spec:
             name: nats-credentials-messageoperationsservice
         - secretRef:
             name: messageoperations-admin-api
-        image: matslo123/messageoperationsservice:v0.4.0@sha256:07abbd1a93fd51c9092f347d3d34bb58bc5a848ece8524d2a092105968d12b1f
+        image: matslo123/messageoperationsservice:v0.4.0@sha256:1ebf10cc6b203bb6c3ab284ec267ee62a1a32a6cc56bb1425efb23f61fa6f627
         livenessProbe:
           failureThreshold: 6
           httpGet:
@@ -4213,7 +4270,7 @@ spec:
             name: nats-credentials-shippingservice
         - secretRef:
             name: global-application-secrets
-        image: matslo123/shippingservice:v0.4.0@sha256:d8c1054bf40a9df1917249358c272239a7685f12f9ce625d5aa5d9e0f2a3aeba
+        image: matslo123/shippingservice:v0.4.0@sha256:53c37d125e0cece352446f3677e9c06dd78545c4c0f4fd9f7941719514a61632
         livenessProbe:
           failureThreshold: 6
           httpGet:
@@ -5186,6 +5243,8 @@ spec:
   - ports:
     - port: 4222
       protocol: TCP
+    - port: 7777
+      protocol: TCP
     to:
     - namespaceSelector:
         matchLabels:
@@ -5199,6 +5258,8 @@ spec:
     - port: 443
       protocol: TCP
     - port: 8080
+      protocol: TCP
+    - port: 6443
       protocol: TCP
     to:
     - ipBlock:

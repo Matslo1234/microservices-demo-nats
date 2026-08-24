@@ -7,14 +7,18 @@ in the cluster being measured. `benchmarkservice` remains available as a
 horizontally scalable API that creates disposable Jobs in the cluster where
 that API is deployed.
 
-Every run requires two explicit URLs:
+Every run requires two explicit targets:
 
 - `target_url` (or standalone `--url`) is the externally reachable frontend;
 - `metrics_url` is the tested cluster's `/snapshot` endpoint.
 
-The target URL is part of the run configuration; there is no implicit
-`frontend` Service default. This prevents a remotely deployed runner from
-silently benchmarking its own cluster.
+For benchmarkservice API runs, either value can be the exact sentinel `local`.
+A local application target uses the `frontend` Service in the runner's
+namespace. A local metrics target collects directly from the Kubernetes API
+and local NATS endpoints. The values are independent, so a run can combine a
+local target with a remote metrics endpoint or the reverse. There is no
+implicit local default; remote runners cannot silently benchmark their own
+cluster.
 
 API replicas retain no run, lease, process, log, or artifact state in their
 pods:
@@ -103,6 +107,17 @@ You can then apply one benchmark bundle, for example:
 ```sh
 kubectl apply -f benchmark/benchmark-nats.yaml
 ```
+
+The in-cluster benchmark API and UI are exposed by the
+`benchmarkservice-external` LoadBalancer Service. Obtain its address and open
+it over HTTP:
+
+```sh
+kubectl get service benchmarkservice-external
+```
+
+For clusters without a LoadBalancer implementation, use
+`kubectl port-forward service/benchmarkservice 8080:8080` instead.
 
 An existing regional or otherwise customized NATS installation is also valid
 when it provides the `nats-client-config` and `nats-ca` ConfigMaps,
@@ -281,7 +296,10 @@ python src/benchmarkservice/parse_results.py ./benchmark-results
 
 For every saturation summary, the script uses Matplotlib to write PNGs of
 goodput and P95 outcome latency against the requested rate beside the input
-file. Rungs without a P95 latency sample are omitted from the latency graph.
+file. The goodput graph contains both completed orders attributed to the rung
+in which they were submitted and all orders whose completion was observed
+during the rung, including orders submitted earlier. Rungs without a P95
+latency sample are omitted from the latency graph.
 NATS saturation summaries
 also get a PNG of maximum consumer-pending events. Fault-tolerance summaries
 get a PNG of successfully processed requests per second; NATS fault-tolerance

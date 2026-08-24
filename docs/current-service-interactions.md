@@ -12,6 +12,9 @@ criteria are in
 ```mermaid
 flowchart LR
     User[Browser or API client] -->|HTTP / order SSE| FE[frontend]
+    Operator[Benchmark operator] -->|HTTP benchmark UI / API| Benchmark[benchmark service]
+    Benchmark -->|creates disposable Jobs| Runner[benchmark runner]
+    Runner -->|HTTP load| FE
     Load[loadgenerator] -->|HTTP| FE
 
     FE -->|Core NATS projected queries| Projection[storefront projection]
@@ -38,10 +41,12 @@ flowchart LR
     Apps[All domain workloads] -.->|HTTP health and metrics :8080| Monitor[probes / Prometheus]
 ```
 
-The frontend is the only application business endpoint exposed through a
-Kubernetes Service. `frontend:80` and `frontend-external:80` target its HTTP
-port `8080`. The cart and checkout Redis services remain private to their
-respective owners on `6379`. Backend workloads
+The storefront and benchmark control plane are externally reachable through
+Kubernetes Services. `frontend:80` and `frontend-external:80` target the
+frontend's HTTP port `8080`; `benchmarkservice:8080` and
+`benchmarkservice-external:80` target the benchmark API and UI on port `8080`.
+The cart and checkout Redis services remain private to their respective owners
+on `6379`. Other backend workloads
 do not have Kubernetes Services or business-listening ports; port `8080` on
 those pods exposes only `/healthz`, `/readyz`, and `/metrics`.
 

@@ -28,6 +28,17 @@ type memoryKVEntry struct {
 	revision uint64
 }
 
+func TestProjectionConsumerTerminalErrorsRequireRebind(t *testing.T) {
+	for _, err := range []error{nats.ErrBadSubscription, nats.ErrSubscriptionClosed, nats.ErrConsumerDeleted, nats.ErrNoResponders} {
+		if !projectionConsumerTerminal(err) {
+			t.Fatalf("%v was not classified as terminal", err)
+		}
+	}
+	if projectionConsumerTerminal(nats.ErrTimeout) {
+		t.Fatal("fetch timeout was classified as terminal")
+	}
+}
+
 func (entry memoryKVEntry) Bucket() string             { return "TEST" }
 func (entry memoryKVEntry) Key() string                { return entry.key }
 func (entry memoryKVEntry) Value() []byte              { return append([]byte(nil), entry.value...) }

@@ -64,10 +64,23 @@ func (runtime *checkoutRuntime) run(address, prefix string, clustered bool) {
 				log.WithFields(logrus.Fields{
 					"store": "redis-cluster", "store_prefix": prefix, "worker_id": worker.workerID,
 				}).Info("checkout dependencies are ready")
-				<-runtime.stop
-				return
+				select {
+				case <-runtime.stop:
+					return
+				case workerErr := <-worker.failed:
+					err = workerErr
+					log.WithError(workerErr).Error("checkout consumer lifecycle failed; rebuilding dependencies")
+					runtime.mu.Lock()
+					if runtime.worker == worker {
+						runtime.worker = nil
+					}
+					runtime.mu.Unlock()
+					_ = worker.Close()
+				}
 			}
-			_ = store.Close()
+			if worker == nil {
+				_ = store.Close()
+			}
 		}
 		delay := stateless.Backoff(attempt, 250*time.Millisecond, 10*time.Second)
 		log.WithError(err).WithField("retry_in", delay.String()).Warn("checkout dependency initialization failed")

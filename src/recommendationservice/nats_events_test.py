@@ -6,9 +6,9 @@ import asyncio
 import unittest
 from unittest.mock import patch
 
-from nats.js.errors import NoKeysError
+from nats.js.errors import NoKeysError, ServiceUnavailableError
 
-from nats_events import _NATSCatalogStore, _consume, _stop
+from nats_events import _NATSCatalogStore, _consume, _ready, _stop
 
 
 class Message:
@@ -48,9 +48,11 @@ class StreamingConsumerTests(unittest.IsolatedAsyncioTestCase):
 
   async def asyncSetUp(self):
     _stop.clear()
+    _ready.clear()
 
   async def asyncTearDown(self):
     _stop.clear()
+    _ready.clear()
 
   async def test_processes_each_message_as_soon_as_it_arrives(self):
     message = Message()
@@ -105,6 +107,17 @@ class StreamingConsumerTests(unittest.IsolatedAsyncioTestCase):
     store = _NATSCatalogStore(EmptyBucket())
 
     self.assertEqual([], await store.keys())
+
+  async def test_failed_subscription_is_returned_to_outer_supervisor(self):
+    class FailedSubscription:
+      async def fetch(self, **_request):
+        raise ServiceUnavailableError
+
+    _ready.set()
+    with self.assertRaisesRegex(RuntimeError, "subscription fetch failed"):
+      await _consume(FailedSubscription(), lambda _message: None)
+
+    self.assertFalse(_ready.is_set())
 
 
 if __name__ == "__main__":

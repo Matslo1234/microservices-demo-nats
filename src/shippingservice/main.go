@@ -48,7 +48,23 @@ func (runtime *shippingRuntime) initialize() {
 			runtime.worker = worker
 			runtime.initialized.Store(true)
 			runtime.mu.Unlock()
-			return
+			if worker == nil {
+				return
+			}
+			select {
+			case <-runtime.stop:
+				return
+			case workerErr := <-worker.failed:
+				err = workerErr
+				log.WithError(workerErr).Error("shipping consumer lifecycle failed; rebuilding NATS worker")
+				runtime.mu.Lock()
+				if runtime.worker == worker {
+					runtime.worker = nil
+				}
+				runtime.initialized.Store(false)
+				runtime.mu.Unlock()
+				worker.Close()
+			}
 		}
 		log.WithError(err).Warn("shipping NATS initialization interrupted; retrying")
 		select {

@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -41,13 +42,20 @@ func main() {
 		}()
 	}
 
-	var ready atomic.Bool
 	var activeProjector atomic.Pointer[projector]
+	var activeRuntime atomic.Pointer[projectionRuntime]
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", func(response http.ResponseWriter, _ *http.Request) { _, _ = response.Write([]byte("ok")) })
+	mux.HandleFunc("/healthz", func(response http.ResponseWriter, _ *http.Request) {
+		if current := activeRuntime.Load(); current != nil && !current.healthy() {
+			http.Error(response, "query service stopped", http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = response.Write([]byte("ok"))
+	})
 	mux.HandleFunc("/readyz", func(response http.ResponseWriter, _ *http.Request) {
-		if !ready.Load() {
+		current := activeRuntime.Load()
+		if current == nil || !current.ready() {
 			http.Error(response, "not ready", http.StatusServiceUnavailable)
 			return
 		}
@@ -57,7 +65,7 @@ func main() {
 	mux.HandleFunc("/metrics", func(response http.ResponseWriter, _ *http.Request) {
 		response.Header().Set("Content-Type", "text/plain; version=0.0.4")
 		connected := 0
-		if ready.Load() {
+		if current := activeRuntime.Load(); current != nil && current.ready() {
 			connected = 1
 		}
 		_, _ = fmt.Fprintf(response, "boutique_dependency_ready{service=\"storefrontprojectionservice\",dependency=\"nats\"} %d\n", connected)
@@ -112,14 +120,14 @@ func main() {
 		default:
 		}
 		var err error
-		runtime, err = initializeProjectionRuntime(&ready)
+		runtime, err = initializeProjectionRuntime()
 		if err != nil {
 			log.Printf("storefront projection dependencies are unavailable; retrying: %v", err)
 			time.Sleep(time.Second)
 		}
 	}
 	activeProjector.Store(runtime.projector)
-	ready.Store(true)
+	activeRuntime.Store(runtime)
 	log.Printf(
 		"storefront projection consumer established (region=%s k8s_cluster=%s nats_cluster=%s stream=%s durable=%s rebuilding=%t query_subscriptions=%d)",
 		runtime.projector.config.regionID,
@@ -128,38 +136,57 @@ func main() {
 		runtime.projector.config.eventStream,
 		runtime.projector.config.durable,
 		runtime.rebuilding,
-		runtime.queryEndpointCount,
+		runtime.queryEndpointCount(),
 	)
 
-	select {
-	case <-signals:
-	case serveErr := <-serveErrors:
-		log.Printf("HTTP server failed: %v", serveErr)
+	running := true
+	for running {
+		select {
+		case <-signals:
+			running = false
+		case serveErr := <-serveErrors:
+			log.Printf("HTTP server failed: %v", serveErr)
+			running = false
+		case role := <-runtime.queryStopped:
+			// A slow-consumer error makes nats.go stop the complete micro.Service.
+			// Give the overloaded callers a moment to observe Retry-After before
+			// restoring only the affected service role.
+			time.Sleep(time.Second)
+			if err := runtime.repairQueryService(role); err != nil {
+				log.Printf("NATS query service recovery failed role=%q error=%v; exiting for pod restart", role, err)
+				running = false
+			}
+		}
 	}
-	ready.Store(false)
+	activeRuntime.Store(nil)
 	activeProjector.Store(nil)
-	close(runtime.stop)
 	_ = server.Close()
-	if err := runtime.queryService.Stop(); err != nil {
-		log.Printf("NATS query service drain failed: %v", err)
-	}
-	runtime.projector.close()
-	if err := runtime.nc.Drain(); err != nil {
-		log.Printf("NATS drain failed: %v", err)
-	}
+	runtime.close()
+}
+
+type queryServiceRuntime struct {
+	role          string
+	nc            *nats.Conn
+	service       micro.Service
+	endpointCount int
 }
 
 type projectionRuntime struct {
-	nc                 *nats.Conn
-	projector          *projector
-	subscription       *nats.Subscription
-	queryService       micro.Service
-	queryEndpointCount int
-	rebuilding         bool
-	stop               chan struct{}
+	nc              *nats.Conn
+	projector       *projector
+	subscription    *nats.Subscription
+	subscriptionMu  sync.RWMutex
+	projectionReady atomic.Bool
+	consumerHealthy atomic.Bool
+	queryMu         sync.RWMutex
+	queryServices   map[string]*queryServiceRuntime
+	queryStopped    chan string
+	rebuilding      bool
+	stop            chan struct{}
+	closeOnce       sync.Once
 }
 
-func initializeProjectionRuntime(ready *atomic.Bool) (*projectionRuntime, error) {
+func initializeProjectionRuntime() (*projectionRuntime, error) {
 	config, err := loadProjectionConfig()
 	if err != nil {
 		return nil, err
@@ -180,40 +207,267 @@ func initializeProjectionRuntime(ready *atomic.Bool) (*projectionRuntime, error)
 		nc.Close()
 		return nil, err
 	}
-	queryService, queryEndpointCount, err := projector.registerQueries(nc)
-	if err != nil {
-		_ = subscription.Unsubscribe()
-		projector.close()
-		nc.Close()
-		return nil, err
+	runtime := &projectionRuntime{
+		nc: nc, projector: projector, subscription: subscription,
+		queryServices: make(map[string]*queryServiceRuntime),
+		queryStopped:  make(chan string, 8), rebuilding: rebuilding,
+		stop: make(chan struct{}),
 	}
 	nc.SetDisconnectErrHandler(func(_ *nats.Conn, disconnectErr error) {
 		log.Printf("NATS disconnected: %v", disconnectErr)
-		ready.Store(false)
+		runtime.projectionReady.Store(false)
 	})
 	nc.SetReconnectHandler(func(_ *nats.Conn) {
-		ready.Store(false)
+		runtime.projectionReady.Store(false)
 		go func() {
 			if err := projector.waitForInitialReplay(config.catchupTimeout); err != nil {
 				log.Printf("NATS reconnected but projection catch-up is incomplete: %v", err)
 				return
 			}
-			ready.Store(true)
+			runtime.projectionReady.Store(true)
 		}()
 	})
-	runtime := &projectionRuntime{
-		nc: nc, projector: projector, subscription: subscription,
-		queryService: queryService, queryEndpointCount: queryEndpointCount,
-		rebuilding: rebuilding, stop: make(chan struct{}),
+	for _, role := range []string{browseQueryRole, trackingQueryRole} {
+		queryConnection, err := connectNATSConnection(config, "queries-"+role)
+		if err != nil {
+			runtime.close()
+			return nil, err
+		}
+		configureQueryConnection(queryConnection, role)
+		service, endpointCount, err := projector.registerQueries(queryConnection, role, runtime.queryStopped)
+		if err != nil {
+			queryConnection.Close()
+			runtime.close()
+			return nil, err
+		}
+		runtime.queryServices[role] = &queryServiceRuntime{
+			role: role, nc: queryConnection, service: service, endpointCount: endpointCount,
+		}
 	}
-	go runtime.projector.run(runtime.subscription, runtime.stop)
+	runtime.consumerHealthy.Store(true)
+	go runtime.superviseProjectionConsumer(subscription)
 	if err := projector.waitForInitialReplay(config.catchupTimeout); err != nil {
-		close(runtime.stop)
-		_ = runtime.queryService.Stop()
-		_ = runtime.subscription.Unsubscribe()
-		projector.close()
-		nc.Close()
+		runtime.close()
 		return nil, err
 	}
+	runtime.projectionReady.Store(true)
 	return runtime, nil
+}
+
+func configureQueryConnection(nc *nats.Conn, role string) {
+	nc.SetDisconnectErrHandler(func(_ *nats.Conn, err error) {
+		log.Printf("NATS query connection disconnected role=%q error=%v", role, err)
+	})
+	nc.SetReconnectHandler(func(_ *nats.Conn) {
+		log.Printf("NATS query connection reconnected role=%q", role)
+	})
+}
+
+func (runtime *projectionRuntime) ready() bool {
+	if !runtime.projectionReady.Load() || !runtime.consumerHealthy.Load() ||
+		runtime.nc == nil || !runtime.nc.IsConnected() {
+		return false
+	}
+	runtime.queryMu.RLock()
+	defer runtime.queryMu.RUnlock()
+	if len(runtime.queryServices) != len(queryNamesByRole) {
+		return false
+	}
+	for _, queryRuntime := range runtime.queryServices {
+		if queryRuntime.nc == nil || !queryRuntime.nc.IsConnected() ||
+			queryRuntime.service == nil || queryRuntime.service.Stopped() {
+			return false
+		}
+	}
+	return true
+}
+
+func (runtime *projectionRuntime) healthy() bool {
+	if !runtime.consumerHealthy.Load() || runtime.nc == nil || runtime.nc.IsClosed() {
+		return false
+	}
+	runtime.queryMu.RLock()
+	defer runtime.queryMu.RUnlock()
+	for _, queryRuntime := range runtime.queryServices {
+		if queryRuntime.nc == nil || queryRuntime.nc.IsClosed() ||
+			queryRuntime.service == nil || queryRuntime.service.Stopped() {
+			return false
+		}
+	}
+	return true
+}
+
+func (runtime *projectionRuntime) setSubscription(subscription *nats.Subscription) {
+	runtime.subscriptionMu.Lock()
+	runtime.subscription = subscription
+	runtime.subscriptionMu.Unlock()
+}
+
+func (runtime *projectionRuntime) currentSubscription() *nats.Subscription {
+	runtime.subscriptionMu.RLock()
+	defer runtime.subscriptionMu.RUnlock()
+	return runtime.subscription
+}
+
+func (runtime *projectionRuntime) superviseProjectionConsumer(initial *nats.Subscription) {
+	subscription := initial
+	needsCatchup := false
+	for {
+		runtime.setSubscription(subscription)
+		if !needsCatchup {
+			runtime.consumerHealthy.Store(true)
+		}
+		runDone := make(chan error, 1)
+		go func(current *nats.Subscription) {
+			runDone <- runtime.projector.run(current, runtime.stop)
+		}(subscription)
+
+		var runErr error
+		if needsCatchup {
+			catchupDone := make(chan error, 1)
+			go func() {
+				catchupDone <- runtime.projector.waitForInitialReplay(runtime.projector.config.catchupTimeout)
+			}()
+			select {
+			case <-runtime.stop:
+				return
+			case runErr = <-runDone:
+			case catchupErr := <-catchupDone:
+				if catchupErr != nil {
+					_ = subscription.Unsubscribe()
+					runErr = <-runDone
+					log.Printf("projection consumer recovery did not catch up: %v", catchupErr)
+				} else {
+					runtime.consumerHealthy.Store(true)
+					runtime.projectionReady.Store(runtime.nc.IsConnected())
+					log.Printf("projection consumer recovered durable=%q", runtime.projector.config.durable)
+					select {
+					case <-runtime.stop:
+						return
+					case runErr = <-runDone:
+					}
+				}
+			}
+		} else {
+			select {
+			case <-runtime.stop:
+				return
+			case runErr = <-runDone:
+			}
+		}
+
+		runtime.consumerHealthy.Store(false)
+		runtime.projectionReady.Store(false)
+		select {
+		case <-runtime.stop:
+			return
+		default:
+		}
+		log.Printf("projection consumer interrupted durable=%q error=%v; rebinding", runtime.projector.config.durable, runErr)
+		for {
+			timer := time.NewTimer(time.Second)
+			select {
+			case <-runtime.stop:
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
+			next, _, err := runtime.projector.subscribe()
+			if err != nil {
+				log.Printf("projection consumer rebind failed durable=%q error=%v", runtime.projector.config.durable, err)
+				continue
+			}
+			subscription = next
+			needsCatchup = true
+			break
+		}
+	}
+}
+
+func (runtime *projectionRuntime) queryEndpointCount() int {
+	runtime.queryMu.RLock()
+	defer runtime.queryMu.RUnlock()
+	total := 0
+	for _, queryRuntime := range runtime.queryServices {
+		total += queryRuntime.endpointCount
+	}
+	return total
+}
+
+func (runtime *projectionRuntime) repairQueryService(role string) error {
+	runtime.queryMu.RLock()
+	current := runtime.queryServices[role]
+	runtime.queryMu.RUnlock()
+	if current == nil {
+		return fmt.Errorf("query service role %q is not registered", role)
+	}
+	if !current.service.Stopped() {
+		return nil
+	}
+
+	queryConnection := current.nc
+	createdConnection := false
+	if queryConnection.IsClosed() {
+		var err error
+		queryConnection, err = connectNATSConnection(runtime.projector.config, "queries-"+role)
+		if err != nil {
+			return err
+		}
+		createdConnection = true
+		configureQueryConnection(queryConnection, role)
+	}
+	service, endpointCount, err := runtime.projector.registerQueries(queryConnection, role, runtime.queryStopped)
+	if err != nil {
+		if createdConnection {
+			queryConnection.Close()
+		}
+		return err
+	}
+
+	runtime.queryMu.Lock()
+	runtime.queryServices[role] = &queryServiceRuntime{
+		role: role, nc: queryConnection, service: service, endpointCount: endpointCount,
+	}
+	runtime.queryMu.Unlock()
+	if createdConnection {
+		current.nc.Close()
+	}
+	log.Printf("NATS query service recovered role=%q query_subscriptions=%d", role, endpointCount)
+	return nil
+}
+
+func (runtime *projectionRuntime) close() {
+	runtime.closeOnce.Do(func() {
+		runtime.projectionReady.Store(false)
+		close(runtime.stop)
+		if subscription := runtime.currentSubscription(); subscription != nil {
+			_ = subscription.Unsubscribe()
+		}
+		runtime.queryMu.RLock()
+		queryRuntimes := make([]*queryServiceRuntime, 0, len(runtime.queryServices))
+		for _, queryRuntime := range runtime.queryServices {
+			queryRuntimes = append(queryRuntimes, queryRuntime)
+		}
+		runtime.queryMu.RUnlock()
+		for _, queryRuntime := range queryRuntimes {
+			if queryRuntime.service != nil && !queryRuntime.service.Stopped() {
+				if err := queryRuntime.service.Stop(); err != nil {
+					log.Printf("NATS query service drain failed role=%q error=%v", queryRuntime.role, err)
+				}
+			}
+			if queryRuntime.nc != nil && !queryRuntime.nc.IsClosed() {
+				if err := queryRuntime.nc.Drain(); err != nil {
+					log.Printf("NATS query connection drain failed role=%q error=%v", queryRuntime.role, err)
+				}
+			}
+		}
+		if runtime.projector != nil {
+			runtime.projector.close()
+		}
+		if runtime.nc != nil && !runtime.nc.IsClosed() {
+			if err := runtime.nc.Drain(); err != nil {
+				log.Printf("NATS drain failed: %v", err)
+			}
+		}
+	})
 }

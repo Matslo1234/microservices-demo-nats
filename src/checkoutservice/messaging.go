@@ -87,21 +87,24 @@ type checkoutMetrics struct {
 }
 
 type checkoutWorker struct {
-	store          *stateStore
-	nc             *nats.Conn
-	js             nats.JetStreamContext
-	subscriptions  []*nats.Subscription
-	publishTimeout time.Duration
-	stepTimeout    time.Duration
-	leaseDuration  time.Duration
-	leaseStore     *stateless.RedisLeaseStore
-	workerID       string
-	publishHook    func(resultMessage) error
-	metrics        checkoutMetrics
-	stop           chan struct{}
-	wg             sync.WaitGroup
-	ready          atomic.Bool
-	closeOnce      sync.Once
+	store           *stateStore
+	nc              *nats.Conn
+	js              nats.JetStreamContext
+	subscriptions   []*nats.Subscription
+	publishTimeout  time.Duration
+	stepTimeout     time.Duration
+	leaseDuration   time.Duration
+	leaseStore      *stateless.RedisLeaseStore
+	workerID        string
+	publishHook     func(resultMessage) error
+	metrics         checkoutMetrics
+	stop            chan struct{}
+	failed          chan error
+	wg              sync.WaitGroup
+	ready           atomic.Bool
+	lifecycleFailed atomic.Bool
+	failureOnce     sync.Once
+	closeOnce       sync.Once
 }
 
 func startCheckoutWorker(store *stateStore) (*checkoutWorker, error) {
@@ -157,7 +160,7 @@ func startCheckoutWorker(store *stateStore) (*checkoutWorker, error) {
 	worker := &checkoutWorker{
 		store: store, publishTimeout: publishTimeout, stepTimeout: stepTimeout,
 		leaseDuration: leaseDuration, leaseStore: leaseStore, workerID: workerID,
-		stop: make(chan struct{}),
+		stop: make(chan struct{}), failed: make(chan error, 1),
 	}
 	connectionName := fmt.Sprintf("checkoutservice/stateless-phase5/%s/%s", os.Getenv("REGION_ID"), os.Getenv("K8S_CLUSTER_NAME"))
 	nc, err := nats.Connect(url, nats.Name(connectionName),
@@ -168,7 +171,11 @@ func startCheckoutWorker(store *stateStore) (*checkoutWorker, error) {
 			worker.ready.Store(false)
 			log.WithError(disconnectErr).Warn("NATS disconnected")
 		}),
-		nats.ReconnectHandler(func(_ *nats.Conn) { worker.ready.Store(true) }))
+		nats.ReconnectHandler(func(_ *nats.Conn) {
+			if !worker.lifecycleFailed.Load() {
+				worker.ready.Store(true)
+			}
+		}))
 	if err != nil {
 		return nil, fmt.Errorf("connect checkoutservice to NATS: %w", err)
 	}
@@ -215,12 +222,14 @@ func startCheckoutWorker(store *stateStore) (*checkoutWorker, error) {
 		worker.wg.Add(1)
 		go func() {
 			defer worker.wg.Done()
-			worker.consume(
+			if consumeErr := worker.consume(
 				subscription,
 				definition.handler,
 				definition.fetchSize,
 				definition.parallelism,
-			)
+			); consumeErr != nil {
+				worker.reportFailure(fmt.Errorf("consumer %s: %w", definition.durable, consumeErr))
+			}
 		}()
 		return nil
 	}
@@ -364,34 +373,39 @@ func (worker *checkoutWorker) consume(
 	handler checkoutMessageHandler,
 	fetchSize int,
 	parallelism int,
-) {
+) error {
 	for {
 		select {
 		case <-worker.stop:
-			return
+			return nil
 		default:
 		}
 		batch, err := subscription.FetchBatch(fetchSize, nats.MaxWait(time.Second))
 		if err != nil {
-			if !checkoutConsumerStopped(err) {
-				log.WithError(err).Error("checkout consumer fetch failed")
-				time.Sleep(time.Second)
+			if checkoutConsumerTerminal(err) {
+				return err
 			}
 			continue
 		}
 		worker.processStream(batch.Messages(), handler, fetchSize, parallelism)
-		if err := batch.Error(); err != nil && !checkoutConsumerStopped(err) {
-			log.WithError(err).Error("checkout consumer stream failed")
-			time.Sleep(time.Second)
+		if err := batch.Error(); err != nil {
+			if checkoutConsumerTerminal(err) {
+				return err
+			}
 		}
 	}
 }
 
-func checkoutConsumerStopped(err error) bool {
-	return errors.Is(err, nats.ErrTimeout) ||
-		errors.Is(err, nats.ErrConnectionClosed) ||
-		errors.Is(err, nats.ErrBadSubscription) ||
-		errors.Is(err, nats.ErrSubscriptionClosed)
+func checkoutConsumerTerminal(err error) bool {
+	return err != nil && !errors.Is(err, nats.ErrTimeout)
+}
+
+func (worker *checkoutWorker) reportFailure(err error) {
+	worker.failureOnce.Do(func() {
+		worker.lifecycleFailed.Store(true)
+		worker.ready.Store(false)
+		worker.failed <- err
+	})
 }
 
 func (worker *checkoutWorker) processStream(

@@ -212,9 +212,7 @@ class FetchRecoveryTest(unittest.IsolatedAsyncioTestCase):
     _stop.clear()
     _ready.clear()
 
-  async def test_transient_service_unavailable_does_not_stop_consumer(self):
-    expected = object()
-
+  async def test_service_unavailable_rebuilds_the_subscription(self):
     class Subscription:
       def __init__(self):
         self.calls = 0
@@ -223,18 +221,16 @@ class FetchRecoveryTest(unittest.IsolatedAsyncioTestCase):
       async def fetch(self, **request):
         self.calls += 1
         self.requests.append(request)
-        if self.calls == 1:
-          raise ServiceUnavailableError
-        return [expected]
+        raise ServiceUnavailableError
 
     subscription = Subscription()
+    with self.assertRaisesRegex(RuntimeError, "subscription fetch failed"):
+      await _fetch_message(subscription, retry_delay=0)
+    self.assertEqual(1, subscription.calls)
     self.assertEqual(
-        expected, await _fetch_message(subscription, retry_delay=0))
-    self.assertEqual(2, subscription.calls)
-    self.assertEqual(
-        [{"batch": 1, "timeout": 1}, {"batch": 1, "timeout": 1}],
+        [{"batch": 1, "timeout": 1}],
         subscription.requests)
-    self.assertTrue(_ready.is_set())
+    self.assertFalse(_ready.is_set())
 
   async def test_batch_processing_is_concurrency_bounded(self):
     active = 0

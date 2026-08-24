@@ -14,7 +14,8 @@ from urllib.request import Request, urlopen
 import gevent
 from gevent.event import Event
 
-from config import BenchmarkConfig
+from cluster_metrics import ClusterMetricsCollector
+from config import BenchmarkConfig, LOCAL_CLUSTER
 from saturation import consumer_pending_total
 
 
@@ -234,6 +235,21 @@ class RemoteMetricsClient:
         }
 
 
+class LocalMetricsClient:
+    def __init__(self, application_type: str, namespace: str) -> None:
+        self.application_type = application_type
+        self.namespace = namespace
+        self.collector: ClusterMetricsCollector | None = None
+
+    def sample(self) -> dict[str, Any]:
+        if self.collector is None:
+            self.collector = ClusterMetricsCollector(
+                self.application_type,
+                application_namespace=self.namespace,
+            )
+        return self.collector.snapshot()
+
+
 class ResourceSampler:
     def __init__(self) -> None:
         self._stop = Event()
@@ -264,7 +280,13 @@ class ResourceSampler:
 
     def _run(self) -> None:
         assert CONFIG.metrics_url is not None
-        metrics = RemoteMetricsClient(CONFIG.metrics_url)
+        if CONFIG.metrics_url == LOCAL_CLUSTER:
+            metrics = LocalMetricsClient(
+                CONFIG.application_type,
+                os.environ.get("POD_NAMESPACE", "default"),
+            )
+        else:
+            metrics = RemoteMetricsClient(CONFIG.metrics_url)
 
         while True:
             record: dict[str, Any] = {

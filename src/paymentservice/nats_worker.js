@@ -26,6 +26,9 @@ const COMMAND_BATCH_DELAY_MS = 20;
 const COMMAND_PULL_EXPIRES_MS = 1000;
 const COMMAND_PULL_REFRESH_MS = 500;
 const COMMAND_RESTART_DELAY_MS = 1000;
+const TOKEN_SERVICE_RESTART_DELAY_MS = 1000;
+const TOKEN_SERVICE_LIVENESS_GRACE_MS = 30000;
+const TOKEN_SERVICE_RECOVERY_STABLE_MS = 5000;
 const TOKEN_BATCH_SIZE = 256;
 const TOKEN_BATCH_DELAY_MS = 20;
 const PAYMENT_AUTHORIZE_SUBJECT = 'boutique.cmd.payment.authorize.v1';
@@ -384,6 +387,56 @@ async function registerTokenizationService(nc, keyring) {
   return { service, endpoint };
 }
 
+async function superviseTokenizationService(nc, keyring, status, initialRegistration,
+    restartDelayMs = TOKEN_SERVICE_RESTART_DELAY_MS) {
+  let registration = initialRegistration;
+  status.supervising = true;
+  try {
+    while (!status.stopping && !nc.isClosed()) {
+      try {
+        if (!registration) registration = await registerTokenizationService(nc, keyring);
+        status.service = registration.service;
+        status.endpoint = registration.endpoint;
+        status.ready = !registration.service.isStopped;
+
+        let recoveryTimer;
+        if (status.ready && status.failedAt) {
+          const recoveredService = registration.service;
+          recoveryTimer = setTimeout(() => {
+            if (status.service === recoveredService && status.ready && !recoveredService.isStopped) {
+              status.failedAt = 0;
+            }
+          }, TOKEN_SERVICE_RECOVERY_STABLE_MS);
+          recoveryTimer.unref?.();
+        }
+
+        let serviceError;
+        try {
+          serviceError = await registration.service.stopped;
+        } finally {
+          if (recoveryTimer) clearTimeout(recoveryTimer);
+        }
+        status.ready = false;
+        if (!status.failedAt) status.failedAt = Date.now();
+        if (status.stopping || nc.isClosed()) return;
+        logger.error({ error: serviceError?.message || 'service stopped' },
+          'payment tokenization service interrupted; retrying');
+      } catch (serviceError) {
+        status.ready = false;
+        if (!status.failedAt) status.failedAt = Date.now();
+        if (status.stopping || nc.isClosed()) return;
+        logger.error({ error: serviceError.message, retry_delay_ms: restartDelayMs },
+          'payment tokenization service registration failed; retrying');
+      }
+      registration = undefined;
+      await new Promise(resolve => setTimeout(resolve, restartDelayMs));
+    }
+  } finally {
+    status.ready = false;
+    status.supervising = false;
+  }
+}
+
 function anyPayload(type, payload) {
   // protobufjs' bundled google.protobuf.Any descriptor preserves the proto
   // field name (`type_url`) even though application messages use camelCase.
@@ -695,8 +748,22 @@ async function startPaymentNATS() {
   const workerStatus = {
     connectionReady: !nc.isClosed(), consumerReady: false, stopping: false, commandSubscription: undefined,
   };
-  const {service: tokenizationService, endpoint: tokenizationEndpoint} =
-    await registerTokenizationService(nc, keyring);
+  const initialTokenization = await registerTokenizationService(nc, keyring);
+  const tokenizationStatus = {
+    service: initialTokenization.service,
+    endpoint: initialTokenization.endpoint,
+    ready: true,
+    failedAt: 0,
+    stopping: false,
+    supervising: false,
+  };
+  superviseTokenizationService(nc, keyring, tokenizationStatus, initialTokenization)
+    .catch(serviceError => {
+      tokenizationStatus.ready = false;
+      tokenizationStatus.supervising = false;
+      if (!tokenizationStatus.failedAt) tokenizationStatus.failedAt = Date.now();
+      logger.error({ error: serviceError.message }, 'payment tokenization supervisor stopped');
+    });
 
   const commandSubscription = await js.pullSubscribe(COMMAND_SUBJECT, commandConsumerOptions());
   superviseCommandConsumer(nc, js, keyring, contracts, workerStatus, commandSubscription)
@@ -719,12 +786,16 @@ async function startPaymentNATS() {
   }, 'Stateless payment tokenization and durable command handlers are ready');
   return {
     nc,
-    tokenizationService,
-    tokenizationEndpoint,
+    get tokenizationService() { return tokenizationStatus.service; },
+    get tokenizationEndpoint() { return tokenizationStatus.endpoint; },
     get commandSubscription() { return workerStatus.commandSubscription; },
     ready: () => workerStatus.connectionReady && workerStatus.consumerReady &&
-      !tokenizationService.isStopped && !nc.isClosed(),
+      tokenizationStatus.ready && !tokenizationStatus.service.isStopped && !nc.isClosed(),
+    healthy: () => !nc.isClosed() && tokenizationStatus.supervising &&
+      (!tokenizationStatus.failedAt ||
+        Date.now() - tokenizationStatus.failedAt < TOKEN_SERVICE_LIVENESS_GRACE_MS),
     markNotReady: () => {
+      tokenizationStatus.stopping = true;
       workerStatus.stopping = true;
       workerStatus.connectionReady = false;
       workerStatus.consumerReady = false;
@@ -738,5 +809,6 @@ module.exports = {
   verifyAuthorization, occurredAtMilliseconds, loadContracts,
   processingTimeMs, waitForProcessing,
   processTokenBatch, registerTokenizationService,
+  superviseTokenizationService,
   processCommand, processCommandBatch, runCommandConsumer, superviseCommandConsumer,
 };

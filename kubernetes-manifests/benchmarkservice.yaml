@@ -103,6 +103,23 @@ spec:
     targetPort: http
 ---
 apiVersion: v1
+kind: Service
+metadata:
+  name: benchmarkservice-external
+  labels:
+    app: benchmarkservice
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
+spec:
+  type: LoadBalancer
+  selector:
+    app: benchmarkservice
+  ports:
+  - name: http
+    port: 80
+    targetPort: http
+---
+apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: benchmarkservice
@@ -135,3 +152,28 @@ roleRef:
 subjects:
 - kind: ServiceAccount
   name: benchmarkservice
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: online-boutique-benchmark-runner
+rules:
+- apiGroups: [""]
+  resources: ["nodes"]
+  verbs: ["get", "list"]
+- apiGroups: [""]
+  resources: ["nodes/proxy"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: online-boutique-benchmark-runner
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: online-boutique-benchmark-runner
+subjects:
+- kind: ServiceAccount
+  name: benchmark-runner
+  namespace: default

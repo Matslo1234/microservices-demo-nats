@@ -130,12 +130,14 @@ def saturation_points(
     list[tuple[float, float]],
     list[tuple[float, float]],
     list[tuple[float, float]],
+    list[tuple[float, float]],
 ]:
     rungs = _nested(result.summary, "saturation", "rungs")
     if not isinstance(rungs, list) or not rungs:
         raise ResultError(f"{result.path}: saturation.rungs must be a non-empty list")
 
-    goodput_points: list[tuple[float, float]] = []
+    submitted_goodput_points: list[tuple[float, float]] = []
+    observed_goodput_points: list[tuple[float, float]] = []
     pending_points: list[tuple[float, float]] = []
     p95_latency_points: list[tuple[float, float]] = []
     is_nats = str(result.summary.get("application_type", "")).upper() == "NATS"
@@ -149,7 +151,20 @@ def saturation_points(
             f"saturation.rungs[{index}].target_requests_per_second",
             result.path,
         )
-        goodput_points.append(
+        submitted_goodput_points.append(
+            (
+                rate,
+                _number(
+                    _nested(rung, "business", "goodput_orders_per_second"),
+                    (
+                        f"saturation.rungs[{index}].business."
+                        "goodput_orders_per_second"
+                    ),
+                    result.path,
+                ),
+            )
+        )
+        observed_goodput_points.append(
             (
                 rate,
                 _number(
@@ -194,7 +209,8 @@ def saturation_points(
             )
 
     return (
-        sorted(goodput_points),
+        sorted(submitted_goodput_points),
+        sorted(observed_goodput_points),
         sorted(pending_points),
         sorted(p95_latency_points),
     )
@@ -420,14 +436,20 @@ def _write_png_series_chart(
 
 
 def write_saturation_graphs(result: Result) -> list[Path]:
-    goodput, pending, p95_latency = saturation_points(result)
+    submitted_goodput, observed_goodput, pending, p95_latency = (
+        saturation_points(result)
+    )
     base = result.path.with_suffix("")
     goodput_path = base.with_name(f"{base.name}_goodput.png")
-    write_png_chart(
+    write_png_multi_series_chart(
         goodput_path,
-        goodput,
+        [
+            ("Zaključena med oddanimi v intervalu", submitted_goodput),
+            ("Vsa zaključena v intervalu", observed_goodput),
+        ],
         title=f"",
         y_label="Koristna prepustnost",
+        x_label="Št. naročil na sekundo",
     )
     outputs = [goodput_path]
     if p95_latency:

@@ -67,7 +67,12 @@ type shippingEventWorker struct {
 	processingTime      time.Duration
 	publishTimeout      time.Duration
 	stop                chan struct{}
+	failed              chan error
 	ready               atomic.Bool
+	lifecycleFailed     atomic.Bool
+	wg                  sync.WaitGroup
+	failureOnce         sync.Once
+	closeOnce           sync.Once
 }
 
 func startShippingEvents() (*shippingEventWorker, error) {
@@ -108,6 +113,7 @@ func startShippingEvents() (*shippingEventWorker, error) {
 		failureMode:    os.Getenv("SHIPPING_FAILURE_MODE"),
 		processingTime: shippingProcessingTime(os.Getenv("PROCESSING_TIME_MS")),
 		stop:           make(chan struct{}),
+		failed:         make(chan error, 1),
 	}
 	providerSecret := os.Getenv("SHIPPING_PROVIDER_SECRET")
 	worker.provider, err = newShippingProvider(providerSecret)
@@ -128,7 +134,11 @@ func startShippingEvents() (*shippingEventWorker, error) {
 			worker.ready.Store(false)
 			log.Warnf("NATS disconnected: %v", err)
 		}),
-		nats.ReconnectHandler(func(_ *nats.Conn) { worker.ready.Store(true) }),
+		nats.ReconnectHandler(func(_ *nats.Conn) {
+			if !worker.lifecycleFailed.Load() {
+				worker.ready.Store(true)
+			}
+		}),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("connect shippingservice to NATS: %w", err)
@@ -168,8 +178,19 @@ func startShippingEvents() (*shippingEventWorker, error) {
 		return nil, fmt.Errorf("bind shipping command consumer: %w", err)
 	}
 	worker.ready.Store(true)
-	go worker.run()
-	go worker.runCommands()
+	worker.wg.Add(2)
+	go func() {
+		defer worker.wg.Done()
+		if runErr := worker.run(); runErr != nil {
+			worker.reportFailure(fmt.Errorf("shipping cart consumer: %w", runErr))
+		}
+	}()
+	go func() {
+		defer worker.wg.Done()
+		if runErr := worker.runCommands(); runErr != nil {
+			worker.reportFailure(fmt.Errorf("shipping command consumer: %w", runErr))
+		}
+	}()
 	return worker, nil
 }
 
@@ -239,12 +260,11 @@ func shippingConsumerSetupRace(err error) bool {
 		strings.Contains(message, "stream sequence")
 }
 
-func (worker *shippingEventWorker) runCommands() {
-	consumer := shippingCommandConsumerDefinition()
+func (worker *shippingEventWorker) runCommands() error {
 	for {
 		select {
 		case <-worker.stop:
-			return
+			return nil
 		default:
 		}
 		batch, err := worker.commandSubscription.FetchBatch(
@@ -252,8 +272,8 @@ func (worker *shippingEventWorker) runCommands() {
 			nats.MaxWait(time.Second),
 		)
 		if err != nil {
-			if !shippingConsumerStopped(err) {
-				worker.handleConsumerError(consumer, "shipping command fetch", err)
+			if shippingConsumerTerminal(err) {
+				return err
 			}
 			continue
 		}
@@ -263,8 +283,10 @@ func (worker *shippingEventWorker) runCommands() {
 			shippingCommandWorkers,
 			worker.processCommandMessage,
 		)
-		if err := batch.Error(); err != nil && !shippingConsumerStopped(err) {
-			worker.handleConsumerError(consumer, "shipping command stream", err)
+		if err := batch.Error(); err != nil {
+			if shippingConsumerTerminal(err) {
+				return err
+			}
 		}
 	}
 }
@@ -332,18 +354,17 @@ func shippingMessageLane(data []byte, lanes int) int {
 	return int(hash % uint32(lanes))
 }
 
-func (worker *shippingEventWorker) run() {
-	consumer := shippingCartConsumerDefinition()
+func (worker *shippingEventWorker) run() error {
 	for {
 		select {
 		case <-worker.stop:
-			return
+			return nil
 		default:
 		}
 		batch, err := worker.subscription.FetchBatch(32, nats.MaxWait(time.Second))
 		if err != nil {
-			if !shippingConsumerStopped(err) {
-				worker.handleConsumerError(consumer, "shipping cart event fetch", err)
+			if shippingConsumerTerminal(err) {
+				return err
 			}
 			continue
 		}
@@ -368,36 +389,24 @@ func (worker *shippingEventWorker) run() {
 			}
 			span.End()
 		}
-		if err := batch.Error(); err != nil && !shippingConsumerStopped(err) {
-			worker.handleConsumerError(consumer, "shipping cart event stream", err)
+		if err := batch.Error(); err != nil {
+			if shippingConsumerTerminal(err) {
+				return err
+			}
 		}
 	}
 }
 
-func (worker *shippingEventWorker) handleConsumerError(definition shippingConsumerDefinition, operation string, err error) {
-	if shippingConsumerMissing(err) {
-		if ensureErr := worker.ensureConsumer(definition); ensureErr != nil {
-			log.WithError(ensureErr).Errorf("%s failed after %v; durable reconciliation failed", operation, err)
-		} else {
-			log.WithError(err).Warnf("%s interrupted; durable reconciled", operation)
-		}
-	} else {
-		log.Errorf("%s failed: %v", operation, err)
-	}
-	time.Sleep(time.Second)
+func shippingConsumerTerminal(err error) bool {
+	return err != nil && !errors.Is(err, nats.ErrTimeout)
 }
 
-func shippingConsumerStopped(err error) bool {
-	return errors.Is(err, nats.ErrTimeout) ||
-		errors.Is(err, nats.ErrConnectionClosed) ||
-		errors.Is(err, nats.ErrBadSubscription) ||
-		errors.Is(err, nats.ErrSubscriptionClosed)
-}
-
-func shippingConsumerMissing(err error) bool {
-	return errors.Is(err, nats.ErrConsumerDeleted) ||
-		errors.Is(err, nats.ErrConsumerNotFound) ||
-		errors.Is(err, nats.ErrNoResponders)
+func (worker *shippingEventWorker) reportFailure(err error) {
+	worker.failureOnce.Do(func() {
+		worker.lifecycleFailed.Store(true)
+		worker.ready.Store(false)
+		worker.failed <- err
+	})
 }
 
 func shippingMessageLog(message *nats.Msg, kind string) *logrus.Entry {
@@ -515,9 +524,18 @@ func (worker *shippingEventWorker) Close() {
 	if worker == nil {
 		return
 	}
-	worker.ready.Store(false)
-	close(worker.stop)
-	_ = worker.nc.Drain()
+	worker.closeOnce.Do(func() {
+		worker.ready.Store(false)
+		close(worker.stop)
+		if worker.subscription != nil {
+			_ = worker.subscription.Unsubscribe()
+		}
+		if worker.commandSubscription != nil {
+			_ = worker.commandSubscription.Unsubscribe()
+		}
+		worker.wg.Wait()
+		_ = worker.nc.Drain()
+	})
 }
 
 func shippingDuration(name string, fallback time.Duration) (time.Duration, error) {

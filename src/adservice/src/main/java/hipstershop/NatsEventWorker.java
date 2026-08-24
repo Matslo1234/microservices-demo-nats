@@ -59,6 +59,7 @@ final class NatsEventWorker implements AutoCloseable {
   private final AdService service;
   private final boolean required;
   private final AtomicBoolean running = new AtomicBoolean();
+  private final AtomicBoolean consumerReady = new AtomicBoolean();
   private int batchSize;
   private int concurrency;
   private Connection connection;
@@ -141,18 +142,22 @@ final class NatsEventWorker implements AutoCloseable {
                 .configuration(consumer)
                 .build();
         JetStreamSubscription subscription = jetStream.subscribe(PAGE_SUBJECT, subscribeOptions);
+        consumerReady.set(true);
         logger.info(
             "NATS page-view consumer is ready batch_size={} concurrency={}",
             batchSize,
             concurrency);
         consume(jetStream, subscription);
+        consumerReady.set(false);
       } catch (InterruptedException exception) {
+        consumerReady.set(false);
         if (!running.get()) {
           Thread.currentThread().interrupt();
           return;
         }
         logger.warn("interrupted while establishing NATS page-view consumer", exception);
       } catch (Exception exception) {
+        consumerReady.set(false);
         if (running.get()) {
           logger.warn("NATS page-view consumer is unavailable; retrying", exception);
         }
@@ -180,11 +185,12 @@ final class NatsEventWorker implements AutoCloseable {
   boolean ready() {
     return !required
         || (running.get()
+            && consumerReady.get()
             && connection != null
             && connection.getStatus() == Connection.Status.CONNECTED);
   }
 
-  private void consume(JetStream jetStream, JetStreamSubscription subscription) {
+  private void consume(JetStream jetStream, JetStreamSubscription subscription) throws Exception {
     while (running.get()) {
       try {
         Iterator<Message> messages = subscription.iterate(batchSize, Duration.ofSeconds(1));
@@ -199,7 +205,9 @@ final class NatsEventWorker implements AutoCloseable {
       } catch (Exception exception) {
         if (running.get()) {
           logger.warn("failed to fetch page-view events", exception);
+          throw exception;
         }
+        return;
       }
     }
   }
@@ -372,6 +380,7 @@ final class NatsEventWorker implements AutoCloseable {
   @Override
   public void close() {
     running.set(false);
+    consumerReady.set(false);
     if (thread != null) {
       thread.interrupt();
     }

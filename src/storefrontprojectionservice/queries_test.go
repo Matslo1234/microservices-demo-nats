@@ -4,12 +4,45 @@
 package main
 
 import (
+	"slices"
+	"sort"
 	"testing"
 	"time"
 
 	commonv1 "github.com/GoogleCloudPlatform/microservices-demo/protos/common/v1"
 	"github.com/GoogleCloudPlatform/microservices-demo/src/storefrontprojectionservice/internal/storefront"
 )
+
+func TestQueryServicesIsolateBrowseFromTracking(t *testing.T) {
+	projector := &projector{}
+	browse, err := projector.queryHandlers(browseQueryRole)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tracking, err := projector.queryHandlers(trackingQueryRole)
+	if err != nil {
+		t.Fatal(err)
+	}
+	browseNames := make([]string, 0, len(browse))
+	for name := range browse {
+		browseNames = append(browseNames, name)
+	}
+	trackingNames := make([]string, 0, len(tracking))
+	for name := range tracking {
+		trackingNames = append(trackingNames, name)
+	}
+	sort.Strings(browseNames)
+	sort.Strings(trackingNames)
+	if !slices.Equal(browseNames, []string{"cart", "currencies", "home", "product", "product-meta"}) {
+		t.Fatalf("unexpected browse handlers: %v", browseNames)
+	}
+	if !slices.Equal(trackingNames, []string{"operation", "order"}) {
+		t.Fatalf("unexpected tracking handlers: %v", trackingNames)
+	}
+	if queryEndpointPendingMessages != 128 {
+		t.Fatalf("got endpoint pending limit %d, want 128", queryEndpointPendingMessages)
+	}
+}
 
 func TestLocalizeProductBuildsLegacyView(t *testing.T) {
 	rates := &storefront.CurrencyView{Rates: []storefront.Rate{

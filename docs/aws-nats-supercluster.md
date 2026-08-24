@@ -314,7 +314,8 @@ The application overlays pin the most recently pushed Docker Hub release,
   frontend, payment, and storefront projection; primary-only workers remain
   in US and are reached through NATS; and
 - each `frontend-external` Service is an internet-facing, IP-target NLB with
-  one HTTP listener on port `80`.
+  one HTTP listener on port `80`. The primary US region also exposes the
+  benchmark API and UI through an equivalent `benchmarkservice-external` NLB.
 
 The current URLs are:
 
@@ -346,7 +347,7 @@ kubectl --context "${SECONDARY_CONTEXT}" apply -f /tmp/app-eu.yaml
 Check the endpoints and regional workloads:
 
 ```sh
-kubectl --context "${PRIMARY_CONTEXT}" -n default get service frontend-external
+kubectl --context "${PRIMARY_CONTEXT}" -n default get service frontend-external benchmarkservice-external
 kubectl --context "${SECONDARY_CONTEXT}" -n default get service frontend-external
 curl --fail http://k8s-default-frontend-66abe7078c-cd86c721bfb049ce.elb.us-east-1.amazonaws.com/
 curl --fail http://k8s-default-frontend-93371dc1f6-c391ee1151b1809e.elb.eu-central-1.amazonaws.com/

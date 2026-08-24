@@ -26,6 +26,18 @@ import (
 
 var errInvalidCurrency = errors.New("invalid currency")
 
+const (
+	browseQueryRole              = "browse"
+	trackingQueryRole            = "tracking"
+	queryEndpointPendingMessages = 128
+	queryEndpointPendingBytes    = 1024 * 1024
+)
+
+var queryNamesByRole = map[string][]string{
+	browseQueryRole:   {"home", "product", "cart", "currencies", "product-meta"},
+	trackingQueryRole: {"operation", "order"},
+}
+
 type queryRequest struct {
 	ProductID     string   `json:"product_id"`
 	UserID        string   `json:"user_id"`
@@ -73,14 +85,30 @@ type queryResponse struct {
 
 type queryHandler func(queryRequest) (queryResponse, error)
 
-func (p *projector) registerQueries(nc *nats.Conn) (micro.Service, int, error) {
+func (p *projector) registerQueries(nc *nats.Conn, role string, stopped chan<- string) (micro.Service, int, error) {
 	endpointPending := make(map[string]*atomic.Int64)
 	var endpointPendingMutex sync.RWMutex
+	handlers, err := p.queryHandlers(role)
+	if err != nil {
+		return nil, 0, err
+	}
 	service, err := micro.AddService(nc, micro.Config{
 		Name:        "StorefrontProjection",
 		Version:     "1.0.0",
 		Description: "Event-built storefront read model",
+		Metadata:    map[string]string{"role": role},
 		QueueGroup:  "storefront-projection-v1",
+		ErrorHandler: func(_ micro.Service, serviceErr *micro.NATSError) {
+			log.Printf("NATS query service failed role=%q subject=%q error=%v", role, serviceErr.Subject, serviceErr)
+		},
+		DoneHandler: func(_ micro.Service) {
+			log.Printf("NATS query service stopped role=%q", role)
+			select {
+			case stopped <- role:
+			default:
+				log.Printf("NATS query service stop notification already pending role=%q", role)
+			}
+		},
 		StatsHandler: func(endpoint *micro.Endpoint) any {
 			endpointPendingMutex.RLock()
 			pending, ok := endpointPending[endpoint.Name]
@@ -98,15 +126,6 @@ func (p *projector) registerQueries(nc *nats.Conn) (micro.Service, int, error) {
 	}
 	debugQueries := slog.Default().Enabled(context.Background(), slog.LevelDebug)
 
-	handlers := map[string]queryHandler{
-		"home":         p.homeQuery,
-		"product":      p.productQuery,
-		"cart":         p.cartQuery,
-		"currencies":   p.currenciesQuery,
-		"product-meta": p.productMetaQuery,
-		"operation":    p.operationQuery,
-		"order":        p.orderQuery,
-	}
 	concurrency := p.config.queryConcurrency
 	if concurrency < 1 {
 		concurrency = 1
@@ -179,7 +198,7 @@ func (p *projector) registerQueries(nc *nats.Conn) (micro.Service, int, error) {
 				endpointName,
 				endpointHandler,
 				micro.WithEndpointSubject(subject),
-				micro.WithEndpointPendingLimits(64, 1024*1024),
+				micro.WithEndpointPendingLimits(queryEndpointPendingMessages, queryEndpointPendingBytes),
 			); err != nil {
 				endpointPendingMutex.Lock()
 				delete(endpointPending, endpointName)
@@ -195,6 +214,27 @@ func (p *projector) registerQueries(nc *nats.Conn) (micro.Service, int, error) {
 		return nil, 0, err
 	}
 	return service, endpointCount, nil
+}
+
+func (p *projector) queryHandlers(role string) (map[string]queryHandler, error) {
+	all := map[string]queryHandler{
+		"home":         p.homeQuery,
+		"product":      p.productQuery,
+		"cart":         p.cartQuery,
+		"currencies":   p.currenciesQuery,
+		"product-meta": p.productMetaQuery,
+		"operation":    p.operationQuery,
+		"order":        p.orderQuery,
+	}
+	names, ok := queryNamesByRole[role]
+	if !ok {
+		return nil, fmt.Errorf("unknown query service role %q", role)
+	}
+	handlers := make(map[string]queryHandler, len(names))
+	for _, name := range names {
+		handlers[name] = all[name]
+	}
+	return handlers, nil
 }
 
 func (p *projector) orderQuery(request queryRequest) (queryResponse, error) {

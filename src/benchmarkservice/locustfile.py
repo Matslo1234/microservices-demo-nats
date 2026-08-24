@@ -14,6 +14,7 @@ from contextlib import contextmanager
 from typing import Any
 
 import gevent
+from gevent.lock import BoundedSemaphore
 from locust import FastHttpUser, between, events, task
 from locust.exception import StopUser
 
@@ -66,8 +67,12 @@ TERMINAL_ORDER_STATUSES = {
 }
 TERMINAL_NOTIFICATION_STATUSES = {"SENT", "FAILED"}
 TERMINAL_CART_CLEAR_STATUSES = {"SUCCEEDED", "REJECTED"}
-SSE_RECONNECT_DELAY_SECONDS = 0.25
+SSE_RECONNECT_INITIAL_SECONDS = 1.0
+SSE_RECONNECT_MAX_SECONDS = 5.0
+SSE_RECONNECT_JITTER_RATIO = 0.2
+SSE_RECONNECT_MAX_IN_FLIGHT = 64
 SSE_NETWORK_TIMEOUT_SECONDS = 20.0
+SSE_RECONNECT_SLOTS = BoundedSemaphore(SSE_RECONNECT_MAX_IN_FLIGHT)
 SETTLEMENT_TRACKERS: set[gevent.Greenlet] = set()
 
 
@@ -98,6 +103,27 @@ def retry_after_seconds(response: Any, default: float = 1.0) -> float:
     except (AttributeError, TypeError, ValueError):
         value = default
     return min(5.0, max(0.05, value))
+
+
+def sse_reconnect_delay(
+    attempt: int,
+    retry_after: float | None,
+    random_source: random.Random,
+) -> float:
+    exponent = min(max(0, attempt), 16)
+    base = min(
+        SSE_RECONNECT_MAX_SECONDS,
+        SSE_RECONNECT_INITIAL_SECONDS * (2**exponent),
+    )
+    jittered = random_source.uniform(
+        base,
+        min(
+            SSE_RECONNECT_MAX_SECONDS,
+            base * (1.0 + SSE_RECONNECT_JITTER_RATIO),
+        ),
+    )
+    advertised = retry_after if retry_after is not None else 0.0
+    return min(SSE_RECONNECT_MAX_SECONDS, max(advertised, jittered))
 
 
 def failure_message(
@@ -833,9 +859,10 @@ class NatsAdapter(StorefrontAdapter):
                 checkout_started + CONFIG.outcome_timeout_seconds
             )
             deadline = min(per_order_deadline, drain_deadline())
+            reconnect_attempt = 0
             while time.monotonic() < deadline:
                 if stream is None:
-                    stream, error = self._open_order_event_stream(
+                    stream, error, retry_after = self._open_order_event_stream(
                         events_location, "/orders/[id]/events"
                     )
                     if error is not None:
@@ -854,9 +881,13 @@ class NatsAdapter(StorefrontAdapter):
                         )
                         return context, None, events_location, None, error
                     if stream is None:
+                        delay = sse_reconnect_delay(
+                            reconnect_attempt, retry_after, self.random
+                        )
+                        reconnect_attempt += 1
                         gevent.sleep(
                             min(
-                                SSE_RECONNECT_DELAY_SECONDS,
+                                delay,
                                 max(0.0, deadline - time.monotonic()),
                             )
                         )
@@ -892,9 +923,13 @@ class NatsAdapter(StorefrontAdapter):
                 except StopIteration:
                     close_order_stream(stream)
                     stream = None
+                    delay = sse_reconnect_delay(
+                        reconnect_attempt, None, self.random
+                    )
+                    reconnect_attempt += 1
                     gevent.sleep(
                         min(
-                            SSE_RECONNECT_DELAY_SECONDS,
+                            delay,
                             max(0.0, deadline - time.monotonic()),
                         )
                     )
@@ -902,19 +937,34 @@ class NatsAdapter(StorefrontAdapter):
                 except gevent.Timeout:
                     close_order_stream(stream)
                     stream = None
+                    delay = sse_reconnect_delay(
+                        reconnect_attempt, None, self.random
+                    )
+                    reconnect_attempt += 1
+                    gevent.sleep(
+                        min(
+                            delay,
+                            max(0.0, deadline - time.monotonic()),
+                        )
+                    )
                     continue
                 except Exception:
                     close_order_stream(stream)
                     stream = None
+                    delay = sse_reconnect_delay(
+                        reconnect_attempt, None, self.random
+                    )
+                    reconnect_attempt += 1
                     gevent.sleep(
                         min(
-                            SSE_RECONNECT_DELAY_SECONDS,
+                            delay,
                             max(0.0, deadline - time.monotonic()),
                         )
                     )
                     continue
 
                 order = received_order.order
+                reconnect_attempt = 0
                 expected_order_id = context.get("order_id")
                 event_order_id = str(order.get("order_id", ""))
                 if expected_order_id and event_order_id != expected_order_id:
@@ -1009,22 +1059,25 @@ class NatsAdapter(StorefrontAdapter):
     ) -> tuple[
         Iterator[ReceivedOrderEvent] | None,
         BusinessFailure | None,
+        float | None,
     ]:
-        response = self.client.get(
-            events_location,
-            headers=self.headers("text/event-stream"),
-            allow_redirects=False,
-            catch_response=True,
-            stream=True,
-            name=name,
-        )
+        with SSE_RECONNECT_SLOTS:
+            response = self.client.get(
+                events_location,
+                headers=self.headers("text/event-stream"),
+                allow_redirects=False,
+                catch_response=True,
+                stream=True,
+                name=name,
+            )
         received_monotonic = time.monotonic()
         received_epoch = time.time()
         with response as status_response:
             if status_response.status_code in (404, 503):
+                retry_after = retry_after_seconds(status_response)
                 status_response.success()
                 close_stream_response(status_response)
-                return None, None
+                return None, None, retry_after
             if status_response.status_code != 200:
                 error = http_status_failure(
                     status_response.status_code,
@@ -1035,7 +1088,7 @@ class NatsAdapter(StorefrontAdapter):
                 )
                 status_response.failure(str(error))
                 close_stream_response(status_response)
-                return None, error
+                return None, error, None
             content_type = status_response.headers.get("Content-Type", "")
             if not is_event_stream_content_type(content_type):
                 status_response.failure(
@@ -1047,9 +1100,9 @@ class NatsAdapter(StorefrontAdapter):
                     f"SSE Content-Type is {content_type!r}",
                     received_monotonic=received_monotonic,
                     received_epoch=received_epoch,
-                )
+                ), None
             status_response.success()
-        return iter_received_orders(response), None
+        return iter_received_orders(response), None, None
 
     def _wait_for_settlement(
         self,
@@ -1063,6 +1116,7 @@ class NatsAdapter(StorefrontAdapter):
             checkout_started + CONFIG.settlement_timeout_seconds
         )
         deadline = min(per_order_deadline, drain_deadline())
+        reconnect_attempt = 0
         try:
             while True:
                 if self._record_settlement_event(context, order):
@@ -1078,7 +1132,7 @@ class NatsAdapter(StorefrontAdapter):
                     return failure_message(settlement)
 
                 if stream is None:
-                    stream, error = self._open_order_event_stream(
+                    stream, error, retry_after = self._open_order_event_stream(
                         events_location,
                         "/orders/[id]/events [settlement]",
                     )
@@ -1087,9 +1141,13 @@ class NatsAdapter(StorefrontAdapter):
                         record_received_failure(context, error)
                         return error
                     if stream is None:
+                        delay = sse_reconnect_delay(
+                            reconnect_attempt, retry_after, self.random
+                        )
+                        reconnect_attempt += 1
                         gevent.sleep(
                             min(
-                                SSE_RECONNECT_DELAY_SECONDS,
+                                delay,
                                 max(0.0, deadline - time.monotonic()),
                             )
                         )
@@ -1114,24 +1172,44 @@ class NatsAdapter(StorefrontAdapter):
                 except StopIteration:
                     close_order_stream(stream)
                     stream = None
+                    delay = sse_reconnect_delay(
+                        reconnect_attempt, None, self.random
+                    )
+                    reconnect_attempt += 1
                     gevent.sleep(
                         min(
-                            SSE_RECONNECT_DELAY_SECONDS,
+                            delay,
                             max(0.0, deadline - time.monotonic()),
                         )
                     )
                 except gevent.Timeout:
                     close_order_stream(stream)
                     stream = None
-                except Exception:
-                    close_order_stream(stream)
-                    stream = None
+                    delay = sse_reconnect_delay(
+                        reconnect_attempt, None, self.random
+                    )
+                    reconnect_attempt += 1
                     gevent.sleep(
                         min(
-                            SSE_RECONNECT_DELAY_SECONDS,
+                            delay,
                             max(0.0, deadline - time.monotonic()),
                         )
                     )
+                except Exception:
+                    close_order_stream(stream)
+                    stream = None
+                    delay = sse_reconnect_delay(
+                        reconnect_attempt, None, self.random
+                    )
+                    reconnect_attempt += 1
+                    gevent.sleep(
+                        min(
+                            delay,
+                            max(0.0, deadline - time.monotonic()),
+                        )
+                    )
+                else:
+                    reconnect_attempt = 0
         finally:
             close_order_stream(stream)
 

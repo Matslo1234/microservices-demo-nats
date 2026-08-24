@@ -422,15 +422,26 @@ class NatsMicroStatsClient:
 
 
 class ClusterMetricsCollector:
-    def __init__(self) -> None:
-        application_type = os.environ.get("APPLICATION_TYPE", "").upper()
+    def __init__(
+        self,
+        application_type: str | None = None,
+        application_namespace: str | None = None,
+        nats_namespace: str | None = None,
+    ) -> None:
+        application_type = (
+            application_type
+            if application_type is not None
+            else os.environ.get("APPLICATION_TYPE", "")
+        ).upper()
         if application_type not in {"GRPC", "NATS"}:
             raise RuntimeError("APPLICATION_TYPE must be GRPC or NATS")
         self.application_type = application_type
         self.kubernetes = KubernetesSummaryClient(
             application_type,
-            os.environ.get("APPLICATION_NAMESPACE", "default"),
-            os.environ.get("NATS_NAMESPACE", "nats"),
+            application_namespace
+            or os.environ.get("APPLICATION_NAMESPACE")
+            or os.environ.get("POD_NAMESPACE", "default"),
+            nats_namespace or os.environ.get("NATS_NAMESPACE", "nats"),
         )
         self.nats_urls = [
             value.strip()

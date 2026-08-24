@@ -15,8 +15,9 @@ class PaymentHealthServer {
 
   handle (request, response) {
     if (request.url === '/healthz') {
-      response.writeHead(200, { 'Content-Type': 'text/plain' });
-      response.end('ok\n');
+      const healthy = typeof this.messaging.healthy !== 'function' || this.messaging.healthy();
+      response.writeHead(healthy ? 200 : 503, { 'Content-Type': 'text/plain' });
+      response.end(healthy ? 'ok\n' : 'payment NATS supervisor is not healthy\n');
       return;
     }
     const ready = this.messaging.ready();

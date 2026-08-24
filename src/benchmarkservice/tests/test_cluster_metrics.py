@@ -2,8 +2,10 @@
 # Licensed under the Apache License, Version 2.0 (the "License");
 
 import unittest
+from unittest import mock
 
 from cluster_metrics import (
+    ClusterMetricsCollector,
     add_cadvisor_metrics,
     normalize_nats_micro_stats,
     parse_labels,
@@ -12,6 +14,19 @@ from cluster_metrics import (
 
 
 class ClusterMetricsTest(unittest.TestCase):
+    def test_collector_accepts_the_runner_application_and_namespace(self) -> None:
+        with mock.patch(
+            "cluster_metrics.KubernetesSummaryClient"
+        ) as kubernetes:
+            collector = ClusterMetricsCollector(
+                "grpc",
+                application_namespace="shop",
+                nats_namespace="messaging",
+            )
+
+        self.assertEqual("GRPC", collector.application_type)
+        kubernetes.assert_called_once_with("GRPC", "shop", "messaging")
+
     def test_only_target_application_and_nats_pods_are_reported(self) -> None:
         self.assertEqual(
             "frontend",

@@ -441,7 +441,11 @@ spec:
     ports:
     - protocol: TCP
       port: 4222
-  # The target and its metrics gateway may be outside this cluster.
+    - protocol: TCP
+      port: 7777
+  # Remote targets use HTTP(S); local resource sampling reads the Kubernetes
+  # API. API endpoints are not consistently selectable with labels across CNI
+  # implementations.
   - to:
     - ipBlock:
         cidr: 0.0.0.0/0
@@ -452,3 +456,5 @@ spec:
       port: 443
     - protocol: TCP
       port: 8080
+    - protocol: TCP
+      port: 6443

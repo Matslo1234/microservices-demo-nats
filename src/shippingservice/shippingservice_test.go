@@ -24,6 +24,17 @@ const (
 	otherTestShippingSecret = "shipping-provider-secret-bbbbbbbbbbbbbbbbbbbbbbbb"
 )
 
+func TestShippingConsumerTerminalErrorsRestartWorker(t *testing.T) {
+	for _, err := range []error{nats.ErrBadSubscription, nats.ErrSubscriptionClosed, nats.ErrConsumerDeleted, nats.ErrNoResponders} {
+		if !shippingConsumerTerminal(err) {
+			t.Fatalf("%v was not classified as terminal", err)
+		}
+	}
+	if shippingConsumerTerminal(nats.ErrTimeout) {
+		t.Fatal("fetch timeout was classified as terminal")
+	}
+}
+
 type shippingJetStreamStub struct {
 	nats.JetStreamContext
 	info          *nats.ConsumerInfo

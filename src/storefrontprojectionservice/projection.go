@@ -232,11 +232,11 @@ func isConsumerSetupRace(err error) bool {
 		strings.Contains(message, "stream sequence")
 }
 
-func (p *projector) run(subscription *nats.Subscription, stop <-chan struct{}) {
+func (p *projector) run(subscription *nats.Subscription, stop <-chan struct{}) error {
 	for {
 		select {
 		case <-stop:
-			return
+			return nil
 		default:
 		}
 		batch, err := subscription.FetchBatch(
@@ -244,17 +244,17 @@ func (p *projector) run(subscription *nats.Subscription, stop <-chan struct{}) {
 			nats.MaxWait(time.Second),
 		)
 		if err != nil {
-			if !projectionConsumerStopped(err) {
-				log.Printf("projection fetch failed: %v", err)
-				time.Sleep(time.Second)
+			if projectionConsumerTerminal(err) {
+				return err
 			}
 			continue
 		}
 		p.applyStream(batch.Messages())
 		p.refreshConsumerState()
-		if err := batch.Error(); err != nil && !projectionConsumerStopped(err) {
-			log.Printf("projection stream failed: %v", err)
-			time.Sleep(time.Second)
+		if err := batch.Error(); err != nil {
+			if projectionConsumerTerminal(err) {
+				return err
+			}
 		}
 	}
 }
@@ -367,11 +367,8 @@ func projectionMessageLane(correlationID string, lanes int) int {
 	return int(hash % uint32(lanes))
 }
 
-func projectionConsumerStopped(err error) bool {
-	return errors.Is(err, nats.ErrTimeout) ||
-		errors.Is(err, nats.ErrConnectionClosed) ||
-		errors.Is(err, nats.ErrBadSubscription) ||
-		errors.Is(err, nats.ErrSubscriptionClosed)
+func projectionConsumerTerminal(err error) bool {
+	return err != nil && !errors.Is(err, nats.ErrTimeout)
 }
 
 func projectionFiltersMatch(single string, multiple []string) bool {

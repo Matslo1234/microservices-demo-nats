@@ -64,6 +64,7 @@ labels:
     boutique.online.io/k8s-cluster: eks-cluster
 patches:
 - path: frontend-external.yaml
+- path: benchmarkservice-external.yaml
 - target: {group: apps, version: v1, kind: Deployment}
   patch: |-
     - op: replace

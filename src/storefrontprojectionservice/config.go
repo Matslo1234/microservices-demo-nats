@@ -168,36 +168,49 @@ func envDuration(name string, fallback time.Duration) (time.Duration, error) {
 }
 
 func connectNATS(config projectionConfig) (*nats.Conn, nats.JetStreamContext, error) {
+	nc, err := connectNATSConnection(config, "projection")
+	if err != nil {
+		return nil, nil, err
+	}
+	js, err := nc.JetStream()
+	if err != nil {
+		nc.Close()
+		return nil, nil, fmt.Errorf("create JetStream context: %w", err)
+	}
+	return nc, js, nil
+}
+
+func connectNATSConnection(config projectionConfig, role string) (*nats.Conn, error) {
 	url, user, password, caFile := os.Getenv("NATS_URL"), os.Getenv("NATS_USER"), os.Getenv("NATS_PASSWORD"), os.Getenv("NATS_CA_FILE")
 	if url == "" || user == "" || password == "" || caFile == "" {
-		return nil, nil, fmt.Errorf("NATS_URL, NATS_USER, NATS_PASSWORD, and NATS_CA_FILE are required")
+		return nil, fmt.Errorf("NATS_URL, NATS_USER, NATS_PASSWORD, and NATS_CA_FILE are required")
 	}
 	connectTimeout, err := envDuration("NATS_CONNECT_TIMEOUT", 2*time.Second)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	reconnectWait, err := envDuration("NATS_RECONNECT_WAIT", 2*time.Second)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	pingInterval, err := envDuration("NATS_PING_INTERVAL", 20*time.Second)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	maxReconnects, maxPings := -1, 2
 	if value := os.Getenv("NATS_MAX_RECONNECTS"); value != "" {
 		maxReconnects, err = strconv.Atoi(value)
 		if err != nil {
-			return nil, nil, fmt.Errorf("invalid NATS_MAX_RECONNECTS: %w", err)
+			return nil, fmt.Errorf("invalid NATS_MAX_RECONNECTS: %w", err)
 		}
 	}
 	if value := os.Getenv("NATS_MAX_PINGS_OUT"); value != "" {
 		maxPings, err = strconv.Atoi(value)
 		if err != nil {
-			return nil, nil, fmt.Errorf("invalid NATS_MAX_PINGS_OUT: %w", err)
+			return nil, fmt.Errorf("invalid NATS_MAX_PINGS_OUT: %w", err)
 		}
 	}
-	connectionName := fmt.Sprintf("storefrontprojectionservice/phase3/%s/%s", config.regionID, config.k8sClusterName)
+	connectionName := fmt.Sprintf("storefrontprojectionservice/phase3/%s/%s/%s", config.regionID, config.k8sClusterName, role)
 	nc, err := nats.Connect(url,
 		nats.Name(connectionName),
 		nats.UserInfo(user, password),
@@ -209,12 +222,7 @@ func connectNATS(config projectionConfig) (*nats.Conn, nats.JetStreamContext, er
 		nats.MaxPingsOutstanding(maxPings),
 	)
 	if err != nil {
-		return nil, nil, fmt.Errorf("connect to NATS: %w", err)
+		return nil, fmt.Errorf("connect to NATS for %s: %w", role, err)
 	}
-	js, err := nc.JetStream()
-	if err != nil {
-		nc.Close()
-		return nil, nil, fmt.Errorf("create JetStream context: %w", err)
-	}
-	return nc, js, nil
+	return nc, nil
 }

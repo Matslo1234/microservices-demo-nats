@@ -11,11 +11,13 @@ try:
         NatsAdapter,
         StorefrontAdapter,
         http_status_failure,
+        sse_reconnect_delay,
     )
 except (KeyError, ModuleNotFoundError):
     NatsAdapter = None
     StorefrontAdapter = None
     http_status_failure = None
+    sse_reconnect_delay = None
 
 
 class FakeResponse:
@@ -72,13 +74,44 @@ class LocustTimeoutClassificationTest(unittest.TestCase):
         adapter.client = types.SimpleNamespace(get=lambda *_args, **_kwargs: response)
         adapter.session_cookie = None
 
-        stream, error = adapter._open_order_event_stream(
+        stream, error, retry_after = adapter._open_order_event_stream(
             "/orders/order-1/events", "/orders/[id]/events"
         )
 
         self.assertIsNone(stream)
+        self.assertIsNone(retry_after)
         self.assertEqual("TIMEOUT", error.outcome)
         self.assertEqual("TIMEOUT: SSE timed out", response.failure_message)
+
+    def test_sse_retry_honors_retry_after(self) -> None:
+        response = FakeResponse(503, {"Retry-After": "4"})
+        adapter = object.__new__(NatsAdapter)
+        adapter.client = types.SimpleNamespace(
+            get=lambda *_args, **_kwargs: response
+        )
+        adapter.session_cookie = None
+
+        stream, error, retry_after = adapter._open_order_event_stream(
+            "/orders/order-1/events", "/orders/[id]/events"
+        )
+
+        self.assertIsNone(stream)
+        self.assertIsNone(error)
+        self.assertEqual(4.0, retry_after)
+        self.assertTrue(response.succeeded)
+
+    def test_sse_retry_uses_capped_exponential_backoff_with_jitter(
+        self,
+    ) -> None:
+        source = types.SimpleNamespace(
+            uniform=lambda _lower, upper: upper
+        )
+
+        self.assertAlmostEqual(1.2, sse_reconnect_delay(0, None, source))
+        self.assertAlmostEqual(2.4, sse_reconnect_delay(1, None, source))
+        self.assertAlmostEqual(4.8, sse_reconnect_delay(2, None, source))
+        self.assertAlmostEqual(5.0, sse_reconnect_delay(3, None, source))
+        self.assertAlmostEqual(4.0, sse_reconnect_delay(0, 4.0, source))
 
     def test_product_status_zero_becomes_a_timeout_precondition(self) -> None:
         response = FakeResponse(0)

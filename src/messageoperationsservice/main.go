@@ -13,6 +13,8 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -67,7 +69,17 @@ func connectNATS() (*nats.Conn, nats.JetStreamContext, error) {
 	return nc, js, nil
 }
 
-func startAdvisoryConsumer(ctx context.Context, js nats.JetStreamContext, operations *operationsService, logger *slog.Logger) (*nats.Subscription, error) {
+type advisoryConsumerRuntime struct {
+	ctx          context.Context
+	js           nats.JetStreamContext
+	operations   *operationsService
+	logger       *slog.Logger
+	mu           sync.RWMutex
+	subscription *nats.Subscription
+	ready        atomic.Bool
+}
+
+func startAdvisoryConsumer(ctx context.Context, js nats.JetStreamContext, operations *operationsService, logger *slog.Logger) (*advisoryConsumerRuntime, error) {
 	if err := ensureAdvisoryConsumer(js); err != nil {
 		return nil, err
 	}
@@ -77,46 +89,89 @@ func startAdvisoryConsumer(ctx context.Context, js nats.JetStreamContext, operat
 	if err != nil {
 		return nil, fmt.Errorf("bind advisory consumer: %w", err)
 	}
-	go func() {
-		for ctx.Err() == nil {
-			messages, fetchErr := subscription.Fetch(16, nats.MaxWait(time.Second))
-			if errors.Is(fetchErr, nats.ErrTimeout) {
+	runtime := &advisoryConsumerRuntime{
+		ctx: ctx, js: js, operations: operations, logger: logger, subscription: subscription,
+	}
+	runtime.ready.Store(true)
+	go runtime.run()
+	return runtime, nil
+}
+
+func (runtime *advisoryConsumerRuntime) current() *nats.Subscription {
+	runtime.mu.RLock()
+	defer runtime.mu.RUnlock()
+	return runtime.subscription
+}
+
+func (runtime *advisoryConsumerRuntime) replace(subscription *nats.Subscription) {
+	runtime.mu.Lock()
+	runtime.subscription = subscription
+	runtime.mu.Unlock()
+}
+
+func (runtime *advisoryConsumerRuntime) run() {
+	defer runtime.ready.Store(false)
+	subscription := runtime.current()
+	for runtime.ctx.Err() == nil {
+		messages, fetchErr := subscription.Fetch(16, nats.MaxWait(time.Second))
+		if errors.Is(fetchErr, nats.ErrTimeout) {
+			continue
+		}
+		if fetchErr != nil {
+			runtime.ready.Store(false)
+			runtime.logger.Error("max-delivery advisory consumer interrupted; rebinding", "error", fetchErr)
+			_ = subscription.Unsubscribe()
+			for runtime.ctx.Err() == nil {
+				if ensureErr := ensureAdvisoryConsumer(runtime.js); ensureErr != nil {
+					runtime.logger.Error("reconcile advisory consumer", "error", ensureErr)
+				} else if next, bindErr := runtime.js.PullSubscribe(advisorySubject, advisoryDurable,
+					nats.Bind(advisoryStream, advisoryDurable)); bindErr != nil {
+					runtime.logger.Error("rebind advisory consumer", "error", bindErr)
+				} else {
+					subscription = next
+					runtime.replace(next)
+					runtime.ready.Store(true)
+					runtime.logger.Info("max-delivery advisory consumer rebound")
+					break
+				}
+				select {
+				case <-runtime.ctx.Done():
+					return
+				case <-time.After(time.Second):
+				}
+			}
+			continue
+		}
+		for _, message := range messages {
+			_, handleErr := runtime.operations.HandleAdvisory(runtime.ctx, message.Data)
+			if errors.Is(handleErr, errInvalidAdvisory) {
+				runtime.logger.Error("discarding invalid max-delivery advisory", "error", handleErr)
+				_ = message.Term()
 				continue
 			}
-			if fetchErr != nil {
-				if ctx.Err() == nil {
-					if advisoryConsumerMissing(fetchErr) {
-						if ensureErr := ensureAdvisoryConsumer(js); ensureErr != nil {
-							logger.Error("reconcile missing advisory consumer", "fetch_error", fetchErr, "error", ensureErr)
-						} else {
-							logger.Warn("advisory consumer was missing and has been recreated", "fetch_error", fetchErr)
-						}
-					} else {
-						logger.Error("fetch max-delivery advisories", "error", fetchErr)
-					}
-					time.Sleep(time.Second)
-				}
+			if handleErr != nil {
+				runtime.logger.Error("dead-letter transfer failed; requesting advisory redelivery", "error", handleErr)
+				_ = message.NakWithDelay(time.Second)
 				continue
 			}
-			for _, message := range messages {
-				_, handleErr := operations.HandleAdvisory(ctx, message.Data)
-				if errors.Is(handleErr, errInvalidAdvisory) {
-					logger.Error("discarding invalid max-delivery advisory", "error", handleErr)
-					_ = message.Term()
-					continue
-				}
-				if handleErr != nil {
-					logger.Error("dead-letter transfer failed; requesting advisory redelivery", "error", handleErr)
-					_ = message.NakWithDelay(time.Second)
-					continue
-				}
-				if ackErr := message.AckSync(); ackErr != nil {
-					logger.Error("acknowledge handled max-delivery advisory", "error", ackErr)
-				}
+			if ackErr := message.AckSync(); ackErr != nil {
+				runtime.logger.Error("acknowledge handled max-delivery advisory", "error", ackErr)
 			}
 		}
-	}()
-	return subscription, nil
+	}
+}
+
+func (runtime *advisoryConsumerRuntime) Ready() bool {
+	subscription := runtime.current()
+	return runtime.ready.Load() && subscription != nil && subscription.IsValid()
+}
+
+func (runtime *advisoryConsumerRuntime) Close() error {
+	runtime.ready.Store(false)
+	if subscription := runtime.current(); subscription != nil {
+		return subscription.Drain()
+	}
+	return nil
 }
 
 func ensureAdvisoryConsumer(js nats.JetStreamContext) error {
@@ -185,12 +240,6 @@ func advisoryConsumerSetupRace(err error) bool {
 		strings.Contains(message, "stream sequence")
 }
 
-func advisoryConsumerMissing(err error) bool {
-	return errors.Is(err, nats.ErrConsumerDeleted) ||
-		errors.Is(err, nats.ErrConsumerNotFound) ||
-		errors.Is(err, nats.ErrNoResponders)
-}
-
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(logger)
@@ -217,13 +266,13 @@ func main() {
 	operations := newOperationsService(&natsMessageBroker{js: js}, &kvCaseRepository{kv: kv}, logger)
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	subscription, err := startAdvisoryConsumer(ctx, js, operations, logger)
+	advisoryConsumer, err := startAdvisoryConsumer(ctx, js, operations, logger)
 	if err != nil {
 		logger.Error("advisory consumer startup failed", "error", err)
 		os.Exit(1)
 	}
 	serverHandler, err := newAdminHTTPServer(operations, logger, adminUser, adminToken, func() bool {
-		return nc.IsConnected() && subscription.IsValid()
+		return nc.IsConnected() && advisoryConsumer.Ready()
 	})
 	if err != nil {
 		logger.Error("admin server startup failed", "error", err)
@@ -254,6 +303,6 @@ func main() {
 	shutdownContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	_ = httpServer.Shutdown(shutdownContext)
-	_ = subscription.Drain()
+	_ = advisoryConsumer.Close()
 	_ = nc.Drain()
 }

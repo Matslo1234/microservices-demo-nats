@@ -11,6 +11,8 @@ from urllib.parse import urlparse
 
 APPLICATION_TYPES = {"GRPC", "NATS"}
 WORKLOADS = {"closed", "open", "saturation", "fault_tolerance"}
+LOCAL_CLUSTER = "local"
+LOCAL_TARGET_URL = "http://frontend:80"
 MAX_OPEN_ARRIVAL_RATE_PER_WORKER = 100.0
 MAX_CLOSED_USERS_PER_WORKER = 1_000
 SATURATION_START_RATE = 10.0
@@ -89,7 +91,15 @@ def normalize_http_url(value: str, name: str) -> str:
 
 
 def normalize_target_url(value: str) -> str:
+    if value.strip() == LOCAL_CLUSTER:
+        return LOCAL_TARGET_URL
     return normalize_http_url(value, "target_url")
+
+
+def normalize_metrics_url(value: str) -> str:
+    if value.strip() == LOCAL_CLUSTER:
+        return LOCAL_CLUSTER
+    return normalize_http_url(value, "metrics_url")
 
 
 @dataclass(frozen=True)
@@ -152,7 +162,7 @@ class BenchmarkConfig:
         )
         raw_metrics_url = str(values.get("metrics_url") or "")
         metrics_url = (
-            normalize_http_url(raw_metrics_url, "metrics_url")
+            normalize_metrics_url(raw_metrics_url)
             if raw_metrics_url.strip()
             else None
         )

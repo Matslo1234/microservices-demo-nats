@@ -214,20 +214,46 @@ def verify_manifests() -> str:
         "emptyDir:",
         "type: Recreate",
     )
+    benchmark_external = document(
+        rendered, "Service", "benchmarkservice-external"
+    )
+    require(
+        benchmark_external,
+        "app: benchmarkservice",
+        "type: LoadBalancer",
+        "port: 80",
+        "targetPort: http",
+    )
     role = document(rendered, "Role", "benchmarkservice-jobs")
     require(role, "resources:", "- jobs", "- create", "- delete")
     runner = document(
         rendered, "ServiceAccount", "benchmark-runner"
     )
     require(runner, "name: benchmark-runner")
+    runner_role = document(
+        rendered, "ClusterRole", "online-boutique-benchmark-runner"
+    )
+    require(runner_role, "- nodes", "- nodes/proxy", "- get", "- list")
+    runner_binding = document(
+        rendered,
+        "ClusterRoleBinding",
+        "online-boutique-benchmark-runner",
+    )
+    require(
+        runner_binding,
+        "name: online-boutique-benchmark-runner",
+        "name: benchmark-runner",
+    )
     policy = document(rendered, "NetworkPolicy", "benchmark-runner-egress")
     require(
         policy,
         "app: benchmark-runner",
         "port: 4222",
+        "port: 7777",
         "port: 80",
         "port: 443",
         "port: 8080",
+        "port: 6443",
     )
     nats_policy = document(
         run(
@@ -331,6 +357,7 @@ def verify_release_manifests() -> None:
             "A compatible NATS configuration must already be running",
             "kind: PodDisruptionBudget",
             "name: benchmark-runner",
+            "name: benchmarkservice-external",
             "name: redis-cart-cluster",
             "name: redis-checkout-cluster",
             "name: benchmarkmetrics-external",
@@ -369,7 +396,7 @@ def verify_release_manifests() -> None:
                 "maxUnavailable: 0",
             )
         currency = document(content, "Deployment", "currencyservice")
-        require(currency, "cpu: 100m", "cpu: 200m")
+        require(currency, "cpu: 200m", "cpu: 400m")
         message_operations = document(
             content, "Deployment", "messageoperationsservice"
         )
@@ -545,6 +572,7 @@ def verify_release_manifests() -> None:
         original,
         "NATS configuration before applying this bundle",
         "name: benchmark-runner",
+        "name: benchmarkservice-external",
         "name: benchmarkmetrics-external",
         "kind: PodDisruptionBudget",
     )
@@ -635,7 +663,7 @@ def verify_release_manifests() -> None:
     )
     require(
         delayed_shipping,
-        "image: matslo123/shippingservice:v0.10.6-delay",
+        "image: matslo123/shippingservice:v0.10.6-with-delay",
         "name: PROCESSING_TIME_MS",
         'value: "200"',
     )

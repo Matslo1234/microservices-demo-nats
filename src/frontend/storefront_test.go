@@ -263,6 +263,21 @@ func TestWriteAcceptedOrderKeepsJSONForAPIClient(t *testing.T) {
 	}
 }
 
+func TestWriteRetryableOrderErrorAdvertisesOneSecondDelay(t *testing.T) {
+	recorder := httptest.NewRecorder()
+
+	writeRetryableOrderError(recorder, "order status unavailable", http.StatusServiceUnavailable)
+
+	response := recorder.Result()
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("got status %d, want %d", response.StatusCode, http.StatusServiceUnavailable)
+	}
+	if retryAfter := response.Header.Get("Retry-After"); retryAfter != orderAPIPollRetryAfter {
+		t.Fatalf("got Retry-After %q, want %q", retryAfter, orderAPIPollRetryAfter)
+	}
+}
+
 func TestQueryOrderRetriesNotFoundThreeTimes(t *testing.T) {
 	attempts := 0
 	expected := &storefrontQueryResponse{

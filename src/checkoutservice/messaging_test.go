@@ -13,6 +13,17 @@ import (
 	"google.golang.org/protobuf/types/known/emptypb"
 )
 
+func TestCheckoutConsumerTerminalErrorsRestartWorker(t *testing.T) {
+	for _, err := range []error{nats.ErrBadSubscription, nats.ErrSubscriptionClosed, nats.ErrConsumerDeleted, nats.ErrNoResponders} {
+		if !checkoutConsumerTerminal(err) {
+			t.Fatalf("%v was not classified as terminal", err)
+		}
+	}
+	if checkoutConsumerTerminal(nats.ErrTimeout) {
+		t.Fatal("fetch timeout was classified as terminal")
+	}
+}
+
 func TestCheckoutWorkflowConsumerFilters(t *testing.T) {
 	if !checkoutConsumerFiltersMatch("", checkoutShippingSagaSubjects, checkoutShippingSagaSubjects) {
 		t.Fatal("shipping saga filters do not match themselves")

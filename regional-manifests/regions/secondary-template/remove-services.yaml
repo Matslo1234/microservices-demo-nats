@@ -9,4 +9,4 @@ patch: |-
 target:
   version: v1
   kind: Service
-  name: benchmarkservice|messageoperationsservice|redis-cart-cluster|redis-cart-cluster-headless|redis-checkout-cluster|redis-checkout-cluster-headless
+  name: benchmarkservice|benchmarkservice-external|messageoperationsservice|redis-cart-cluster|redis-cart-cluster-headless|redis-checkout-cluster|redis-checkout-cluster-headless

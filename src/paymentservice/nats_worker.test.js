@@ -6,6 +6,7 @@ const {
   createSigningKeyring, deriveResultMessageID, tokenize, verifyPaymentToken,
   loadSigningKeyring, processTokenBatch, loadContracts, processCommand, runCommandConsumer,
   superviseCommandConsumer, processingTimeMs, waitForProcessing, registerTokenizationService,
+  superviseTokenizationService,
 } = require('./nats_worker');
 
 async function main() {
@@ -205,6 +206,39 @@ async function main() {
     ),
     'NATS micro endpoint returned an invalid payment token',
   );
+
+  let stopInitialService;
+  const initialService = {
+    isStopped: false,
+    stopped: new Promise(resolve => { stopInitialService = resolve; }),
+  };
+  const recoveredService = {
+    isStopped: false,
+    stopped: Promise.resolve(null),
+    addEndpoint: (_name, options) => ({subject: options.subject}),
+    stop: async () => {},
+  };
+  const tokenStatus = {
+    service: initialService, endpoint: {}, ready: true, failedAt: 0,
+    stopping: false, supervising: false,
+  };
+  let tokenRegistrations = 0;
+  const tokenSupervisor = superviseTokenizationService({
+    isClosed: () => false,
+    services: {
+      add: async () => {
+        tokenRegistrations++;
+        tokenStatus.stopping = true;
+        return recoveredService;
+      },
+    },
+    flush: async () => {},
+  }, replicaAKeyring, tokenStatus, {service: initialService, endpoint: {}}, 0);
+  stopInitialService(new Error('token endpoint stopped'));
+  await tokenSupervisor;
+  assert.equal(tokenRegistrations, 1, 'stopped tokenization service was not recreated');
+  assert.equal(tokenStatus.service, recoveredService, 'replacement tokenization service was not tracked');
+  assert(!tokenStatus.supervising, 'tokenization supervisor did not stop cleanly');
 
   const contracts = await loadContracts();
   const occurredAt = {seconds: Math.floor(now / 1000), nanos: (now % 1000) * 1000000};
