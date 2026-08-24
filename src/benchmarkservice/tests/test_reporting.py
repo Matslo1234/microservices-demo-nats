@@ -79,6 +79,7 @@ class ReportingTest(unittest.TestCase):
 
     def test_nats_summary_deduplicates_replicated_consumer_series(self) -> None:
         first = {
+            "elapsed_seconds": 0,
             "phase": "steady",
             "nats_metrics": [
                 self._nats_metric(
@@ -111,6 +112,7 @@ class ReportingTest(unittest.TestCase):
             ],
         }
         second = {
+            "elapsed_seconds": 2,
             "phase": "steady",
             "nats_metrics": [
                 self._nats_metric(
@@ -147,6 +149,14 @@ class ReportingTest(unittest.TestCase):
 
         self.assertEqual(3, summary["consumer_pending"]["first"])
         self.assertEqual(-2, summary["consumer_pending"]["change"])
+        self.assertEqual(
+            [
+                {"elapsed_seconds": 0, "waiting_events": 3},
+                {"elapsed_seconds": 1, "waiting_events": 3},
+                {"elapsed_seconds": 2, "waiting_events": 1},
+            ],
+            summary["consumer_pending"]["series"],
+        )
         self.assertEqual(30, summary["storage_bytes"]["first"])
         self.assertEqual(40, summary["storage_bytes"]["last"])
         endpoint = summary["micro_endpoints"]["by_endpoint"][

@@ -456,10 +456,11 @@ def nats_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
         "gnatsd_varz_jetstream_stats_storage": "storage_bytes",
     }
     series: dict[str, list[float]] = defaultdict(list)
+    pending_by_second: dict[int, float] = {}
     consumers: dict[str, dict[str, list[float]]] = defaultdict(
         lambda: defaultdict(list)
     )
-    for record in steady:
+    for record_index, record in enumerate(steady):
         totals: dict[str, float] = defaultdict(float)
         record_consumers: dict[str, dict[str, float]] = defaultdict(dict)
         for metric in record.get("nats_metrics", []):
@@ -487,6 +488,11 @@ def nats_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
                 totals[alias] += value
         for alias, value in totals.items():
             series[alias].append(value)
+            if alias == "consumer_pending":
+                elapsed = float(
+                    record.get("elapsed_seconds", record_index)
+                )
+                pending_by_second[max(0, math.floor(elapsed))] = value
 
     result: dict[str, Any] = {"available": bool(series)}
     for alias, values in sorted(series.items()):
@@ -496,6 +502,21 @@ def nats_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
             "max": max(values),
             "change": values[-1] - values[0],
         }
+        if alias == "consumer_pending":
+            first_second = min(pending_by_second)
+            last_second = max(pending_by_second)
+            latest: float | None = None
+            per_second: list[dict[str, float | int]] = []
+            for second in range(first_second, last_second + 1):
+                latest = pending_by_second.get(second, latest)
+                if latest is not None:
+                    per_second.append(
+                        {
+                            "elapsed_seconds": second,
+                            "waiting_events": latest,
+                        }
+                    )
+            result[alias]["series"] = per_second
     result["by_consumer"] = {
         consumer: {
             alias: {

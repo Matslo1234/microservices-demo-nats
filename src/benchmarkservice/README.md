@@ -271,22 +271,33 @@ artifacts to their run directory. Depending on the workload, these include:
 - diagnostic `locust_*.csv` files; and
 - one ZIP archive containing the complete run.
 
-Downloaded summary files can be analyzed without additional Python packages:
+Install the benchmark service dependencies, then analyze downloaded summary
+files with:
 
 ```sh
+python -m pip install -r src/benchmarkservice/requirements.txt
 python src/benchmarkservice/parse_results.py ./benchmark-results
 ```
 
-For every saturation summary, the script writes SVGs of goodput and P95 outcome
-latency against the requested rate beside the input file. Rungs without a P95
-latency sample are omitted from the latency graph. NATS saturation summaries
-also get an SVG of maximum consumer-pending events. Fault-tolerance summaries
-get an SVG of successfully processed requests per second; NATS fault-tolerance
-summaries also get an SVG of queued events per second. Closed-run summaries
+For every saturation summary, the script uses Matplotlib to write PNGs of
+goodput and P95 outcome latency against the requested rate beside the input
+file. Rungs without a P95 latency sample are omitted from the latency graph.
+NATS saturation summaries
+also get a PNG of maximum consumer-pending events. Fault-tolerance summaries
+get a PNG of successfully processed requests per second; NATS fault-tolerance
+summaries also get a PNG of queued events per second. Closed-run summaries
 include the configured closed-loop user count and are grouped by that count
 into `closed_results.tex` in the supplied results folder; the table reports
 the average attempted orders per run, aggregate success rate, and the median
-and population standard deviation of run-level P95 outcome latency.
+and population standard deviation of run-level P95 outcome latency. It also
+writes `closed_p95_latency.png`, plotting those medians by user count with
+population-standard-deviation error bars. For NATS closed-loop results,
+`closed_nats_waiting_events.png` plots the mean waiting-event count per elapsed
+second across repeated runs, with a separate color for each user count. The
+script also writes `resource-usage.tex` with a separate table for each
+closed-loop user count. Each service row reports the mean and population
+standard deviation of CPU seconds per completed order and average memory in MB
+across runs; the final row reports the corresponding totals across services.
 
 The remote collector fetches kubelet summary and cAdvisor statistics, NATS
 exporter metrics, and NATS micro endpoint statistics from the tested cluster's

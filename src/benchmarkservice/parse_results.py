@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
-"""Create charts and a LaTeX table from benchmark summary JSON files."""
+"""Create PNG charts and LaTeX tables from benchmark summary JSON files."""
 
 from __future__ import annotations
 
 import argparse
+import colorsys
 import json
 import math
 import statistics
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
-from xml.sax.saxutils import escape
+from typing import Any, Iterator
+
+from matplotlib.backends.backend_agg import FigureCanvasAgg
+from matplotlib.figure import Figure
+from matplotlib.ticker import StrMethodFormatter
 
 
 class ResultError(ValueError):
@@ -30,6 +34,22 @@ class ClosedMeasurements:
     completed: int = 0
     runs: int = 0
     p95_values: list[float] = field(default_factory=list)
+
+
+@dataclass
+class ServiceResourceMeasurements:
+    cpu_seconds_per_order: list[float] = field(default_factory=list)
+    average_memory_mb: list[float] = field(default_factory=list)
+
+
+@dataclass
+class ClosedResourceMeasurements:
+    services: dict[str, ServiceResourceMeasurements] = field(
+        default_factory=dict
+    )
+    total: ServiceResourceMeasurements = field(
+        default_factory=ServiceResourceMeasurements
+    )
 
 
 def _number(value: Any, field_name: str, source: Path) -> float:
@@ -79,6 +99,22 @@ def find_results(folder: Path) -> list[Result]:
     return results
 
 
+def _json_line_values(path: Path) -> Iterator[tuple[int, Any]]:
+    try:
+        with path.open(encoding="utf-8") as source:
+            for line_number, line in enumerate(source, 1):
+                if not line.strip():
+                    continue
+                try:
+                    yield line_number, json.loads(line)
+                except json.JSONDecodeError as error:
+                    raise ResultError(
+                        f"invalid JSON in {path}:{line_number}: {error}"
+                    ) from error
+    except OSError as error:
+        raise ResultError(f"cannot read {path}: {error}") from error
+
+
 def _nested(document: dict[str, Any], *keys: str) -> Any:
     value: Any = document
     for key in keys:
@@ -113,15 +149,15 @@ def saturation_points(
             f"saturation.rungs[{index}].target_requests_per_second",
             result.path,
         )
-        goodput_value = _nested(rung, "business", "goodput_orders_per_second")
-        if goodput_value is None:
-            goodput_value = rung.get("observed_goodput_orders_per_second")
         goodput_points.append(
             (
                 rate,
                 _number(
-                    goodput_value,
-                    f"saturation.rungs[{index}].business.goodput_orders_per_second",
+                    rung.get("observed_goodput_orders_per_second"),
+                    (
+                        f"saturation.rungs[{index}]."
+                        "observed_goodput_orders_per_second"
+                    ),
                     result.path,
                 ),
             )
@@ -228,162 +264,188 @@ def fault_tolerance_points(
     return sorted(successful_points), sorted(queued_points)
 
 
-def _display_number(value: float) -> str:
-    if value == 0:
-        return "0"
-    if abs(value) >= 1_000 or abs(value) < 0.01:
-        return f"{value:.3g}"
-    return f"{value:.2f}".rstrip("0").rstrip(".")
+def _axis_limit(maximum: float, *, headroom: float = 1.0) -> float:
+    """Return an axis limit whose five evenly spaced ticks are integers."""
+    target = maximum * headroom
+    return float(max(5, math.ceil(target / 5) * 5))
 
 
-def write_svg_chart(
+def write_png_chart(
     destination: Path,
     points: list[tuple[float, float]],
     *,
     title: str,
     y_label: str,
-    x_label: str = "Requests per second",
+    x_label: str = "Št. naročil na sekundo",
+    error_bars: list[tuple[float, float]] | None = None,
 ) -> None:
-    if not points:
+    _write_png_series_chart(
+        destination,
+        [("", points)],
+        title=title,
+        y_label=y_label,
+        x_label=x_label,
+        error_bars=error_bars,
+        show_legend=False,
+    )
+
+
+def write_png_multi_series_chart(
+    destination: Path,
+    series: list[tuple[str, list[tuple[float, float]]]],
+    *,
+    title: str,
+    y_label: str,
+    x_label: str,
+) -> None:
+    _write_png_series_chart(
+        destination,
+        series,
+        title=title,
+        y_label=y_label,
+        x_label=x_label,
+        show_legend=True,
+    )
+
+
+def _series_color(index: int) -> str:
+    hue = (217 + index * 137) % 360
+    red, green, blue = colorsys.hls_to_rgb(hue / 360, 0.42, 0.65)
+    return "#" + "".join(
+        f"{round(channel * 255):02x}" for channel in (red, green, blue)
+    )
+
+
+def _write_png_series_chart(
+    destination: Path,
+    series: list[tuple[str, list[tuple[float, float]]]],
+    *,
+    title: str,
+    y_label: str,
+    x_label: str,
+    error_bars: list[tuple[float, float]] | None = None,
+    show_legend: bool,
+) -> None:
+    populated_series = [item for item in series if item[1]]
+    all_points = [point for _, points in populated_series for point in points]
+    if not all_points:
         raise ResultError(f"cannot create {destination}: graph has no points")
-
-    width, height = 960, 600
-    left, right, top, bottom = 95, 35, 60, 80
-    plot_width = width - left - right
-    plot_height = height - top - bottom
-    maximum_x = max(point[0] for point in points)
-    maximum_y = max(point[1] for point in points)
-    x_limit = maximum_x if maximum_x > 0 else 1.0
-    y_limit = maximum_y * 1.1 if maximum_y > 0 else 1.0
-
-    def x_position(value: float) -> float:
-        return left + value / x_limit * plot_width
-
-    def y_position(value: float) -> float:
-        return top + plot_height - value / y_limit * plot_height
-
-    lines = [
-        '<?xml version="1.0" encoding="UTF-8"?>',
-        (
-            '<svg xmlns="http://www.w3.org/2000/svg" '
-            f'viewBox="0 0 {width} {height}" role="img">'
-        ),
-        f"  <title>{escape(title)}</title>",
-        (
-            "  <style>text{font-family:sans-serif;fill:#202124}"
-            ".grid{stroke:#dadce0;stroke-width:1}"
-            ".axis{stroke:#3c4043;stroke-width:1.5}"
-            ".series{fill:none;stroke:#1967d2;stroke-width:3}"
-            ".point{fill:#1967d2}</style>"
-        ),
-        "  <rect width=" + f'"{width}" height="{height}" fill="#fff"/>',
-        (
-            f'  <text x="{width / 2:g}" y="32" font-size="22" '
-            f'text-anchor="middle">{escape(title)}</text>'
-        ),
-    ]
-
-    for tick in range(6):
-        fraction = tick / 5
-        x = left + fraction * plot_width
-        y = top + plot_height - fraction * plot_height
-        lines.extend(
-            [
-                (
-                    f'  <line class="grid" x1="{left}" y1="{y:.2f}" '
-                    f'x2="{left + plot_width}" y2="{y:.2f}"/>'
-                ),
-                (
-                    f'  <text x="{left - 12}" y="{y + 5:.2f}" '
-                    f'font-size="13" text-anchor="end">'
-                    f'{escape(_display_number(fraction * y_limit))}</text>'
-                ),
-                (
-                    f'  <line class="grid" x1="{x:.2f}" y1="{top}" '
-                    f'x2="{x:.2f}" y2="{top + plot_height}"/>'
-                ),
-                (
-                    f'  <text x="{x:.2f}" '
-                    f'y="{top + plot_height + 24}" font-size="13" '
-                    f'text-anchor="middle">'
-                    f'{escape(_display_number(fraction * x_limit))}</text>'
-                ),
-            ]
+    if any(
+        not math.isfinite(coordinate)
+        for point in all_points
+        for coordinate in point
+    ):
+        raise ResultError(
+            f"cannot create {destination}: graph points must be finite"
+        )
+    if error_bars is not None and len(error_bars) != len(all_points):
+        raise ResultError(
+            f"cannot create {destination}: each point must have an error bar"
+        )
+    if error_bars is not None and any(
+        point[0] != error_x or error < 0 or not math.isfinite(error)
+        for point, (error_x, error) in zip(all_points, error_bars)
+    ):
+        raise ResultError(
+            f"cannot create {destination}: error bars must match points "
+            "and be finite and non-negative"
         )
 
-    lines.extend(
-        [
-            (
-                f'  <line class="axis" x1="{left}" '
-                f'y1="{top + plot_height}" x2="{left + plot_width}" '
-                f'y2="{top + plot_height}"/>'
+    maximum_x = max(point[0] for point in all_points)
+    maximum_y = max(point[1] for point in all_points)
+    if error_bars:
+        maximum_y = max(
+            maximum_y,
+            max(
+                point[1] + error
+                for point, (_, error) in zip(all_points, error_bars)
             ),
-            (
-                f'  <line class="axis" x1="{left}" y1="{top}" '
-                f'x2="{left}" y2="{top + plot_height}"/>'
-            ),
-            (
-                f'  <text x="{left + plot_width / 2:g}" '
-                f'y="{height - 24}" font-size="16" '
-                f'text-anchor="middle">{escape(x_label)}</text>'
-            ),
-            (
-                f'  <text x="24" y="{top + plot_height / 2:g}" '
-                'font-size="16" text-anchor="middle" '
-                f'transform="rotate(-90 24 {top + plot_height / 2:g})">'
-                f"{escape(y_label)}</text>"
-            ),
-        ]
-    )
-
-    polyline = " ".join(
-        f"{x_position(x):.2f},{y_position(y):.2f}" for x, y in points
-    )
-    lines.append(f'  <polyline class="series" points="{polyline}"/>')
-    for x_value, y_value in points:
-        x = x_position(x_value)
-        y = y_position(y_value)
-        lines.extend(
-            [
-                f'  <circle class="point" cx="{x:.2f}" cy="{y:.2f}" r="5"/>',
-                (
-                    f'  <text x="{x:.2f}" y="{y - 10:.2f}" '
-                    f'font-size="12" text-anchor="middle">'
-                    f'{escape(_display_number(y_value))}</text>'
-                ),
-            ]
         )
-    lines.append("</svg>")
-    destination.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    x_limit = _axis_limit(maximum_x)
+    y_limit = _axis_limit(maximum_y, headroom=1.1)
+
+    figure = Figure(figsize=(9.6, 6), dpi=100, layout="constrained")
+    FigureCanvasAgg(figure)
+    axes = figure.subplots()
+    axes.set_title(title, fontsize=16)
+    axes.set_xlabel(x_label, fontsize=12)
+    axes.set_ylabel(y_label, fontsize=12)
+    axes.set_xlim(0, x_limit)
+    axes.set_ylim(0, y_limit)
+    axes.set_xticks([tick * x_limit / 5 for tick in range(6)])
+    axes.set_yticks([tick * y_limit / 5 for tick in range(6)])
+    axes.xaxis.set_major_formatter(StrMethodFormatter("{x:.0f}"))
+    axes.yaxis.set_major_formatter(StrMethodFormatter("{x:.0f}"))
+    axes.grid(color="#dadce0", linewidth=1)
+    axes.set_axisbelow(True)
+    axes.spines["top"].set_visible(False)
+    axes.spines["right"].set_visible(False)
+
+    if error_bars:
+        axes.errorbar(
+            [point[0] for point in all_points],
+            [point[1] for point in all_points],
+            yerr=[error for _, error in error_bars],
+            fmt="none",
+            ecolor=_series_color(0),
+            elinewidth=2,
+            capsize=5,
+            zorder=2,
+        )
+
+    for index, (label, points) in enumerate(populated_series):
+        axes.plot(
+            [point[0] for point in points],
+            [point[1] for point in points],
+            color=_series_color(index),
+            linewidth=3,
+            marker="o" if len(points) == 1 else None,
+            markersize=7,
+            label=label or None,
+            zorder=3,
+        )
+    if show_legend:
+        axes.legend(loc="center left", bbox_to_anchor=(1.02, 0.5))
+
+    figure.savefig(
+        destination,
+        format="png",
+        dpi=100,
+        facecolor="white",
+        metadata={
+            "Title": title,
+            "Description": f"X axis: {x_label}; Y axis: {y_label}",
+        },
+    )
 
 
 def write_saturation_graphs(result: Result) -> list[Path]:
     goodput, pending, p95_latency = saturation_points(result)
     base = result.path.with_suffix("")
-    goodput_path = base.with_name(f"{base.name}_goodput.svg")
-    write_svg_chart(
+    goodput_path = base.with_name(f"{base.name}_goodput.png")
+    write_png_chart(
         goodput_path,
         goodput,
-        title=f"{result.path.stem}: goodput",
-        y_label="Goodput (orders/s)",
+        title=f"",
+        y_label="Koristna prepustnost",
     )
     outputs = [goodput_path]
     if p95_latency:
-        p95_latency_path = base.with_name(f"{base.name}_p95_latency.svg")
-        write_svg_chart(
+        p95_latency_path = base.with_name(f"{base.name}_p95_latency.png")
+        write_png_chart(
             p95_latency_path,
             p95_latency,
-            title=f"{result.path.stem}: P95 outcome latency",
-            y_label="P95 outcome latency (ms)",
+            title=f"",
+            y_label="P95 latenca naročila (ms)",
         )
         outputs.append(p95_latency_path)
     if pending:
-        pending_path = base.with_name(f"{base.name}_max_pending_events.svg")
-        write_svg_chart(
+        pending_path = base.with_name(f"{base.name}_max_pending_events.png")
+        write_png_chart(
             pending_path,
             pending,
-            title=f"{result.path.stem}: maximum pending events",
-            y_label="Maximum pending events",
+            title=f"",
+            y_label="Št. čakajočih dogodkov",
         )
         outputs.append(pending_path)
     return outputs
@@ -392,8 +454,8 @@ def write_saturation_graphs(result: Result) -> list[Path]:
 def write_fault_tolerance_graphs(result: Result) -> list[Path]:
     successful, queued = fault_tolerance_points(result)
     base = result.path.with_suffix("")
-    successful_path = base.with_name(f"{base.name}_successful_requests.svg")
-    write_svg_chart(
+    successful_path = base.with_name(f"{base.name}_successful_requests.png")
+    write_png_chart(
         successful_path,
         successful,
         title=f"{result.path.stem}: successfully processed requests",
@@ -402,8 +464,8 @@ def write_fault_tolerance_graphs(result: Result) -> list[Path]:
     )
     outputs = [successful_path]
     if queued:
-        queued_path = base.with_name(f"{base.name}_queued_events.svg")
-        write_svg_chart(
+        queued_path = base.with_name(f"{base.name}_queued_events.png")
+        write_png_chart(
             queued_path,
             queued,
             title=f"{result.path.stem}: queued NATS events",
@@ -444,8 +506,290 @@ def collect_closed_measurements(results: list[Result]) -> dict[int, ClosedMeasur
     return groups
 
 
+def _summary_nats_waiting_samples(
+    result: Result,
+) -> list[tuple[float, float]] | None:
+    samples = _nested(result.summary, "nats", "consumer_pending", "series")
+    series_field = "nats.consumer_pending.series"
+    waiting_fields = ("waiting_events", "nats_waiting_events", "value")
+    if samples is None or samples == []:
+        samples = _nested(result.summary, "outstanding_orders", "series")
+        series_field = "outstanding_orders.series"
+        waiting_fields = ("max_outstanding",)
+    if samples is None or samples == []:
+        return None
+    if not isinstance(samples, list):
+        raise ResultError(
+            f"{result.path}: {series_field} must be a list"
+        )
+
+    points: list[tuple[float, float]] = []
+    for index, sample in enumerate(samples):
+        if not isinstance(sample, dict):
+            raise ResultError(
+                f"{result.path}: {series_field}[{index}] must be an object"
+            )
+        elapsed = _number(
+            sample.get("elapsed_seconds"),
+            f"{series_field}[{index}].elapsed_seconds",
+            result.path,
+        )
+        waiting_field = next(
+            (field for field in waiting_fields if sample.get(field) is not None),
+            waiting_fields[0],
+        )
+        waiting = _number(
+            sample.get(waiting_field),
+            f"{series_field}[{index}].{waiting_field}",
+            result.path,
+        )
+        if elapsed < 0 or waiting < 0:
+            raise ResultError(
+                f"{result.path}: NATS waiting-event samples must not be negative"
+            )
+        points.append((elapsed, waiting))
+    return points
+
+
+def _resource_nats_waiting_samples(
+    result: Result,
+) -> list[tuple[float, float]] | None:
+    if result.path.name != "summary.json":
+        return None
+    resources_path = result.path.parent / "resources.jsonl"
+    if not resources_path.is_file():
+        return None
+
+    points: list[tuple[float, float]] = []
+    for line_number, record in _json_line_values(resources_path):
+        if not isinstance(record, dict) or record.get("phase") != "steady":
+            continue
+
+        consumers: dict[str, float] = {}
+        metrics = record.get("nats_metrics", [])
+        if not isinstance(metrics, list):
+            raise ResultError(
+                f"{resources_path}:{line_number}: nats_metrics must be a list"
+            )
+        for metric in metrics:
+            if (
+                not isinstance(metric, dict)
+                or metric.get("name") != "jetstream_consumer_num_pending"
+            ):
+                continue
+            labels = metric.get("labels", {})
+            if not isinstance(labels, dict):
+                continue
+            stream = labels.get("stream_name") or labels.get("stream")
+            consumer = labels.get("consumer_name") or labels.get("consumer")
+            if (
+                stream not in {"BOUTIQUE_COMMANDS", "BOUTIQUE_EVENTS"}
+                or not consumer
+            ):
+                continue
+            key = f"{stream}/{consumer}"
+            value = _number(
+                metric.get("value"),
+                f"nats_metrics waiting-event value at line {line_number}",
+                resources_path,
+            )
+            if value < 0:
+                raise ResultError(
+                    f"{resources_path}:{line_number}: NATS waiting-event "
+                    "samples must not be negative"
+                )
+            consumers[key] = max(value, consumers.get(key, 0.0))
+        if consumers:
+            elapsed = _number(
+                record.get("elapsed_seconds"),
+                f"elapsed_seconds at line {line_number}",
+                resources_path,
+            )
+            if elapsed < 0:
+                raise ResultError(
+                    f"{resources_path}:{line_number}: elapsed_seconds must "
+                    "not be negative"
+                )
+            points.append(
+                (
+                    elapsed,
+                    sum(consumers.values()),
+                )
+            )
+    return points or None
+
+
+def collect_closed_nats_waiting_series(
+    results: list[Result],
+) -> dict[int, list[tuple[float, float]]]:
+    by_users: dict[int, dict[int, list[float]]] = {}
+    for result in results:
+        if str(result.summary.get("application_type", "")).upper() != "NATS":
+            continue
+        users = _integer(result.summary.get("users"), "users", result.path)
+        if users < 1:
+            raise ResultError(f"{result.path}: users must be positive")
+        samples = _summary_nats_waiting_samples(result)
+        if samples is None:
+            samples = _resource_nats_waiting_samples(result)
+        if not samples:
+            raise ResultError(
+                f"{result.path}: NATS closed-loop result must contain "
+                "per-second waiting-event samples"
+            )
+
+        # Keep the last observation in a second, then average matching seconds
+        # across repeated runs with the same closed-loop user count.
+        observed_by_second: dict[int, float] = {}
+        for elapsed, waiting in samples:
+            observed_by_second[math.floor(elapsed)] = waiting
+        run_by_second: dict[int, float] = {}
+        latest: float | None = None
+        for second in range(
+            min(observed_by_second), max(observed_by_second) + 1
+        ):
+            latest = observed_by_second.get(second, latest)
+            if latest is not None:
+                run_by_second[second] = latest
+        grouped_seconds = by_users.setdefault(users, {})
+        for second, waiting in run_by_second.items():
+            grouped_seconds.setdefault(second, []).append(waiting)
+
+    return {
+        users: [
+            (float(second), statistics.mean(values))
+            for second, values in sorted(seconds.items())
+        ]
+        for users, seconds in sorted(by_users.items())
+    }
+
+
+def collect_closed_resource_measurements(
+    results: list[Result],
+) -> dict[int, ClosedResourceMeasurements]:
+    groups: dict[int, ClosedResourceMeasurements] = {}
+    for result in results:
+        users = _integer(result.summary.get("users"), "users", result.path)
+        group = groups.setdefault(users, ClosedResourceMeasurements())
+        resources = result.summary.get("resources")
+        if not isinstance(resources, dict) or not resources.get("available"):
+            continue
+        by_service = resources.get("by_service")
+        if not isinstance(by_service, dict):
+            raise ResultError(
+                f"{result.path}: resources.by_service must be an object"
+            )
+
+        completed = _integer(
+            _nested(result.summary, "business", "completed"),
+            "business.completed",
+            result.path,
+        )
+        total_cpu_seconds_per_order = 0.0
+        total_average_memory_mb = 0.0
+        complete_cpu_total = completed > 0 and bool(by_service)
+        complete_memory_total = bool(by_service)
+        for service, values in sorted(by_service.items()):
+            if not isinstance(service, str) or not isinstance(values, dict):
+                raise ResultError(
+                    f"{result.path}: resources.by_service entries must be objects"
+                )
+            measurements = group.services.setdefault(
+                service, ServiceResourceMeasurements()
+            )
+
+            cpu_seconds_value = values.get("cpu_seconds")
+            if cpu_seconds_value is None or completed <= 0:
+                complete_cpu_total = False
+            else:
+                cpu_seconds = _number(
+                    cpu_seconds_value,
+                    f"resources.by_service.{service}.cpu_seconds",
+                    result.path,
+                )
+                if cpu_seconds < 0:
+                    raise ResultError(
+                        f"{result.path}: resources.by_service.{service}."
+                        "cpu_seconds must not be negative"
+                    )
+                cpu_seconds_per_order = cpu_seconds / completed
+                measurements.cpu_seconds_per_order.append(
+                    cpu_seconds_per_order
+                )
+                total_cpu_seconds_per_order += cpu_seconds_per_order
+
+            average_memory_value = values.get("average_memory_bytes")
+            if average_memory_value is None:
+                complete_memory_total = False
+            else:
+                average_memory_bytes = _number(
+                    average_memory_value,
+                    f"resources.by_service.{service}.average_memory_bytes",
+                    result.path,
+                )
+                if average_memory_bytes < 0:
+                    raise ResultError(
+                        f"{result.path}: resources.by_service.{service}."
+                        "average_memory_bytes must not be negative"
+                    )
+                average_memory_mb = average_memory_bytes / 1_000_000
+                measurements.average_memory_mb.append(average_memory_mb)
+                total_average_memory_mb += average_memory_mb
+
+        if complete_cpu_total:
+            group.total.cpu_seconds_per_order.append(
+                total_cpu_seconds_per_order
+            )
+        if complete_memory_total:
+            group.total.average_memory_mb.append(total_average_memory_mb)
+    return groups
+
+
 def _latex_number(value: float | None) -> str:
     return "--" if value is None else f"{value:.3f}"
+
+
+def _latex_text(value: str) -> str:
+    replacements = {
+        "\\": r"\textbackslash{}",
+        "&": r"\&",
+        "%": r"\%",
+        "$": r"\$",
+        "#": r"\#",
+        "_": r"\_",
+        "{": r"\{",
+        "}": r"\}",
+        "~": r"\textasciitilde{}",
+        "^": r"\textasciicircum{}",
+    }
+    return "".join(
+        replacements.get(character, character) for character in value
+    )
+
+
+def _mean_and_stddev(values: list[float]) -> tuple[float | None, float | None]:
+    if not values:
+        return None, None
+    return statistics.mean(values), statistics.pstdev(values)
+
+
+def _resource_table_row(
+    label: str, measurements: ServiceResourceMeasurements
+) -> str:
+    cpu_mean, cpu_stddev = _mean_and_stddev(
+        measurements.cpu_seconds_per_order
+    )
+    memory_mean, memory_stddev = _mean_and_stddev(
+        measurements.average_memory_mb
+    )
+    cpu = "--" if cpu_mean is None else f"{cpu_mean:.6f}"
+    cpu_std = "--" if cpu_stddev is None else f"{cpu_stddev:.6f}"
+    memory = "--" if memory_mean is None else f"{memory_mean:.3f}"
+    memory_std = "--" if memory_stddev is None else f"{memory_stddev:.3f}"
+    return (
+        f"{_latex_text(label)} & {cpu} & {cpu_std} & {memory} & "
+        f"{memory_std} \\\\"
+    )
 
 
 def write_closed_table(
@@ -480,6 +824,89 @@ def write_closed_table(
     destination.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def write_closed_graphs(
+    folder: Path,
+    results: list[Result],
+    groups: dict[int, ClosedMeasurements],
+) -> list[Path]:
+    outputs: list[Path] = []
+    latency_points: list[tuple[float, float]] = []
+    latency_errors: list[tuple[float, float]] = []
+    for users, group in sorted(groups.items()):
+        if not group.p95_values:
+            continue
+        latency_points.append(
+            (float(users), statistics.median(group.p95_values))
+        )
+        latency_errors.append(
+            (float(users), statistics.pstdev(group.p95_values))
+        )
+    if latency_points:
+        latency_path = folder / "closed_p95_latency.png"
+        write_png_chart(
+            latency_path,
+            latency_points,
+            title="Closed-loop P95 outcome latency",
+            x_label="Concurrent users",
+            y_label="P95 outcome latency (ms)",
+            error_bars=latency_errors,
+        )
+        outputs.append(latency_path)
+
+    waiting_by_users = collect_closed_nats_waiting_series(results)
+    if waiting_by_users:
+        waiting_path = folder / "closed_nats_waiting_events.png"
+        write_png_multi_series_chart(
+            waiting_path,
+            [
+                (f"{users} users", points)
+                for users, points in waiting_by_users.items()
+            ],
+            title="Closed-loop NATS waiting events",
+            x_label="Elapsed time (s)",
+            y_label="Waiting events",
+        )
+        outputs.append(waiting_path)
+    return outputs
+
+
+def write_resource_usage_tables(
+    destination: Path, groups: dict[int, ClosedResourceMeasurements]
+) -> None:
+    lines: list[str] = []
+    for users in sorted(groups):
+        group = groups[users]
+        lines.extend(
+            [
+                r"\begin{table}[htbp]",
+                r"\centering",
+                f"\\caption{{Resource usage for {users} users}}",
+                r"\begin{tabular}{lrrrr}",
+                r"\hline",
+                (
+                    r"Service & CPU seconds per order & CPU seconds std. & "
+                    r"Avg memory MB & Avg memory MB std. \\"
+                ),
+                r"\hline",
+            ]
+        )
+        for service in sorted(group.services):
+            lines.append(
+                _resource_table_row(service, group.services[service])
+            )
+        lines.extend(
+            [
+                r"\hline",
+                _resource_table_row("Total", group.total),
+                r"\hline",
+                r"\end{tabular}",
+                r"\end{table}",
+                "",
+            ]
+        )
+    destination.write_text("\n".join(lines), encoding="utf-8")
+
+
 def process_folder(folder: Path) -> list[Path]:
     results = find_results(folder)
     for result in results:
@@ -492,11 +919,19 @@ def process_folder(folder: Path) -> list[Path]:
         result for result in results if result.summary["workload"] == "closed"
     ]
     if closed_results:
+        closed_measurements = collect_closed_measurements(closed_results)
         table_path = folder / "closed_results.tex"
-        write_closed_table(
-            table_path, collect_closed_measurements(closed_results)
-        )
+        write_closed_table(table_path, closed_measurements)
         outputs.append(table_path)
+        resource_table_path = folder / "resource-usage.tex"
+        write_resource_usage_tables(
+            resource_table_path,
+            collect_closed_resource_measurements(closed_results),
+        )
+        outputs.append(resource_table_path)
+        outputs.extend(
+            write_closed_graphs(folder, closed_results, closed_measurements)
+        )
 
     for result in results:
         if result.summary["workload"] == "saturation":
@@ -508,7 +943,7 @@ def process_folder(folder: Path) -> list[Path]:
 
 def parser() -> argparse.ArgumentParser:
     argument_parser = argparse.ArgumentParser(
-        description="Create graphs and a LaTeX table from benchmark results."
+        description="Create PNG graphs and LaTeX tables from benchmark results."
     )
     argument_parser.add_argument(
         "results_folder",
