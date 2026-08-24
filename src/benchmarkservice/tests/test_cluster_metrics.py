@@ -1,19 +1,64 @@
 # Copyright 2026 Google LLC
 # Licensed under the Apache License, Version 2.0 (the "License");
 
+import asyncio
 import unittest
 from unittest import mock
 
 from cluster_metrics import (
     ClusterMetricsCollector,
+    NatsMicroStatsClient,
     add_cadvisor_metrics,
     normalize_nats_micro_stats,
     parse_labels,
     service_for_pod,
 )
+from nats_order_observer_bridge import dispatch as dispatch_order_observer
+
+
+class _FakeCompletedOrderObserver:
+    def order_completed_sample(self) -> dict[str, object]:
+        return {"observer_id": "observer-a", "total": 12_345}
 
 
 class ClusterMetricsTest(unittest.TestCase):
+    def test_completed_order_bridge_returns_observer_sample(self) -> None:
+        response, should_close = dispatch_order_observer(
+            _FakeCompletedOrderObserver(),
+            {"id": 7, "operation": "sample"},
+        )
+
+        self.assertEqual(
+            {
+                "id": 7,
+                "ok": True,
+                "value": {
+                    "observer_id": "observer-a",
+                    "total": 12_345,
+                },
+            },
+            response,
+        )
+        self.assertFalse(should_close)
+
+    def test_completed_order_observer_reports_continuous_live_count(self) -> None:
+        connection = mock.Mock()
+        connection.flush = mock.AsyncMock()
+        client = NatsMicroStatsClient.__new__(NatsMicroStatsClient)
+        client._ensure_connected = mock.AsyncMock(return_value=connection)
+        client.connect_timeout = 2
+        client._order_completed_observer_id = "observer-a"
+        client._order_completed_total = 12_345
+        client._order_completed_error = None
+
+        sample = asyncio.run(client._order_completed_sample())
+
+        self.assertEqual(
+            {"observer_id": "observer-a", "total": 12_345},
+            sample,
+        )
+        connection.flush.assert_awaited_once_with(timeout=2)
+
     def test_collector_accepts_the_runner_application_and_namespace(self) -> None:
         with mock.patch(
             "cluster_metrics.KubernetesSummaryClient"

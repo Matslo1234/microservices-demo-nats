@@ -62,6 +62,12 @@ message ShippingCalculateOrderQuoteCommand {
   boutique.common.v1.CartSnapshot cart = 4;
 }
 
+message ShippingCalculateCartQuoteCommand {
+  string command_id = 1;
+  string user_id = 2;
+  boutique.common.v1.CartSnapshot cart = 3;
+}
+
 message ShippingCreateShipmentCommand {
   string command_id = 1;
   string order_id = 2;

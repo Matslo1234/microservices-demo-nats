@@ -268,6 +268,15 @@ func (fe *frontendServer) viewCartHandler(w http.ResponseWriter, r *http.Request
 		renderStorefrontError(log, r, w, errors.Wrap(err, "could not retrieve cart view"))
 		return
 	}
+	if r.Method == http.MethodGet && view.ShippingPending && view.CartSize > 0 {
+		if err := fe.publishCartQuoteRefresh(r.Context(), sessionID(r), view); err != nil {
+			log.WithError(err).Warn("failed to request a fresh cart shipping quote")
+		} else if refreshed, err := fe.waitForCartQuote(
+			r.Context(), sessionID(r), currentCurrency(r), view.CartVersion,
+		); err == nil {
+			view = refreshed
+		}
+	}
 	defer func() {
 		if err := fe.publishPageView(r.Context(), sessionID(r), "cart", "", nil, view.CartVersion); err != nil {
 			log.WithError(err).Warn("failed to publish cart page view")

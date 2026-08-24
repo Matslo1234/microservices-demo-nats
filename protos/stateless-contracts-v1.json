@@ -96,6 +96,19 @@
       ]
     },
     {
+      "input_subject": "boutique.cmd.shipping.calculate-cart-quote.v1",
+      "handler_service": "shippingservice",
+      "aggregate_key": "user_id",
+      "results": [
+        {
+          "slot": "shipping.cart-quote",
+          "subjects": [
+            "boutique.evt.shipping.cart-quote-updated.v1"
+          ]
+        }
+      ]
+    },
+    {
       "input_subject": "boutique.cmd.shipping.calculate-order-quote.v1",
       "handler_service": "shippingservice",
       "aggregate_key": "order_id",

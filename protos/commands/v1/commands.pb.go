@@ -37,12 +37,14 @@ const (
 )
 
 type CartAddItemCommand struct {
-	state               protoimpl.MessageState `protogen:"open.v1"`
-	CommandId           string                 `protobuf:"bytes,1,opt,name=command_id,json=commandId,proto3" json:"command_id,omitempty"`
-	UserId              string                 `protobuf:"bytes,2,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
-	ProductId           string                 `protobuf:"bytes,3,opt,name=product_id,json=productId,proto3" json:"product_id,omitempty"`
-	Quantity            int32                  `protobuf:"varint,4,opt,name=quantity,proto3" json:"quantity,omitempty"`
-	ExpectedCartVersion uint64                 `protobuf:"varint,5,opt,name=expected_cart_version,json=expectedCartVersion,proto3" json:"expected_cart_version,omitempty"`
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	CommandId string                 `protobuf:"bytes,1,opt,name=command_id,json=commandId,proto3" json:"command_id,omitempty"`
+	UserId    string                 `protobuf:"bytes,2,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	ProductId string                 `protobuf:"bytes,3,opt,name=product_id,json=productId,proto3" json:"product_id,omitempty"`
+	Quantity  int32                  `protobuf:"varint,4,opt,name=quantity,proto3" json:"quantity,omitempty"`
+	// Retained for wire compatibility with already-published v1 messages. Cart
+	// add is a command-ID-deduplicated delta; cartservice ignores this value.
+	ExpectedCartVersion uint64 `protobuf:"varint,5,opt,name=expected_cart_version,json=expectedCartVersion,proto3" json:"expected_cart_version,omitempty"`
 	unknownFields       protoimpl.UnknownFields
 	sizeCache           protoimpl.SizeCache
 }
@@ -380,6 +382,66 @@ func (x *ShippingCalculateOrderQuoteCommand) GetCart() *v1.CartSnapshot {
 	return nil
 }
 
+type ShippingCalculateCartQuoteCommand struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	CommandId     string                 `protobuf:"bytes,1,opt,name=command_id,json=commandId,proto3" json:"command_id,omitempty"`
+	UserId        string                 `protobuf:"bytes,2,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	Cart          *v1.CartSnapshot       `protobuf:"bytes,3,opt,name=cart,proto3" json:"cart,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ShippingCalculateCartQuoteCommand) Reset() {
+	*x = ShippingCalculateCartQuoteCommand{}
+	mi := &file_protos_commands_v1_commands_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ShippingCalculateCartQuoteCommand) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ShippingCalculateCartQuoteCommand) ProtoMessage() {}
+
+func (x *ShippingCalculateCartQuoteCommand) ProtoReflect() protoreflect.Message {
+	mi := &file_protos_commands_v1_commands_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ShippingCalculateCartQuoteCommand.ProtoReflect.Descriptor instead.
+func (*ShippingCalculateCartQuoteCommand) Descriptor() ([]byte, []int) {
+	return file_protos_commands_v1_commands_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *ShippingCalculateCartQuoteCommand) GetCommandId() string {
+	if x != nil {
+		return x.CommandId
+	}
+	return ""
+}
+
+func (x *ShippingCalculateCartQuoteCommand) GetUserId() string {
+	if x != nil {
+		return x.UserId
+	}
+	return ""
+}
+
+func (x *ShippingCalculateCartQuoteCommand) GetCart() *v1.CartSnapshot {
+	if x != nil {
+		return x.Cart
+	}
+	return nil
+}
+
 type ShippingCreateShipmentCommand struct {
 	state           protoimpl.MessageState `protogen:"open.v1"`
 	CommandId       string                 `protobuf:"bytes,1,opt,name=command_id,json=commandId,proto3" json:"command_id,omitempty"`
@@ -393,7 +455,7 @@ type ShippingCreateShipmentCommand struct {
 
 func (x *ShippingCreateShipmentCommand) Reset() {
 	*x = ShippingCreateShipmentCommand{}
-	mi := &file_protos_commands_v1_commands_proto_msgTypes[4]
+	mi := &file_protos_commands_v1_commands_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -405,7 +467,7 @@ func (x *ShippingCreateShipmentCommand) String() string {
 func (*ShippingCreateShipmentCommand) ProtoMessage() {}
 
 func (x *ShippingCreateShipmentCommand) ProtoReflect() protoreflect.Message {
-	mi := &file_protos_commands_v1_commands_proto_msgTypes[4]
+	mi := &file_protos_commands_v1_commands_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -418,7 +480,7 @@ func (x *ShippingCreateShipmentCommand) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ShippingCreateShipmentCommand.ProtoReflect.Descriptor instead.
 func (*ShippingCreateShipmentCommand) Descriptor() ([]byte, []int) {
-	return file_protos_commands_v1_commands_proto_rawDescGZIP(), []int{4}
+	return file_protos_commands_v1_commands_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *ShippingCreateShipmentCommand) GetCommandId() string {
@@ -470,7 +532,7 @@ type ShippingCancelShipmentCommand struct {
 
 func (x *ShippingCancelShipmentCommand) Reset() {
 	*x = ShippingCancelShipmentCommand{}
-	mi := &file_protos_commands_v1_commands_proto_msgTypes[5]
+	mi := &file_protos_commands_v1_commands_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -482,7 +544,7 @@ func (x *ShippingCancelShipmentCommand) String() string {
 func (*ShippingCancelShipmentCommand) ProtoMessage() {}
 
 func (x *ShippingCancelShipmentCommand) ProtoReflect() protoreflect.Message {
-	mi := &file_protos_commands_v1_commands_proto_msgTypes[5]
+	mi := &file_protos_commands_v1_commands_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -495,7 +557,7 @@ func (x *ShippingCancelShipmentCommand) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ShippingCancelShipmentCommand.ProtoReflect.Descriptor instead.
 func (*ShippingCancelShipmentCommand) Descriptor() ([]byte, []int) {
-	return file_protos_commands_v1_commands_proto_rawDescGZIP(), []int{5}
+	return file_protos_commands_v1_commands_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *ShippingCancelShipmentCommand) GetCommandId() string {
@@ -553,7 +615,7 @@ type PaymentAuthorizeCommand struct {
 
 func (x *PaymentAuthorizeCommand) Reset() {
 	*x = PaymentAuthorizeCommand{}
-	mi := &file_protos_commands_v1_commands_proto_msgTypes[6]
+	mi := &file_protos_commands_v1_commands_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -565,7 +627,7 @@ func (x *PaymentAuthorizeCommand) String() string {
 func (*PaymentAuthorizeCommand) ProtoMessage() {}
 
 func (x *PaymentAuthorizeCommand) ProtoReflect() protoreflect.Message {
-	mi := &file_protos_commands_v1_commands_proto_msgTypes[6]
+	mi := &file_protos_commands_v1_commands_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -578,7 +640,7 @@ func (x *PaymentAuthorizeCommand) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PaymentAuthorizeCommand.ProtoReflect.Descriptor instead.
 func (*PaymentAuthorizeCommand) Descriptor() ([]byte, []int) {
-	return file_protos_commands_v1_commands_proto_rawDescGZIP(), []int{6}
+	return file_protos_commands_v1_commands_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *PaymentAuthorizeCommand) GetCommandId() string {
@@ -629,7 +691,7 @@ type PaymentCaptureCommand struct {
 
 func (x *PaymentCaptureCommand) Reset() {
 	*x = PaymentCaptureCommand{}
-	mi := &file_protos_commands_v1_commands_proto_msgTypes[7]
+	mi := &file_protos_commands_v1_commands_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -641,7 +703,7 @@ func (x *PaymentCaptureCommand) String() string {
 func (*PaymentCaptureCommand) ProtoMessage() {}
 
 func (x *PaymentCaptureCommand) ProtoReflect() protoreflect.Message {
-	mi := &file_protos_commands_v1_commands_proto_msgTypes[7]
+	mi := &file_protos_commands_v1_commands_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -654,7 +716,7 @@ func (x *PaymentCaptureCommand) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PaymentCaptureCommand.ProtoReflect.Descriptor instead.
 func (*PaymentCaptureCommand) Descriptor() ([]byte, []int) {
-	return file_protos_commands_v1_commands_proto_rawDescGZIP(), []int{7}
+	return file_protos_commands_v1_commands_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *PaymentCaptureCommand) GetCommandId() string {
@@ -705,7 +767,7 @@ type PaymentReleaseAuthorizationCommand struct {
 
 func (x *PaymentReleaseAuthorizationCommand) Reset() {
 	*x = PaymentReleaseAuthorizationCommand{}
-	mi := &file_protos_commands_v1_commands_proto_msgTypes[8]
+	mi := &file_protos_commands_v1_commands_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -717,7 +779,7 @@ func (x *PaymentReleaseAuthorizationCommand) String() string {
 func (*PaymentReleaseAuthorizationCommand) ProtoMessage() {}
 
 func (x *PaymentReleaseAuthorizationCommand) ProtoReflect() protoreflect.Message {
-	mi := &file_protos_commands_v1_commands_proto_msgTypes[8]
+	mi := &file_protos_commands_v1_commands_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -730,7 +792,7 @@ func (x *PaymentReleaseAuthorizationCommand) ProtoReflect() protoreflect.Message
 
 // Deprecated: Use PaymentReleaseAuthorizationCommand.ProtoReflect.Descriptor instead.
 func (*PaymentReleaseAuthorizationCommand) Descriptor() ([]byte, []int) {
-	return file_protos_commands_v1_commands_proto_rawDescGZIP(), []int{8}
+	return file_protos_commands_v1_commands_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *PaymentReleaseAuthorizationCommand) GetCommandId() string {
@@ -781,7 +843,7 @@ type AssistantGenerateResponseCommand struct {
 
 func (x *AssistantGenerateResponseCommand) Reset() {
 	*x = AssistantGenerateResponseCommand{}
-	mi := &file_protos_commands_v1_commands_proto_msgTypes[9]
+	mi := &file_protos_commands_v1_commands_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -793,7 +855,7 @@ func (x *AssistantGenerateResponseCommand) String() string {
 func (*AssistantGenerateResponseCommand) ProtoMessage() {}
 
 func (x *AssistantGenerateResponseCommand) ProtoReflect() protoreflect.Message {
-	mi := &file_protos_commands_v1_commands_proto_msgTypes[9]
+	mi := &file_protos_commands_v1_commands_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -806,7 +868,7 @@ func (x *AssistantGenerateResponseCommand) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AssistantGenerateResponseCommand.ProtoReflect.Descriptor instead.
 func (*AssistantGenerateResponseCommand) Descriptor() ([]byte, []int) {
-	return file_protos_commands_v1_commands_proto_rawDescGZIP(), []int{9}
+	return file_protos_commands_v1_commands_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *AssistantGenerateResponseCommand) GetCommandId() string {
@@ -883,7 +945,12 @@ const file_protos_commands_v1_commands_proto_rawDesc = "" +
 	"command_id\x18\x01 \x01(\tR\tcommandId\x12\x19\n" +
 	"\border_id\x18\x02 \x01(\tR\aorderId\x12L\n" +
 	"\x10shipping_address\x18\x03 \x01(\v2!.boutique.common.v1.PostalAddressR\x0fshippingAddress\x124\n" +
-	"\x04cart\x18\x04 \x01(\v2 .boutique.common.v1.CartSnapshotR\x04cart\"\x84\x02\n" +
+	"\x04cart\x18\x04 \x01(\v2 .boutique.common.v1.CartSnapshotR\x04cart\"\x91\x01\n" +
+	"!ShippingCalculateCartQuoteCommand\x12\x1d\n" +
+	"\n" +
+	"command_id\x18\x01 \x01(\tR\tcommandId\x12\x17\n" +
+	"\auser_id\x18\x02 \x01(\tR\x06userId\x124\n" +
+	"\x04cart\x18\x03 \x01(\v2 .boutique.common.v1.CartSnapshotR\x04cart\"\x84\x02\n" +
 	"\x1dShippingCreateShipmentCommand\x12\x1d\n" +
 	"\n" +
 	"command_id\x18\x01 \x01(\tR\tcommandId\x12\x19\n" +
@@ -944,36 +1011,38 @@ func file_protos_commands_v1_commands_proto_rawDescGZIP() []byte {
 	return file_protos_commands_v1_commands_proto_rawDescData
 }
 
-var file_protos_commands_v1_commands_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
+var file_protos_commands_v1_commands_proto_msgTypes = make([]protoimpl.MessageInfo, 11)
 var file_protos_commands_v1_commands_proto_goTypes = []any{
 	(*CartAddItemCommand)(nil),                 // 0: boutique.commands.v1.CartAddItemCommand
 	(*CartClearCommand)(nil),                   // 1: boutique.commands.v1.CartClearCommand
 	(*OrderSubmitCommand)(nil),                 // 2: boutique.commands.v1.OrderSubmitCommand
 	(*ShippingCalculateOrderQuoteCommand)(nil), // 3: boutique.commands.v1.ShippingCalculateOrderQuoteCommand
-	(*ShippingCreateShipmentCommand)(nil),      // 4: boutique.commands.v1.ShippingCreateShipmentCommand
-	(*ShippingCancelShipmentCommand)(nil),      // 5: boutique.commands.v1.ShippingCancelShipmentCommand
-	(*PaymentAuthorizeCommand)(nil),            // 6: boutique.commands.v1.PaymentAuthorizeCommand
-	(*PaymentCaptureCommand)(nil),              // 7: boutique.commands.v1.PaymentCaptureCommand
-	(*PaymentReleaseAuthorizationCommand)(nil), // 8: boutique.commands.v1.PaymentReleaseAuthorizationCommand
-	(*AssistantGenerateResponseCommand)(nil),   // 9: boutique.commands.v1.AssistantGenerateResponseCommand
-	(*v1.PostalAddress)(nil),                   // 10: boutique.common.v1.PostalAddress
-	(*v1.CartSnapshot)(nil),                    // 11: boutique.common.v1.CartSnapshot
-	(*v1.CartLine)(nil),                        // 12: boutique.common.v1.CartLine
-	(*v1.Money)(nil),                           // 13: boutique.common.v1.Money
+	(*ShippingCalculateCartQuoteCommand)(nil),  // 4: boutique.commands.v1.ShippingCalculateCartQuoteCommand
+	(*ShippingCreateShipmentCommand)(nil),      // 5: boutique.commands.v1.ShippingCreateShipmentCommand
+	(*ShippingCancelShipmentCommand)(nil),      // 6: boutique.commands.v1.ShippingCancelShipmentCommand
+	(*PaymentAuthorizeCommand)(nil),            // 7: boutique.commands.v1.PaymentAuthorizeCommand
+	(*PaymentCaptureCommand)(nil),              // 8: boutique.commands.v1.PaymentCaptureCommand
+	(*PaymentReleaseAuthorizationCommand)(nil), // 9: boutique.commands.v1.PaymentReleaseAuthorizationCommand
+	(*AssistantGenerateResponseCommand)(nil),   // 10: boutique.commands.v1.AssistantGenerateResponseCommand
+	(*v1.PostalAddress)(nil),                   // 11: boutique.common.v1.PostalAddress
+	(*v1.CartSnapshot)(nil),                    // 12: boutique.common.v1.CartSnapshot
+	(*v1.CartLine)(nil),                        // 13: boutique.common.v1.CartLine
+	(*v1.Money)(nil),                           // 14: boutique.common.v1.Money
 }
 var file_protos_commands_v1_commands_proto_depIdxs = []int32{
-	10, // 0: boutique.commands.v1.OrderSubmitCommand.shipping_address:type_name -> boutique.common.v1.PostalAddress
-	10, // 1: boutique.commands.v1.ShippingCalculateOrderQuoteCommand.shipping_address:type_name -> boutique.common.v1.PostalAddress
-	11, // 2: boutique.commands.v1.ShippingCalculateOrderQuoteCommand.cart:type_name -> boutique.common.v1.CartSnapshot
-	10, // 3: boutique.commands.v1.ShippingCreateShipmentCommand.shipping_address:type_name -> boutique.common.v1.PostalAddress
-	12, // 4: boutique.commands.v1.ShippingCreateShipmentCommand.items:type_name -> boutique.common.v1.CartLine
-	13, // 5: boutique.commands.v1.PaymentAuthorizeCommand.amount:type_name -> boutique.common.v1.Money
-	13, // 6: boutique.commands.v1.PaymentCaptureCommand.amount:type_name -> boutique.common.v1.Money
-	7,  // [7:7] is the sub-list for method output_type
-	7,  // [7:7] is the sub-list for method input_type
-	7,  // [7:7] is the sub-list for extension type_name
-	7,  // [7:7] is the sub-list for extension extendee
-	0,  // [0:7] is the sub-list for field type_name
+	11, // 0: boutique.commands.v1.OrderSubmitCommand.shipping_address:type_name -> boutique.common.v1.PostalAddress
+	11, // 1: boutique.commands.v1.ShippingCalculateOrderQuoteCommand.shipping_address:type_name -> boutique.common.v1.PostalAddress
+	12, // 2: boutique.commands.v1.ShippingCalculateOrderQuoteCommand.cart:type_name -> boutique.common.v1.CartSnapshot
+	12, // 3: boutique.commands.v1.ShippingCalculateCartQuoteCommand.cart:type_name -> boutique.common.v1.CartSnapshot
+	11, // 4: boutique.commands.v1.ShippingCreateShipmentCommand.shipping_address:type_name -> boutique.common.v1.PostalAddress
+	13, // 5: boutique.commands.v1.ShippingCreateShipmentCommand.items:type_name -> boutique.common.v1.CartLine
+	14, // 6: boutique.commands.v1.PaymentAuthorizeCommand.amount:type_name -> boutique.common.v1.Money
+	14, // 7: boutique.commands.v1.PaymentCaptureCommand.amount:type_name -> boutique.common.v1.Money
+	8,  // [8:8] is the sub-list for method output_type
+	8,  // [8:8] is the sub-list for method input_type
+	8,  // [8:8] is the sub-list for extension type_name
+	8,  // [8:8] is the sub-list for extension extendee
+	0,  // [0:8] is the sub-list for field type_name
 }
 
 func init() { file_protos_commands_v1_commands_proto_init() }
@@ -987,7 +1056,7 @@ func file_protos_commands_v1_commands_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_protos_commands_v1_commands_proto_rawDesc), len(file_protos_commands_v1_commands_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   10,
+			NumMessages:   11,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

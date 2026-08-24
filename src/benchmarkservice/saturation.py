@@ -45,6 +45,7 @@ def evaluate_rung(
     target_rate: float,
     duration_seconds: float,
     completed: int,
+    processed: int | None = None,
     previous_goodput: float | None,
     pending_start: float | None,
     pending_end: float | None,
@@ -52,7 +53,17 @@ def evaluate_rung(
     maximum_rate_reached: bool,
 ) -> dict[str, Any]:
     duration = max(float(duration_seconds), 0.001)
-    goodput = completed / duration
+    observed_goodput = completed / duration
+    processed_count = (
+        completed
+        if application_type != "NATS"
+        else processed
+    )
+    processing_goodput = (
+        processed_count / duration
+        if processed_count is not None
+        else None
+    )
     pending_growth = (
         pending_end - pending_start
         if pending_start is not None and pending_end is not None
@@ -71,7 +82,11 @@ def evaluate_rung(
     ):
         saturated = True
         saturation_reason = "nats_pending_increasing_rapidly"
-    elif previous_goodput is not None and goodput <= previous_goodput:
+    elif (
+        previous_goodput is not None
+        and processing_goodput is not None
+        and processing_goodput <= previous_goodput
+    ):
         saturated = True
         saturation_reason = "goodput_stopped_increasing"
 
@@ -85,7 +100,23 @@ def evaluate_rung(
         "target_requests_per_second": target_rate,
         "duration_seconds": round(duration, 6),
         "completed_during_rung": completed,
-        "observed_goodput_orders_per_second": round(goodput, 6),
+        "client_observed_completed_during_rung": completed,
+        "observed_goodput_orders_per_second": round(observed_goodput, 6),
+        "processed_during_rung": processed_count,
+        "processing_goodput_orders_per_second": (
+            round(processing_goodput, 6)
+            if processing_goodput is not None
+            else None
+        ),
+        "processing_goodput_source": (
+            "nats_order_completed_events"
+            if application_type == "NATS" and processed_count is not None
+            else (
+                "client_outcomes"
+                if application_type != "NATS"
+                else None
+            )
+        ),
         "previous_goodput_orders_per_second": (
             round(previous_goodput, 6)
             if previous_goodput is not None
@@ -308,6 +339,8 @@ class SaturationCoordinator:
         ended_elapsed_seconds: float,
         completed_before: int,
         completed_after: int,
+        processed_before: dict[str, Any] | None,
+        processed_after: dict[str, Any] | None,
         pending_start: float | None,
         pending_end: float | None,
         final_rung: bool,
@@ -316,6 +349,8 @@ class SaturationCoordinator:
         progress = {
             "worker_index": self.worker_index,
             "completed": max(0, completed_after - completed_before),
+            "processed_before": processed_before,
+            "processed_after": processed_after,
             "pending_start": pending_start,
             "pending_end": pending_end,
         }
@@ -335,11 +370,42 @@ class SaturationCoordinator:
                 return self._wait(self._name(rung, "decision"))
 
         duration = max(0.001, ended_elapsed_seconds - started_elapsed_seconds)
+        processed_progress = next(
+            (
+                item
+                for item in progresses
+                if isinstance(item.get("processed_before"), dict)
+                and isinstance(item.get("processed_after"), dict)
+            ),
+            None,
+        )
+        processed = None
+        processing_goodput_unavailable_reason = None
+        if processed_progress is not None:
+            before = processed_progress["processed_before"]
+            after = processed_progress["processed_after"]
+            if before.get("observer_id") != after.get("observer_id"):
+                processing_goodput_unavailable_reason = (
+                    "NATS completed-order observer lost continuity"
+                )
+            elif int(after.get("total", -1)) < int(before.get("total", 0)):
+                processing_goodput_unavailable_reason = (
+                    "NATS completed-order observer count decreased"
+                )
+            else:
+                processed = int(after.get("total", 0)) - int(
+                    before.get("total", 0)
+                )
+        elif self.application_type == "NATS":
+            processing_goodput_unavailable_reason = (
+                "NATS completed-order observer was unavailable"
+            )
         decision = evaluate_rung(
             application_type=self.application_type,
             target_rate=target_rate,
             duration_seconds=duration,
             completed=sum(int(item.get("completed", 0)) for item in progresses),
+            processed=processed,
             previous_goodput=self.previous_goodput,
             pending_start=pending_start,
             pending_end=pending_end,
@@ -354,11 +420,16 @@ class SaturationCoordinator:
                 ),
                 "ended_elapsed_seconds": round(ended_elapsed_seconds, 6),
                 "worker_count": self.worker_count,
+                "processing_goodput_unavailable_reason": (
+                    processing_goodput_unavailable_reason
+                ),
             }
         )
-        self.previous_goodput = float(
-            decision["observed_goodput_orders_per_second"]
+        processing_goodput = decision.get(
+            "processing_goodput_orders_per_second"
         )
+        if processing_goodput is not None:
+            self.previous_goodput = float(processing_goodput)
         if self.backend is not None:
             self.backend.put(self._name(rung, "decision"), decision)
         with (self.output_directory / "saturation.jsonl").open(

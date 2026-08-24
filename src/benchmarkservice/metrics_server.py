@@ -75,14 +75,23 @@ class MetricsHandler(BaseHTTPRequestHandler):
         if path == "/healthz":
             self._json(HTTPStatus.OK, {"status": "ok"})
             return
-        if path != "/snapshot":
+        if path not in {"/snapshot", "/nats-order-completed-observer"}:
             self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
             return
         if not self._authorized():
             self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
             return
         try:
-            self._json(HTTPStatus.OK, self.cache.get())
+            value = (
+                {
+                    "nats_order_completed_observer": (
+                        self.cache.collector.nats_order_completed_sample()
+                    )
+                }
+                if path == "/nats-order-completed-observer"
+                else self.cache.get()
+            )
+            self._json(HTTPStatus.OK, value)
         except Exception as error:
             self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": str(error)})
 

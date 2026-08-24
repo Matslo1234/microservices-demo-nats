@@ -2,10 +2,17 @@
 # Licensed under the Apache License, Version 2.0 (the "License");
 
 import json
+import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
-from saturation import _NatsBackend, consumer_pending_total, evaluate_rung
+from saturation import (
+    SaturationCoordinator,
+    _NatsBackend,
+    consumer_pending_total,
+    evaluate_rung,
+)
 from saturation_nats_bridge import dispatch
 from shared_store import RecordNotFound
 
@@ -93,6 +100,73 @@ class _FakeStore:
 
 
 class SaturationTest(unittest.TestCase):
+    def test_coordinator_differences_global_completed_event_counter(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            coordinator = SaturationCoordinator(
+                application_type="NATS",
+                output_directory=Path(temporary),
+                worker_index=0,
+                worker_count=1,
+            )
+
+            decision = coordinator.finish_rung(
+                rung=0,
+                target_rate=20,
+                started_elapsed_seconds=0,
+                ended_elapsed_seconds=10,
+                completed_before=5,
+                completed_after=5,
+                processed_before={
+                    "observer_id": "observer-a",
+                    "total": 1_000,
+                },
+                processed_after={
+                    "observer_id": "observer-a",
+                    "total": 1_180,
+                },
+                pending_start=0,
+                pending_end=0,
+                final_rung=False,
+                maximum_rate_reached=False,
+            )
+
+        self.assertEqual(0, decision["completed_during_rung"])
+        self.assertEqual(180, decision["processed_during_rung"])
+        self.assertEqual(18, decision["processing_goodput_orders_per_second"])
+
+    def test_coordinator_rejects_discontinuous_completed_event_count(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            coordinator = SaturationCoordinator(
+                application_type="NATS",
+                output_directory=Path(temporary),
+                worker_index=0,
+                worker_count=1,
+            )
+
+            decision = coordinator.finish_rung(
+                rung=0,
+                target_rate=20,
+                started_elapsed_seconds=0,
+                ended_elapsed_seconds=10,
+                completed_before=5,
+                completed_after=10,
+                processed_before={"observer_id": "before", "total": 1_000},
+                processed_after={"observer_id": "after", "total": 10},
+                pending_start=0,
+                pending_end=0,
+                final_rung=False,
+                maximum_rate_reached=False,
+            )
+
+        self.assertIsNone(decision["processed_during_rung"])
+        self.assertIsNone(decision["processing_goodput_orders_per_second"])
+        self.assertIn(
+            "lost continuity",
+            decision["processing_goodput_unavailable_reason"],
+        )
+
     def test_nats_backend_uses_the_bridge_protocol(self) -> None:
         process = _FakeProcess()
         with mock.patch(
@@ -201,6 +275,30 @@ class SaturationTest(unittest.TestCase):
             decision["saturation_reason"],
         )
         self.assertEqual(10, decision["pending_growth_per_second"])
+
+    def test_nats_goodput_uses_stream_events_after_client_timeouts(self) -> None:
+        decision = evaluate_rung(
+            application_type="NATS",
+            target_rate=150,
+            duration_seconds=30,
+            completed=0,
+            processed=2_400,
+            previous_goodput=70,
+            pending_start=5_000,
+            pending_end=5_000,
+            final_rung=False,
+            maximum_rate_reached=False,
+        )
+
+        self.assertEqual(0, decision["client_observed_completed_during_rung"])
+        self.assertEqual(0, decision["observed_goodput_orders_per_second"])
+        self.assertEqual(2_400, decision["processed_during_rung"])
+        self.assertEqual(80, decision["processing_goodput_orders_per_second"])
+        self.assertEqual(
+            "nats_order_completed_events",
+            decision["processing_goodput_source"],
+        )
+        self.assertFalse(decision["saturated"])
 
     def test_only_final_rung_stops_the_ladder(self) -> None:
         maximum_rate = evaluate_rung(

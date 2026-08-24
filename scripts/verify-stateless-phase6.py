@@ -397,6 +397,12 @@ def verify_release_manifests() -> None:
             )
         currency = document(content, "Deployment", "currencyservice")
         require(currency, "cpu: 200m", "cpu: 400m")
+        cart = document(content, "Deployment", "cartservice")
+        require(
+            cart,
+            "name: CART_COMMAND_CONCURRENCY",
+            'value: "32"',
+        )
         message_operations = document(
             content, "Deployment", "messageoperationsservice"
         )
@@ -697,6 +703,8 @@ def verify_dashboard_and_bootstrap() -> None:
     ).read_text()
     require(
         bootstrap,
+        'ensure_kv "${STOREFRONT_CONTEXT_BUCKET}" 2 1h 3600000000000 536870912',
+        'ensure_kv "${STOREFRONT_ORDERS_BUCKET}" 2 0s 0 2147483648',
         'ensure_kv "${BENCHMARK_RUNS_BUCKET}" 10 0s 0 536870912',
         'ensure_object "${BENCHMARK_ARTIFACTS_BUCKET}"',
         "--replicas=3",

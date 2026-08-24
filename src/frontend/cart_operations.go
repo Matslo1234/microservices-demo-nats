@@ -28,8 +28,10 @@ import (
 const (
 	cartAddSubject            = "boutique.cmd.cart.add-item.v1"
 	cartClearSubject          = "boutique.cmd.cart.clear.v1"
+	cartQuoteSubject          = "boutique.cmd.shipping.calculate-cart-quote.v1"
 	operationAcceptedSubject  = "boutique.evt.storefront.operation-accepted.v1"
 	operationPollInterval     = 25 * time.Millisecond
+	cartQuoteRefreshInterval  = time.Minute
 	maxHTTPIdempotencyKeySize = 256
 )
 
@@ -75,6 +77,43 @@ func (fe *frontendServer) publishCartClear(ctx context.Context, operationID, use
 	}
 	return fe.publishCartCommand(ctx, cartClearSubject, "boutique.cart.Clear.v1",
 		operationID, userID, expectedVersion, payload)
+}
+
+func cartQuoteCommandID(userID string, cartVersion uint64, now time.Time) string {
+	window := now.UTC().Truncate(cartQuoteRefreshInterval).Unix()
+	identity := fmt.Sprintf("boutique/cart-quote/%s/%d/%d", userID, cartVersion, window)
+	return uuid.NewSHA1(uuid.NameSpaceURL, []byte(identity)).String()
+}
+
+func cartQuoteSnapshot(userID string, view *storefrontQueryResponse) *commonv1.CartSnapshot {
+	if view == nil {
+		return nil
+	}
+	snapshot := &commonv1.CartSnapshot{UserId: userID, CartVersion: view.CartVersion}
+	for _, item := range view.Items {
+		if item.Item == nil || item.Item.Id == "" || item.Quantity <= 0 {
+			continue
+		}
+		snapshot.Items = append(snapshot.Items, &commonv1.CartLine{
+			ProductId: item.Item.Id,
+			Quantity:  item.Quantity,
+		})
+	}
+	return snapshot
+}
+
+func (fe *frontendServer) publishCartQuoteRefresh(ctx context.Context, userID string,
+	view *storefrontQueryResponse) error {
+	now := time.Now().UTC()
+	commandID := cartQuoteCommandID(userID, view.CartVersion, now)
+	payload := &commandsv1.ShippingCalculateCartQuoteCommand{
+		CommandId: commandID,
+		UserId:    userID,
+		Cart:      cartQuoteSnapshot(userID, view),
+	}
+	return fe.publishCartCommand(ctx, cartQuoteSubject,
+		"boutique.shipping.CalculateCartQuote.v1", commandID, userID,
+		view.CartVersion, payload)
 }
 
 func (fe *frontendServer) publishCartCommand(ctx context.Context, subject, messageType,
@@ -198,6 +237,27 @@ func (fe *frontendServer) waitForCartOperation(ctx context.Context, operationID,
 			case "SUCCEEDED", "REJECTED":
 				return response.Operation, nil
 			}
+		}
+		select {
+		case <-waitContext.Done():
+			return nil, waitContext.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
+func (fe *frontendServer) waitForCartQuote(ctx context.Context, userID, currencyCode string,
+	cartVersion uint64) (*storefrontQueryResponse, error) {
+	waitContext, cancel := context.WithTimeout(ctx, fe.cartOperationWaitTimeout)
+	defer cancel()
+	ticker := time.NewTicker(operationPollInterval)
+	defer ticker.Stop()
+	for {
+		response, err := fe.storefrontQuery(waitContext, "cart", storefrontQueryRequest{
+			UserID: userID, CurrencyCode: currencyCode,
+		})
+		if err == nil && response.CartVersion == cartVersion && !response.ShippingPending {
+			return response, nil
 		}
 		select {
 		case <-waitContext.Done():

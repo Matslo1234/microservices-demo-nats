@@ -28,6 +28,7 @@ const (
 	projectionFetchSize   = 1024
 	projectionParallelism = 128
 	projectionMaxPending  = 4096
+	projectionMaxDeliver  = -1
 )
 
 var projectionFilterSubjects = []string{
@@ -175,7 +176,7 @@ func (p *projector) ensureProjectionConsumer() error {
 		DeliverPolicy:  nats.DeliverAllPolicy,
 		AckPolicy:      nats.AckExplicitPolicy,
 		AckWait:        30 * time.Second,
-		MaxDeliver:     10,
+		MaxDeliver:     projectionMaxDeliver,
 		MaxAckPending:  projectionMaxPending,
 		FilterSubjects: append([]string(nil), projectionFilterSubjects...),
 	}
@@ -198,7 +199,7 @@ func (p *projector) ensureProjectionConsumer() error {
 			info.Config.MaxAckPending == projectionMaxPending &&
 			info.Config.AckPolicy == nats.AckExplicitPolicy &&
 			info.Config.AckWait == 30*time.Second &&
-			info.Config.MaxDeliver == 10 &&
+			info.Config.MaxDeliver == projectionMaxDeliver &&
 			info.Config.DeliverPolicy == nats.DeliverAllPolicy {
 			return nil
 		}
@@ -208,7 +209,7 @@ func (p *projector) ensureProjectionConsumer() error {
 		next.MaxAckPending = projectionMaxPending
 		next.AckPolicy = nats.AckExplicitPolicy
 		next.AckWait = 30 * time.Second
-		next.MaxDeliver = 10
+		next.MaxDeliver = projectionMaxDeliver
 		if _, updateErr := p.js.UpdateConsumer(p.config.eventStream, &next); updateErr == nil {
 			return nil
 		} else if isConsumerSetupRace(updateErr) {
@@ -345,7 +346,11 @@ func (p *projector) applyMessage(item projectionMessage) {
 		telemetry.RecordError(span, err)
 		log.Printf("projection event processing failed topic=%q message_id=%q correlation_id=%q error=%v",
 			item.message.Subject, messageID, correlationID, err)
-		if nakErr := item.message.NakWithDelay(time.Second); nakErr != nil {
+		deliveries := uint64(1)
+		if metadata, metadataErr := item.message.Metadata(); metadataErr == nil {
+			deliveries = metadata.NumDelivered
+		}
+		if nakErr := item.message.NakWithDelay(projectionRetryDelay(deliveries)); nakErr != nil {
 			log.Printf("projection event NAK failed topic=%q message_id=%q correlation_id=%q error=%v",
 				item.message.Subject, messageID, correlationID, nakErr)
 		}
@@ -356,6 +361,17 @@ func (p *projector) applyMessage(item projectionMessage) {
 		log.Printf("projection event acknowledgement failed topic=%q message_id=%q correlation_id=%q error=%v",
 			item.message.Subject, messageID, correlationID, err)
 	}
+}
+
+func projectionRetryDelay(deliveries uint64) time.Duration {
+	delay := time.Second
+	for attempt := uint64(1); attempt < deliveries && delay < 30*time.Second; attempt++ {
+		delay *= 2
+	}
+	if delay > 30*time.Second {
+		return 30 * time.Second
+	}
+	return delay
 }
 
 func projectionMessageLane(correlationID string, lanes int) int {
@@ -658,10 +674,7 @@ func (p *projector) applyEnvelope(
 		if payload.ExpiresAt != nil && payload.ExpiresAt.IsValid() {
 			view.ExpiresAt = payload.ExpiresAt.AsTime()
 		}
-		return updateJSON(p, p.context, storefront.CartQuoteKey(payload.UserId), payload.CartVersion,
-			func(current storefront.CartQuoteView) uint64 { return current.CartVersion },
-			func(current storefront.CartQuoteView) string { return current.SourceEventID },
-			envelope.MessageId, updatedAt, view)
+		return p.updateCartQuote(view)
 	case "boutique.evt.shipping.cart-quote-failed.v1":
 		payload := &eventsv1.ShippingCartQuoteFailedEvent{}
 		if err := envelope.Data.UnmarshalTo(payload); err != nil {
@@ -672,10 +685,7 @@ func (p *projector) applyEnvelope(
 		if payload.Failure != nil {
 			view.FailureCode = payload.Failure.Code
 		}
-		return updateJSON(p, p.context, storefront.CartQuoteKey(payload.UserId), payload.CartVersion,
-			func(current storefront.CartQuoteView) uint64 { return current.CartVersion },
-			func(current storefront.CartQuoteView) string { return current.SourceEventID },
-			envelope.MessageId, updatedAt, view)
+		return p.updateCartQuote(view)
 	case "boutique.evt.order.submitted.v1":
 		payload := &eventsv1.OrderSubmittedEvent{}
 		if err := envelope.Data.UnmarshalTo(payload); err != nil {
@@ -1173,6 +1183,54 @@ func (p *projector) updateCart(
 		p.recordConflict(attempt)
 	}
 	return fmt.Errorf("cart KV update conflicted too many times for %s", key)
+}
+
+func (p *projector) updateCartQuote(incoming storefront.CartQuoteView) error {
+	if incoming.UserID == "" || incoming.CartVersion == 0 {
+		return fmt.Errorf("cart quote identity is incomplete")
+	}
+	key := storefront.CartQuoteKey(incoming.UserID)
+	encoded, err := json.Marshal(incoming)
+	if err != nil {
+		return err
+	}
+	for attempt := 0; attempt < 20; attempt++ {
+		entry, err := p.context.Get(key)
+		if errors.Is(err, nats.ErrKeyNotFound) {
+			if _, err := p.context.Create(key, encoded); err == nil {
+				p.recordProjected(incoming.UpdatedAt)
+				return nil
+			} else if !isKVConflict(err) {
+				return err
+			}
+			p.recordConflict(attempt)
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		var current storefront.CartQuoteView
+		if err := json.Unmarshal(entry.Value(), &current); err != nil {
+			return err
+		}
+		if current.SourceEventID == incoming.SourceEventID {
+			p.staleEventSkips.Add(1)
+			return nil
+		}
+		if incoming.CartVersion < current.CartVersion ||
+			(incoming.CartVersion == current.CartVersion && !incoming.UpdatedAt.After(current.UpdatedAt)) {
+			p.staleEventSkips.Add(1)
+			return nil
+		}
+		if _, err := p.context.Update(key, encoded, entry.Revision()); err == nil {
+			p.recordProjected(incoming.UpdatedAt)
+			return nil
+		} else if !isKVConflict(err) {
+			return err
+		}
+		p.recordConflict(attempt)
+	}
+	return fmt.Errorf("cart quote KV update conflicted too many times for %s", key)
 }
 
 func updateJSON[T any](

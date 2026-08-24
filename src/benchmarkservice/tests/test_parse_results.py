@@ -249,17 +249,31 @@ class ParseResultsTest(unittest.TestCase):
             for output in outputs:
                 self.assert_png(output)
 
-    def test_uses_submitted_and_observed_goodput_for_saturation_graph(
+    def test_uses_submitted_and_processed_goodput_for_saturation_graph(
         self,
     ) -> None:
         summary = self._saturation_summary("NATS")
 
-        submitted, observed, _, _ = saturation_points(
+        submitted, processed, _, _ = saturation_points(
             Result(path=Path("summary.json"), summary=summary)
         )
 
         self.assertEqual([(10.0, 9.5), (20.0, 18.5)], submitted)
-        self.assertEqual([(10.0, 9.0), (20.0, 17.0)], observed)
+        self.assertEqual([(10.0, 9.2), (20.0, 17.5)], processed)
+
+    def test_does_not_replace_unavailable_processing_goodput_with_client_count(
+        self,
+    ) -> None:
+        summary = self._saturation_summary("NATS")
+        summary["saturation"]["rungs"][0][
+            "processing_goodput_orders_per_second"
+        ] = None
+
+        _, processed, _, _ = saturation_points(
+            Result(path=Path("summary.json"), summary=summary)
+        )
+
+        self.assertEqual([(20.0, 17.5)], processed)
 
     def test_writes_single_rung_nats_saturation_pngs(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -468,6 +482,7 @@ class ParseResultsTest(unittest.TestCase):
                     {
                         "target_requests_per_second": 10,
                         "observed_goodput_orders_per_second": 9.0,
+                        "processing_goodput_orders_per_second": 9.2,
                         "business": {
                             "goodput_orders_per_second": 9.5,
                             "checkout_to_outcome": {"p95_ms": 125},
@@ -477,6 +492,7 @@ class ParseResultsTest(unittest.TestCase):
                     {
                         "target_requests_per_second": 20,
                         "observed_goodput_orders_per_second": 17.0,
+                        "processing_goodput_orders_per_second": 17.5,
                         "business": {
                             "goodput_orders_per_second": 18.5,
                             "checkout_to_outcome": {"p95_ms": 250},

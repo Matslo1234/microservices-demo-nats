@@ -315,6 +315,37 @@ func TestShippingQuoteUsesInputEventTime(t *testing.T) {
 	}
 }
 
+func TestShippingRefreshesCartQuoteFromCommand(t *testing.T) {
+	inputTime := time.Date(2026, 7, 27, 11, 30, 0, 0, time.UTC)
+	cart := &commonv1.CartSnapshot{
+		UserId: "user-1", CartVersion: 6,
+		Items: []*commonv1.CartLine{{ProductId: "product-1", Quantity: 2}},
+	}
+	command := &commandsv1.ShippingCalculateCartQuoteCommand{
+		CommandId: "cart-quote-command", UserId: cart.UserId, Cart: cart,
+	}
+	outcome, err := buildShippingOutcome(
+		shippingCartQuoteCommandSubject,
+		shippingTestEnvelope(t, command.CommandId, cart.UserId, cart.CartVersion, inputTime, command),
+		shippingTestProvider(t, testShippingSecret),
+		"",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome.Subject != shippingQuoteSubject {
+		t.Fatalf("cart quote command published %q", outcome.Subject)
+	}
+	payload := &eventsv1.ShippingCartQuoteUpdatedEvent{}
+	if err := decodeShippingResult(t, outcome).Data.UnmarshalTo(payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.UserId != cart.UserId || payload.CartVersion != cart.CartVersion ||
+		!payload.ExpiresAt.AsTime().Equal(inputTime.Add(15*time.Minute)) {
+		t.Fatalf("unexpected refreshed cart quote: %+v", payload)
+	}
+}
+
 func TestShippingCartQuoteIsDeterministicAcrossReplicas(t *testing.T) {
 	inputTime := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
 	cart := &commonv1.CartSnapshot{

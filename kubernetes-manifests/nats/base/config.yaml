@@ -81,6 +81,7 @@ data:
             permissions: {
               publish: [
                 "boutique.cmd.cart.add-item.v1", "boutique.cmd.cart.clear.v1",
+                "boutique.cmd.shipping.calculate-cart-quote.v1",
                 "boutique.cmd.order.submit.v1",
                 "boutique.evt.storefront.page-viewed.v1",
                 "boutique.evt.storefront.operation-accepted.v1",
@@ -236,7 +237,8 @@ data:
               ],
               subscribe: [
                 "_INBOX.>", "__NATS_BENCHMARK_RUNS_SUBJECT__",
-                "__NATS_BENCHMARK_ARTIFACTS_SUBJECT__"
+                "__NATS_BENCHMARK_ARTIFACTS_SUBJECT__",
+                "boutique.evt.order.completed.v1"
               ]
             }
           },

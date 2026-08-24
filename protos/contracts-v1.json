@@ -5,6 +5,7 @@
     {"subject": "boutique.cmd.cart.add-item.v1", "message_type": "boutique.cart.AddItem.v1", "payload": "boutique.commands.v1.CartAddItemCommand"},
     {"subject": "boutique.cmd.cart.clear.v1", "message_type": "boutique.cart.Clear.v1", "payload": "boutique.commands.v1.CartClearCommand"},
     {"subject": "boutique.cmd.order.submit.v1", "message_type": "boutique.order.Submit.v1", "payload": "boutique.commands.v1.OrderSubmitCommand"},
+    {"subject": "boutique.cmd.shipping.calculate-cart-quote.v1", "message_type": "boutique.shipping.CalculateCartQuote.v1", "payload": "boutique.commands.v1.ShippingCalculateCartQuoteCommand"},
     {"subject": "boutique.cmd.shipping.calculate-order-quote.v1", "message_type": "boutique.shipping.CalculateOrderQuote.v1", "payload": "boutique.commands.v1.ShippingCalculateOrderQuoteCommand"},
     {"subject": "boutique.cmd.shipping.create-shipment.v1", "message_type": "boutique.shipping.CreateShipment.v1", "payload": "boutique.commands.v1.ShippingCreateShipmentCommand"},
     {"subject": "boutique.cmd.shipping.cancel-shipment.v1", "message_type": "boutique.shipping.CancelShipment.v1", "payload": "boutique.commands.v1.ShippingCancelShipmentCommand"},

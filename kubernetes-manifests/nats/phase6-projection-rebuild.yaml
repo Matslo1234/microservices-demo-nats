@@ -40,8 +40,8 @@ spec:
 
           nats ${args} kv add "${STOREFRONT_PRODUCTS_BUCKET}" --history=5 --replicas=3 --storage=file --ttl=0s --max-bucket-size=536870912 --placement="${NATS_CLUSTER_NAME}"
           nats ${args} kv add "${STOREFRONT_CARTS_BUCKET}" --history=2 --replicas=3 --storage=file --ttl=0s --max-bucket-size=536870912 --placement="${NATS_CLUSTER_NAME}"
-          nats ${args} kv add "${STOREFRONT_CONTEXT_BUCKET}" --history=2 --replicas=3 --storage=file --ttl=1h --max-bucket-size=268435456 --placement="${NATS_CLUSTER_NAME}"
-          nats ${args} kv add "${STOREFRONT_ORDERS_BUCKET}" --history=10 --replicas=3 --storage=file --ttl=0s --max-bucket-size=1610612736 --placement="${NATS_CLUSTER_NAME}"
+          nats ${args} kv add "${STOREFRONT_CONTEXT_BUCKET}" --history=2 --replicas=3 --storage=file --ttl=1h --max-bucket-size=536870912 --placement="${NATS_CLUSTER_NAME}"
+          nats ${args} kv add "${STOREFRONT_ORDERS_BUCKET}" --history=2 --replicas=3 --storage=file --ttl=0s --max-bucket-size=2147483648 --placement="${NATS_CLUSTER_NAME}"
           nats ${args} kv add "${STOREFRONT_OPERATIONS_BUCKET}" --history=10 --replicas=3 --storage=file --ttl=24h --max-bucket-size=805306368 --placement="${NATS_CLUSTER_NAME}"
         envFrom:
         - configMapRef:

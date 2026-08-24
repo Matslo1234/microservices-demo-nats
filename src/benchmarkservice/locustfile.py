@@ -1531,6 +1531,9 @@ class SaturationDriver(FastHttpUser):
                 )
                 runtime.set_saturation_rung(rung, target_rate)
                 completed_before = RECORDER.completed_count()
+                processed_before = (
+                    RESOURCE_SAMPLER.nats_order_completed_sample()
+                )
                 pending_start = RESOURCE_SAMPLER.latest_pending()
                 started_elapsed = runtime.elapsed_now()
                 self._schedule_window(
@@ -1538,6 +1541,9 @@ class SaturationDriver(FastHttpUser):
                     duration_seconds=duration,
                     target_rate=target_rate,
                     rung=rung,
+                )
+                processed_after = (
+                    RESOURCE_SAMPLER.nats_order_completed_sample()
                 )
                 ended_elapsed = runtime.elapsed_now()
                 remaining -= duration
@@ -1551,6 +1557,8 @@ class SaturationDriver(FastHttpUser):
                     ended_elapsed_seconds=ended_elapsed,
                     completed_before=completed_before,
                     completed_after=RECORDER.completed_count(),
+                    processed_before=processed_before,
+                    processed_after=processed_after,
                     pending_start=pending_start,
                     pending_end=RESOURCE_SAMPLER.latest_pending(),
                     final_rung=remaining <= 0,

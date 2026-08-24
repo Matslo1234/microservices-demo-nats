@@ -10,6 +10,7 @@ import os
 import re
 import ssl
 import threading
+import uuid
 from concurrent.futures import Future
 from pathlib import Path
 from typing import Any
@@ -45,6 +46,7 @@ NATS_METRICS = {
     "jetstream_consumer_num_redelivered",
     "gnatsd_varz_jetstream_stats_storage",
 }
+ORDER_COMPLETED_SUBJECT = "boutique.evt.order.completed.v1"
 CADVISOR_METRICS = {
     "container_cpu_cfs_periods_total": "cpu_cfs_periods_total",
     "container_cpu_cfs_throttled_periods_total": (
@@ -330,7 +332,7 @@ def normalize_nats_micro_stats(value: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 class NatsMicroStatsClient:
-    """Synchronous facade over a persistent NATS client for $SRV.STATS."""
+    """Persistent NATS client for micro stats and completion observations."""
 
     def __init__(self) -> None:
         self.response_timeout = float(
@@ -347,6 +349,9 @@ class NatsMicroStatsClient:
         )
         self._thread.start()
         self._connection: Any = None
+        self._order_completed_observer_id = uuid.uuid4().hex
+        self._order_completed_total = 0
+        self._order_completed_error: str | None = None
 
     def _run_loop(self) -> None:
         asyncio.set_event_loop(self._loop)
@@ -364,6 +369,17 @@ class NatsMicroStatsClient:
         )
         if tls_context is not None and hasattr(ssl, "VERIFY_X509_STRICT"):
             tls_context.verify_flags &= ~ssl.VERIFY_X509_STRICT
+
+        async def completion(_message: Any) -> None:
+            self._order_completed_total += 1
+
+        async def disconnected() -> None:
+            self._order_completed_observer_id = uuid.uuid4().hex
+            self._order_completed_total = 0
+
+        async def observer_error(error: Exception) -> None:
+            self._order_completed_error = str(error)
+
         self._connection = await nats.connect(
             servers=[os.environ["NATS_URL"]],
             user=os.environ.get("NATS_USER") or None,
@@ -373,7 +389,14 @@ class NatsMicroStatsClient:
             connect_timeout=self.connect_timeout,
             allow_reconnect=True,
             max_reconnect_attempts=-1,
+            disconnected_cb=disconnected,
+            error_cb=observer_error,
         )
+        await self._connection.subscribe(
+            ORDER_COMPLETED_SUBJECT,
+            cb=completion,
+        )
+        await self._connection.flush(timeout=self.connect_timeout)
         return self._connection
 
     async def _sample(self) -> list[dict[str, Any]]:
@@ -419,6 +442,36 @@ class NatsMicroStatsClient:
         return result.result(
             timeout=self.connect_timeout + self.response_timeout + 1
         )
+
+    async def _order_completed_sample(self) -> dict[str, Any]:
+        connection = await self._ensure_connected()
+        await connection.flush(timeout=self.connect_timeout)
+        if self._order_completed_error is not None:
+            raise RuntimeError(self._order_completed_error)
+        return {
+            "observer_id": self._order_completed_observer_id,
+            "total": self._order_completed_total,
+        }
+
+    def order_completed_sample(self) -> dict[str, Any]:
+        result: Future[dict[str, Any]] = asyncio.run_coroutine_threadsafe(
+            self._order_completed_sample(), self._loop
+        )
+        return result.result(timeout=self.connect_timeout + 1)
+
+    async def _close(self) -> None:
+        if self._connection is not None and not self._connection.is_closed:
+            await self._connection.drain()
+
+    def close(self) -> None:
+        try:
+            result: Future[None] = asyncio.run_coroutine_threadsafe(
+                self._close(), self._loop
+            )
+            result.result(timeout=self.connect_timeout + 1)
+        finally:
+            self._loop.call_soon_threadsafe(self._loop.stop)
+            self._thread.join(timeout=5)
 
 
 class ClusterMetricsCollector:
@@ -466,6 +519,7 @@ class ClusterMetricsCollector:
             "pods": {},
             "nats_metrics": [],
             "nats_micro_endpoints": [],
+            "nats_order_completed_observer": None,
             "errors": [],
         }
         try:
@@ -487,4 +541,17 @@ class ClusterMetricsCollector:
                     result["nats_micro_endpoints"] = self.nats_micro.sample()
                 except Exception as error:
                     result["errors"].append(f"nats micro stats: {error}")
+                try:
+                    result["nats_order_completed_observer"] = (
+                        self.nats_micro.order_completed_sample()
+                    )
+                except Exception as error:
+                    result["errors"].append(
+                        f"NATS completed-order count: {error}"
+                    )
         return result
+
+    def nats_order_completed_sample(self) -> dict[str, Any] | None:
+        if self.nats_micro is None:
+            return None
+        return self.nats_micro.order_completed_sample()

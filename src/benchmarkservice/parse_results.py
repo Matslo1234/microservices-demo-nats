@@ -137,7 +137,7 @@ def saturation_points(
         raise ResultError(f"{result.path}: saturation.rungs must be a non-empty list")
 
     submitted_goodput_points: list[tuple[float, float]] = []
-    observed_goodput_points: list[tuple[float, float]] = []
+    processed_goodput_points: list[tuple[float, float]] = []
     pending_points: list[tuple[float, float]] = []
     p95_latency_points: list[tuple[float, float]] = []
     is_nats = str(result.summary.get("application_type", "")).upper() == "NATS"
@@ -164,19 +164,25 @@ def saturation_points(
                 ),
             )
         )
-        observed_goodput_points.append(
-            (
-                rate,
-                _number(
-                    rung.get("observed_goodput_orders_per_second"),
-                    (
-                        f"saturation.rungs[{index}]."
-                        "observed_goodput_orders_per_second"
-                    ),
-                    result.path,
-                ),
+        processing_field = "processing_goodput_orders_per_second"
+        processing_goodput = rung.get(processing_field)
+        if processing_field not in rung:
+            # Compatibility with summaries written before NATS goodput was
+            # counted independently from per-order outcome watchers.
+            processing_goodput = rung.get(
+                "observed_goodput_orders_per_second"
             )
-        )
+        if processing_goodput is not None:
+            processed_goodput_points.append(
+                (
+                    rate,
+                    _number(
+                        processing_goodput,
+                        f"saturation.rungs[{index}].{processing_field}",
+                        result.path,
+                    ),
+                )
+            )
 
         p95_latency = _nested(
             rung, "business", "checkout_to_outcome", "p95_ms"
@@ -210,7 +216,7 @@ def saturation_points(
 
     return (
         sorted(submitted_goodput_points),
-        sorted(observed_goodput_points),
+        sorted(processed_goodput_points),
         sorted(pending_points),
         sorted(p95_latency_points),
     )
@@ -436,7 +442,7 @@ def _write_png_series_chart(
 
 
 def write_saturation_graphs(result: Result) -> list[Path]:
-    submitted_goodput, observed_goodput, pending, p95_latency = (
+    submitted_goodput, processed_goodput, pending, p95_latency = (
         saturation_points(result)
     )
     base = result.path.with_suffix("")
@@ -445,7 +451,7 @@ def write_saturation_graphs(result: Result) -> list[Path]:
         goodput_path,
         [
             ("Zaključena med oddanimi v intervalu", submitted_goodput),
-            ("Vsa zaključena v intervalu", observed_goodput),
+            ("Vsa zaključena v intervalu", processed_goodput),
         ],
         title=f"",
         y_label="Koristna prepustnost",

@@ -88,7 +88,7 @@
                     <div class="row cart-summary-shipping-row">
                         <div class="col pl-md-0">Shipping</div>
                         <div class="col pr-md-0 text-right">
-                            {{ if $.shipping_pending }}Calculating…{{ else }}{{ renderMoney .shipping_cost }}{{ end }}
+                            {{ if $.shipping_pending }}Calculating… <a href="{{ $.baseUrl }}/cart">Retry</a>{{ else }}{{ renderMoney .shipping_cost }}{{ end }}
                         </div>
                     </div>
 

@@ -489,7 +489,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-adservice
-        image: matslo123/adservice:v0.4.0@sha256:2411796515dda050a5ef7381a605b840ed769b823e2d71d1c28420306fb940a1
+        image: matslo123/adservice:v0.4.0@sha256:9ea77de953468f3ddb47e31149dc934a04534bc75da892f46b824339b5963109
         livenessProbe:
           httpGet:
             path: /healthz
@@ -592,7 +592,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-benchmarkservice
-        image: matslo123/benchmarkservice:v0.4.0@sha256:c1817d9dcd6c57f9858c85a8ef9693da8264f43ca940be7d4787e7d8e487ab36
+        image: matslo123/benchmarkservice:v0.4.0@sha256:64e3ee0a48a43565446a1b014067e79f05d39055a9608f7704d83157eedf2dd3
         livenessProbe:
           httpGet:
             path: /healthz
@@ -689,6 +689,8 @@ spec:
           value: "true"
         - name: NATS_REQUIRED_SUBSCRIPTIONS
           value: cart-catalog-v1,cart-commands-v1
+        - name: CART_COMMAND_CONCURRENCY
+          value: "32"
         - name: ENABLE_TRACING
           value: "1"
         - name: COLLECTOR_SERVICE_ADDR
@@ -712,7 +714,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-cartservice
-        image: matslo123/cartservice:v0.4.0@sha256:98812d26da5f93a29cffc8aa93801fb7b82517b703bade18876033385061c3a0
+        image: matslo123/cartservice:v0.4.0@sha256:9afacf4cacc7793a59a0341937e723a7b03f5ffb0a7887b3b7ea47bd63e57f26
         livenessProbe:
           failureThreshold: 6
           httpGet:
@@ -849,7 +851,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-checkoutservice
-        image: matslo123/checkoutservice:v0.4.0@sha256:14374b110125e8ce183db256c1357d98a1ae1769fca01a61c13267979dd34b0d
+        image: matslo123/checkoutservice:v0.4.0@sha256:e1e7b9c48143ca89809ce19380a547b7a7bb2da193197b1868243ac68025a254
         livenessProbe:
           httpGet:
             path: /healthz
@@ -970,7 +972,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-currencyservice
-        image: matslo123/currencyservice:v0.4.0@sha256:1b676e316bfbb845411f4b5b02f376b780fe2ca3614c8a84065aa4a06be608f6
+        image: matslo123/currencyservice:v0.4.0@sha256:aeccde52544263ceb7169be694250312e267a01104dc3dd3d68611975bd47cb8
         livenessProbe:
           httpGet:
             path: /healthz
@@ -1089,7 +1091,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-emailservice
-        image: matslo123/emailservice:v0.4.0@sha256:1397bee807f4bb7eeea23875d1ca50ba6112be26bbfbd7b9e022f406d3793601
+        image: matslo123/emailservice:v0.4.0@sha256:92c6ebe1fc527c6e5f46e6cb73cc5dc6db4ff392d05179ddcd29778447be5f59
         livenessProbe:
           httpGet:
             path: /healthz
@@ -1257,7 +1259,7 @@ spec:
             name: nats-credentials-frontend
         - secretRef:
             name: global-application-secrets
-        image: matslo123/frontend:v0.4.0@sha256:c95d55b6d97c38c6b226cbc07cc81051182f8eae767c392825e0372541f5cc66
+        image: matslo123/frontend:v0.4.0@sha256:476d4e2e2d50a56242c372770798ec63445b7033841b889f34a833462388b174
         livenessProbe:
           failureThreshold: 6
           httpGet:
@@ -1404,7 +1406,7 @@ spec:
             name: nats-credentials-messageoperationsservice
         - secretRef:
             name: messageoperations-admin-api
-        image: matslo123/messageoperationsservice:v0.4.0@sha256:1ebf10cc6b203bb6c3ab284ec267ee62a1a32a6cc56bb1425efb23f61fa6f627
+        image: matslo123/messageoperationsservice:v0.4.0@sha256:2b2334e684a9297e2bf6af8daf0e924b86daecb78f9ff578756e9bc34b8f7a45
         livenessProbe:
           failureThreshold: 6
           httpGet:
@@ -1533,7 +1535,7 @@ spec:
             name: nats-credentials-paymentservice
         - secretRef:
             name: global-application-secrets
-        image: matslo123/paymentservice:v0.4.0@sha256:b765a01c0122f54f73648aecfc722e6e8e90506b58fb11f6f2e5c2151997b5b0
+        image: matslo123/paymentservice:v0.4.0@sha256:755e13249749163500bdb54898c5f23973e2012dde0b89e2b533bde45522ffaf
         livenessProbe:
           failureThreshold: 6
           httpGet:
@@ -1771,7 +1773,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-recommendationservice
-        image: matslo123/recommendationservice:v0.4.0@sha256:473b1be5bc7785e8775c9410ac899716991ea5878b8b74b97cc52f8d225098dc
+        image: matslo123/recommendationservice:v0.4.0@sha256:50a8d612442bd7415d7e247c3acf318af0773cfda704b3146719d3559b8cbac4
         livenessProbe:
           failureThreshold: 6
           httpGet:
@@ -1897,7 +1899,7 @@ spec:
             name: nats-credentials-shippingservice
         - secretRef:
             name: global-application-secrets
-        image: matslo123/shippingservice:v0.4.0@sha256:53c37d125e0cece352446f3677e9c06dd78545c4c0f4fd9f7941719514a61632
+        image: matslo123/shippingservice:v0.4.0@sha256:68112b8dc949edd0558464cf5bcd0d7056ef51e337db42bae2b377f787f2cc5b
         livenessProbe:
           failureThreshold: 6
           httpGet:
@@ -2021,7 +2023,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-storefrontprojectionservice
-        image: matslo123/storefrontprojectionservice:v0.4.0@sha256:0c9f9cb3ad35f5234fb0844a1271a9ebec3be8009d9c342c04574bd38761e7ec
+        image: matslo123/storefrontprojectionservice:v0.4.0@sha256:ed0852a966f21f106532648920318b617d8d6923ef8062009b7fd78220b63355
         livenessProbe:
           failureThreshold: 6
           httpGet:
@@ -3257,7 +3259,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-benchmarkservice
-        image: matslo123/benchmarkservice:v0.4.0@sha256:c1817d9dcd6c57f9858c85a8ef9693da8264f43ca940be7d4787e7d8e487ab36
+        image: matslo123/benchmarkservice:v0.4.0@sha256:64e3ee0a48a43565446a1b014067e79f05d39055a9608f7704d83157eedf2dd3
         imagePullPolicy: IfNotPresent
         livenessProbe:
           httpGet:

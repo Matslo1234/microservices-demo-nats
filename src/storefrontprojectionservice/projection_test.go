@@ -39,6 +39,68 @@ func TestProjectionConsumerTerminalErrorsRequireRebind(t *testing.T) {
 	}
 }
 
+func TestProjectionRetryDelayUsesBoundedExponentialBackoff(t *testing.T) {
+	tests := []struct {
+		deliveries uint64
+		want       time.Duration
+	}{
+		{deliveries: 0, want: time.Second},
+		{deliveries: 1, want: time.Second},
+		{deliveries: 2, want: 2 * time.Second},
+		{deliveries: 5, want: 16 * time.Second},
+		{deliveries: 6, want: 30 * time.Second},
+		{deliveries: 100, want: 30 * time.Second},
+	}
+	for _, test := range tests {
+		if got := projectionRetryDelay(test.deliveries); got != test.want {
+			t.Fatalf("delivery %d retry delay = %s, want %s", test.deliveries, got, test.want)
+		}
+	}
+}
+
+func TestCartQuoteRefreshReplacesExpiredQuoteAtSameCartVersion(t *testing.T) {
+	contextBucket := newMemoryKV()
+	worker := &projector{context: contextBucket}
+	firstTime := time.Date(2026, time.August, 24, 17, 0, 0, 0, time.UTC)
+	first := storefront.CartQuoteView{
+		ProjectionMetadata: storefront.ProjectionMetadata{SourceEventID: "quote-1", SourceVersion: 7},
+		UserID:             "user-1", CartVersion: 7,
+		CostUSD:   &commonv1.Money{CurrencyCode: "USD", Units: 8, Nanos: 990_000_000},
+		ExpiresAt: firstTime.Add(15 * time.Minute), UpdatedAt: firstTime,
+	}
+	if err := worker.updateCartQuote(first); err != nil {
+		t.Fatal(err)
+	}
+	refreshed := first
+	refreshed.SourceEventID = "quote-2"
+	refreshed.UpdatedAt = firstTime.Add(20 * time.Minute)
+	refreshed.ExpiresAt = refreshed.UpdatedAt.Add(15 * time.Minute)
+	if err := worker.updateCartQuote(refreshed); err != nil {
+		t.Fatal(err)
+	}
+	got, err := getJSON[storefront.CartQuoteView](contextBucket, storefront.CartQuoteKey(first.UserID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.SourceEventID != refreshed.SourceEventID || !got.ExpiresAt.Equal(refreshed.ExpiresAt) {
+		t.Fatalf("cart quote was not refreshed: %+v", got)
+	}
+	entryBefore, err := contextBucket.Get(storefront.CartQuoteKey(first.UserID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.updateCartQuote(first); err != nil {
+		t.Fatal(err)
+	}
+	entryAfter, err := contextBucket.Get(storefront.CartQuoteKey(first.UserID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entryAfter.Revision() != entryBefore.Revision() {
+		t.Fatalf("older cart quote rewrote KV: before=%d after=%d", entryBefore.Revision(), entryAfter.Revision())
+	}
+}
+
 func (entry memoryKVEntry) Bucket() string             { return "TEST" }
 func (entry memoryKVEntry) Key() string                { return entry.key }
 func (entry memoryKVEntry) Value() []byte              { return append([]byte(nil), entry.value...) }

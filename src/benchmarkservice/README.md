@@ -297,9 +297,15 @@ python src/benchmarkservice/parse_results.py ./benchmark-results
 For every saturation summary, the script uses Matplotlib to write PNGs of
 goodput and P95 outcome latency against the requested rate beside the input
 file. The goodput graph contains both completed orders attributed to the rung
-in which they were submitted and all orders whose completion was observed
-during the rung, including orders submitted earlier. Rungs without a P95
-latency sample are omitted from the latency graph.
+in which they were submitted and all orders processed during the rung,
+including orders submitted earlier. For NATS, the latter is the change in an
+independent live `boutique.evt.order.completed.v1` event count: the target
+metrics agent owns it for remote collection, while local Job runs use an
+unpatched helper process. It therefore remains accurate after individual
+benchmark clients reach their outcome timeout. Observer continuity is checked
+at every rung boundary; an observer restart or NATS disconnect makes the
+measurement unavailable instead of silently reporting a partial count. Rungs
+without a P95 latency sample are omitted from the latency graph.
 NATS saturation summaries
 also get a PNG of maximum consumer-pending events. Fault-tolerance summaries
 get a PNG of successfully processed requests per second; NATS fault-tolerance

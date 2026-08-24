@@ -9,6 +9,7 @@ import threading
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
 import gevent
@@ -16,6 +17,7 @@ from gevent.event import Event
 
 from cluster_metrics import ClusterMetricsCollector
 from config import BenchmarkConfig, LOCAL_CLUSTER
+from nats_order_observer import NatsOrderCompletedObserver
 from saturation import consumer_pending_total
 
 
@@ -206,18 +208,25 @@ class RemoteMetricsClient:
         self.url = url
         self.token = os.environ.get("BENCHMARK_METRICS_TOKEN", "")
 
-    def sample(self) -> dict[str, Any]:
+    def _get(self, url: str) -> dict[str, Any]:
         headers = {"Accept": "application/json"}
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
-        request = Request(self.url, headers=headers)
+        request = Request(url, headers=headers)
         with urlopen(request, timeout=5) as response:
             value = json.load(response)
         if not isinstance(value, dict):
             raise RuntimeError("metrics endpoint returned non-object JSON")
+        return value
+
+    def sample(self) -> dict[str, Any]:
+        value = self._get(self.url)
         pods = value.get("pods", {})
         nats_metrics = value.get("nats_metrics", [])
         nats_micro_endpoints = value.get("nats_micro_endpoints", [])
+        nats_order_completed_observer = value.get(
+            "nats_order_completed_observer"
+        )
         errors = value.get("errors", [])
         if not isinstance(pods, dict):
             raise RuntimeError("metrics endpoint returned invalid pods")
@@ -231,8 +240,37 @@ class RemoteMetricsClient:
             "pods": pods,
             "nats_metrics": nats_metrics,
             "nats_micro_endpoints": nats_micro_endpoints,
+            "nats_order_completed_observer": nats_order_completed_observer,
             "errors": [str(error) for error in errors],
         }
+
+    def nats_order_completed_sample(self) -> dict[str, Any]:
+        parts = urlsplit(self.url)
+        parent = parts.path.rsplit("/", 1)[0]
+        url = urlunsplit(
+            parts._replace(
+                path=f"{parent}/nats-order-completed-observer",
+                query="",
+                fragment="",
+            )
+        )
+        value = self._get(url).get("nats_order_completed_observer")
+        if not isinstance(value, dict):
+            raise RuntimeError(
+                "metrics endpoint returned invalid completed-order observer"
+            )
+        observer_id = value.get("observer_id")
+        total = value.get("total")
+        if (
+            not isinstance(observer_id, str)
+            or not observer_id
+            or not isinstance(total, int)
+            or isinstance(total, bool)
+        ):
+            raise RuntimeError(
+                "metrics endpoint returned invalid completed-order observer"
+            )
+        return value
 
 
 class LocalMetricsClient:
@@ -242,12 +280,21 @@ class LocalMetricsClient:
         self.collector: ClusterMetricsCollector | None = None
 
     def sample(self) -> dict[str, Any]:
+        return self._collector().snapshot()
+
+    def _collector(self) -> ClusterMetricsCollector:
         if self.collector is None:
             self.collector = ClusterMetricsCollector(
                 self.application_type,
                 application_namespace=self.namespace,
             )
-        return self.collector.snapshot()
+        return self.collector
+
+    def nats_order_completed_sample(self) -> dict[str, Any]:
+        value = self._collector().nats_order_completed_sample()
+        if value is None:
+            raise RuntimeError("NATS completed-order observer is unavailable")
+        return value
 
 
 class ResourceSampler:
@@ -256,6 +303,9 @@ class ResourceSampler:
         self._greenlet: gevent.Greenlet | None = None
         self._target: Any = None
         self._latest_pending: float | None = None
+        self._latest_order_completed_observer: dict[str, Any] | None = None
+        self._metrics: RemoteMetricsClient | LocalMetricsClient | None = None
+        self._order_completed_observer: NatsOrderCompletedObserver | None = None
 
     def start(self) -> None:
         if not (CONFIG.collect_resources or CONFIG.collect_nats_metrics):
@@ -263,6 +313,21 @@ class ResourceSampler:
         self._target = (OUTPUT_DIRECTORY / "resources.jsonl").open(
             "a", encoding="utf-8"
         )
+        assert CONFIG.metrics_url is not None
+        self._metrics = (
+            LocalMetricsClient(
+                CONFIG.application_type,
+                os.environ.get("POD_NAMESPACE", "default"),
+            )
+            if CONFIG.metrics_url == LOCAL_CLUSTER
+            else RemoteMetricsClient(CONFIG.metrics_url)
+        )
+        if (
+            CONFIG.application_type == "NATS"
+            and CONFIG.collect_nats_metrics
+            and CONFIG.metrics_url == LOCAL_CLUSTER
+        ):
+            self._order_completed_observer = NatsOrderCompletedObserver()
         self._greenlet = gevent.spawn(self._run)
 
     def stop(self) -> None:
@@ -277,16 +342,13 @@ class ResourceSampler:
             self._target.close()
         self._target = None
         self._greenlet = None
+        self._metrics = None
+        if self._order_completed_observer is not None:
+            self._order_completed_observer.close()
+        self._order_completed_observer = None
 
     def _run(self) -> None:
-        assert CONFIG.metrics_url is not None
-        if CONFIG.metrics_url == LOCAL_CLUSTER:
-            metrics = LocalMetricsClient(
-                CONFIG.application_type,
-                os.environ.get("POD_NAMESPACE", "default"),
-            )
-        else:
-            metrics = RemoteMetricsClient(CONFIG.metrics_url)
+        assert self._metrics is not None
 
         while True:
             record: dict[str, Any] = {
@@ -296,6 +358,7 @@ class ResourceSampler:
                 "pods": {},
                 "nats_metrics": [],
                 "nats_micro_endpoints": [],
+                "nats_order_completed_observer": None,
                 "errors": [],
             }
             if CONFIG.workload == "saturation":
@@ -308,7 +371,7 @@ class ResourceSampler:
                     }
                 )
             try:
-                snapshot = metrics.sample()
+                snapshot = self._metrics.sample()
                 if CONFIG.collect_resources:
                     record["pods"] = snapshot["pods"]
                 if CONFIG.collect_nats_metrics:
@@ -319,6 +382,16 @@ class ResourceSampler:
                     self._latest_pending = consumer_pending_total(
                         snapshot["nats_metrics"]
                     )
+                    completed_observer = snapshot.get(
+                        "nats_order_completed_observer"
+                    )
+                    if isinstance(completed_observer, dict):
+                        self._latest_order_completed_observer = (
+                            completed_observer
+                        )
+                        record["nats_order_completed_observer"] = (
+                            completed_observer
+                        )
                 record["errors"].extend(snapshot["errors"])
             except Exception as exc:
                 record["errors"].append(f"metrics endpoint: {exc}")
@@ -332,6 +405,22 @@ class ResourceSampler:
 
     def latest_pending(self) -> float | None:
         return self._latest_pending
+
+    def nats_order_completed_sample(self) -> dict[str, Any] | None:
+        if not CONFIG.collect_nats_metrics:
+            return None
+        if self._metrics is None:
+            raise RuntimeError("metrics sampler has not started")
+        try:
+            value = (
+                self._order_completed_observer.sample()
+                if self._order_completed_observer is not None
+                else self._metrics.nats_order_completed_sample()
+            )
+        except Exception:
+            return None
+        self._latest_order_completed_observer = value
+        return value
 
 
 RESOURCE_SAMPLER = ResourceSampler()

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	commonv1 "github.com/GoogleCloudPlatform/microservices-demo/protos/common/v1"
+	pb "github.com/GoogleCloudPlatform/microservices-demo/src/frontend/genproto"
 	"github.com/sirupsen/logrus"
 )
 
@@ -136,6 +137,37 @@ func TestCartOperationIDUsesRequestIDWithoutKey(t *testing.T) {
 	}
 	if operationID != "request-1" {
 		t.Fatalf("got %q, want request ID", operationID)
+	}
+}
+
+func TestCartQuoteCommandIDIsStableWithinRefreshWindow(t *testing.T) {
+	now := time.Date(2026, time.August, 24, 17, 20, 30, 0, time.UTC)
+	first := cartQuoteCommandID("user-1", 4, now)
+	second := cartQuoteCommandID("user-1", 4, now.Add(20*time.Second))
+	if first != second {
+		t.Fatal("cart quote refreshes in one window produced different command IDs")
+	}
+	if first == cartQuoteCommandID("user-1", 5, now) {
+		t.Fatal("different cart versions shared a quote command ID")
+	}
+	if first == cartQuoteCommandID("user-1", 4, now.Add(time.Minute)) {
+		t.Fatal("a new refresh window reused the previous quote command ID")
+	}
+}
+
+func TestCartQuoteSnapshotUsesProjectedCartLines(t *testing.T) {
+	view := &storefrontQueryResponse{
+		CartVersion: 7,
+		Items: []storefrontCartItemView{
+			{Item: &pb.Product{Id: "sku-1"}, Quantity: 2},
+			{Item: nil, Quantity: 4},
+		},
+	}
+	snapshot := cartQuoteSnapshot("user-1", view)
+	if snapshot.UserId != "user-1" || snapshot.CartVersion != 7 ||
+		len(snapshot.Items) != 1 || snapshot.Items[0].ProductId != "sku-1" ||
+		snapshot.Items[0].Quantity != 2 {
+		t.Fatalf("unexpected cart quote snapshot: %+v", snapshot)
 	}
 }
 

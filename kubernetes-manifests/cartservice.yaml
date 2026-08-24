@@ -63,6 +63,8 @@ spec:
           value: "true"
         - name: NATS_REQUIRED_SUBSCRIPTIONS
           value: "cart-catalog-v1,cart-commands-v1"
+        - name: CART_COMMAND_CONCURRENCY
+          value: "32"
         envFrom:
         - configMapRef:
             name: nats-client-config
