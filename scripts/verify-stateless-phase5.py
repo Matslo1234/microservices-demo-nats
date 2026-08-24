@@ -71,7 +71,7 @@ def verify_sources() -> None:
         "LoadOrderProjections",
         "NewResultEnvelope",
         "MarshalEnvelope",
-        "PublishMsg(message",
+        "PublishMsgAsync(",
         'message.Header.Set("Nats-Msg-Id"',
         "RedisLeaseStore",
         "DueDeadlines",
@@ -189,6 +189,7 @@ def verify_manifests() -> None:
         bootstrap,
         "repair-topology.sh",
         'getent hosts "${hostname}"',
+        'if [ -z "${hostname}" ]',
         'chmod 600 "${repaired}"',
         'mv "${repaired}" "${topology}"',
     )
@@ -198,6 +199,8 @@ def verify_manifests() -> None:
         "--cluster-enabled yes",
         "--cluster-preferred-endpoint-type hostname",
         "--appendfsync always",
+        "--save 3600 1",
+        "memory: 4Gi",
     )
     policy = document(rendered, "NetworkPolicy", "checkout-to-redis")
     require(policy, "app: redis-checkout-cluster")

@@ -33,6 +33,7 @@ const (
 	checkoutWorkflowMaxPending       = 1024
 	checkoutProjectionParallelism    = 16
 	checkoutWorkflowParallelism      = 32
+	checkoutAsyncPublishMaxPending   = 2048
 )
 
 var checkoutShippingSagaSubjects = []string{
@@ -87,24 +88,25 @@ type checkoutMetrics struct {
 }
 
 type checkoutWorker struct {
-	store           *stateStore
-	nc              *nats.Conn
-	js              nats.JetStreamContext
-	subscriptions   []*nats.Subscription
-	publishTimeout  time.Duration
-	stepTimeout     time.Duration
-	leaseDuration   time.Duration
-	leaseStore      *stateless.RedisLeaseStore
-	workerID        string
-	publishHook     func(resultMessage) error
-	metrics         checkoutMetrics
-	stop            chan struct{}
-	failed          chan error
-	wg              sync.WaitGroup
-	ready           atomic.Bool
-	lifecycleFailed atomic.Bool
-	failureOnce     sync.Once
-	closeOnce       sync.Once
+	store            *stateStore
+	nc               *nats.Conn
+	js               nats.JetStreamContext
+	subscriptions    []*nats.Subscription
+	publishTimeout   time.Duration
+	stepTimeout      time.Duration
+	leaseDuration    time.Duration
+	leaseStore       *stateless.RedisLeaseStore
+	workerID         string
+	publishHook      func(resultMessage) error
+	publishAsyncHook func(resultMessage) (nats.PubAckFuture, error)
+	metrics          checkoutMetrics
+	stop             chan struct{}
+	failed           chan error
+	wg               sync.WaitGroup
+	ready            atomic.Bool
+	lifecycleFailed  atomic.Bool
+	failureOnce      sync.Once
+	closeOnce        sync.Once
 }
 
 func startCheckoutWorker(store *stateStore) (*checkoutWorker, error) {
@@ -180,7 +182,10 @@ func startCheckoutWorker(store *stateStore) (*checkoutWorker, error) {
 		return nil, fmt.Errorf("connect checkoutservice to NATS: %w", err)
 	}
 	worker.nc = nc
-	worker.js, err = nc.JetStream()
+	worker.js, err = nc.JetStream(
+		nats.PublishAsyncMaxPending(checkoutAsyncPublishMaxPending),
+		nats.PublishAsyncTimeout(publishTimeout),
+	)
 	if err != nil {
 		nc.Close()
 		return nil, err
@@ -552,28 +557,67 @@ func (worker *checkoutWorker) finishTransition(outcome transitionOutcome) error 
 }
 
 func (worker *checkoutWorker) publishResults(results []resultMessage) error {
-	for _, result := range results {
-		worker.metrics.resultPublishAttempts.Add(1)
-		if worker.publishHook != nil {
+	if worker.publishHook != nil {
+		for _, result := range results {
+			worker.metrics.resultPublishAttempts.Add(1)
 			if err := worker.publishHook(result); err != nil {
 				worker.metrics.resultPublishFailures.Add(1)
 				return err
 			}
-		} else {
-			message := &nats.Msg{Subject: result.Subject, Data: result.Data, Header: nats.Header{}}
-			message.Header.Set("Nats-Msg-Id", result.MessageID)
-			message.Header.Set("Content-Type", "application/protobuf")
-			ctx, cancel := context.WithTimeout(context.Background(), worker.publishTimeout)
-			_, err := worker.js.PublishMsg(message, nats.MsgId(result.MessageID), nats.Context(ctx))
-			cancel()
-			if err != nil {
+			worker.metrics.resultPublishSuccesses.Add(1)
+		}
+		return nil
+	}
+
+	type pendingPublish struct {
+		result resultMessage
+		future nats.PubAckFuture
+	}
+	pending := make([]pendingPublish, 0, len(results))
+	var firstError error
+	for _, result := range results {
+		worker.metrics.resultPublishAttempts.Add(1)
+		future, err := worker.publishResultAsync(result)
+		if err != nil {
+			worker.metrics.resultPublishFailures.Add(1)
+			firstError = fmt.Errorf("publish checkout result %s: %w", result.MessageID, err)
+			break
+		}
+		pending = append(pending, pendingPublish{result: result, future: future})
+	}
+	for _, publish := range pending {
+		select {
+		case acknowledgement := <-publish.future.Ok():
+			if acknowledgement == nil {
 				worker.metrics.resultPublishFailures.Add(1)
-				return fmt.Errorf("publish checkout result %s: %w", result.MessageID, err)
+				if firstError == nil {
+					firstError = fmt.Errorf("publish checkout result %s: empty JetStream acknowledgement", publish.result.MessageID)
+				}
+				continue
+			}
+			worker.metrics.resultPublishSuccesses.Add(1)
+		case err := <-publish.future.Err():
+			worker.metrics.resultPublishFailures.Add(1)
+			if firstError == nil {
+				firstError = fmt.Errorf("publish checkout result %s: %w", publish.result.MessageID, err)
 			}
 		}
-		worker.metrics.resultPublishSuccesses.Add(1)
 	}
-	return nil
+	return firstError
+}
+
+func (worker *checkoutWorker) publishResultAsync(result resultMessage) (nats.PubAckFuture, error) {
+	if worker.publishAsyncHook != nil {
+		return worker.publishAsyncHook(result)
+	}
+	message := &nats.Msg{Subject: result.Subject, Data: result.Data, Header: nats.Header{}}
+	message.Header.Set("Nats-Msg-Id", result.MessageID)
+	message.Header.Set("Content-Type", "application/protobuf")
+	return worker.js.PublishMsgAsync(
+		message,
+		nats.MsgId(result.MessageID),
+		nats.StallWait(worker.publishTimeout),
+	)
 }
 
 func isCheckoutSagaEvent(subject string) bool {

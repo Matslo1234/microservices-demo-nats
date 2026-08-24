@@ -46,7 +46,7 @@ DEFAULT_IMAGE_DIGESTS = {
     "adservice": "9ea77de953468f3ddb47e31149dc934a04534bc75da892f46b824339b5963109",
     "benchmarkservice": "64e3ee0a48a43565446a1b014067e79f05d39055a9608f7704d83157eedf2dd3",
     "cartservice": "9afacf4cacc7793a59a0341937e723a7b03f5ffb0a7887b3b7ea47bd63e57f26",
-    "checkoutservice": "e1e7b9c48143ca89809ce19380a547b7a7bb2da193197b1868243ac68025a254",
+    "checkoutservice": "5ac769ce381352fd2012fc8d3dc760335d3d1e328421ddfa26b6d82fb6a9fb5a",
     "currencyservice": "aeccde52544263ceb7169be694250312e267a01104dc3dd3d68611975bd47cb8",
     "emailservice": "92c6ebe1fc527c6e5f46e6cb73cc5dc6db4ff392d05179ddcd29778447be5f59",
     "frontend": "476d4e2e2d50a56242c372770798ec63445b7033841b889f34a833462388b174",
@@ -186,13 +186,21 @@ def main() -> None:
     )
     hpa_dependencies = render("benchmark/manifests/hpa-dependencies")
     target_metrics = render("benchmark/manifests/target-metrics")
+    benchmark_application = render(
+        "benchmark/manifests/fixed-replicas",
+        allow_external_resources=True,
+    )
     fixed_replica_application = render(
         "benchmark/manifests/single-replica",
         allow_external_resources=True,
     )
+    release_single_replica_application = render(
+        "benchmark/manifests/single-replica-base",
+        allow_external_resources=True,
+    )
     write(
         ROOT / "release" / "kubernetes-manifests-single-replica-no-loadgenerator.yaml",
-        fixed_replica_application,
+        release_single_replica_application,
         RELEASE_HEADER,
         FOOTER,
     )
@@ -203,7 +211,7 @@ def main() -> None:
     fixed_replica_benchmark = (
         fixed_replica_application + "---\n" + target_metrics
     )
-    benchmark = application + "---\n" + target_metrics
+    benchmark = benchmark_application + "---\n" + target_metrics
     delayed_benchmark = delayed_application + "---\n" + target_metrics
     hpa_benchmark = (
         hpa_application

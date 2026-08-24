@@ -1,0 +1,24 @@
+# Copyright 2026 Google LLC
+# Licensed under the Apache License, Version 2.0 (the "License");
+
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+patches:
+- target:
+    group: apps
+    version: v1
+    kind: Deployment
+    name: adservice|cartservice|checkoutservice|currencyservice|emailservice|frontend|paymentservice|productcatalogservice|recommendationservice|shippingservice|storefrontprojectionservice
+  patch: |-
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: unused
+    spec:
+      template:
+        spec:
+          containers:
+          - name: server
+            env:
+            - name: ENABLE_TRACING
+              value: "0"

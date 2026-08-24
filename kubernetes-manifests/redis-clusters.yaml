@@ -41,6 +41,13 @@ data:
       fi
 
       hostname="${metadata%%,*}"
+      if [ -z "${hostname}" ]; then
+        # A peer which stopped before persisting its announced hostname can
+        # leave an empty metadata field. Keep its last address; Redis will
+        # relearn the peer through cluster gossip after this node starts.
+        printf '%s\n' "${line}" >>"${repaired}"
+        continue
+      fi
       attempts=0
       address=""
       until [ -n "${address}" ]; do
@@ -246,6 +253,7 @@ spec:
             --port 6379 \
             --appendonly yes \
             --appendfsync always \
+            --save 3600 1 \
             --cluster-enabled yes \
             --cluster-config-file /data/nodes.conf \
             --cluster-node-timeout 5000 \
@@ -508,6 +516,7 @@ spec:
             --port 6379 \
             --appendonly yes \
             --appendfsync always \
+            --save 3600 1 \
             --cluster-enabled yes \
             --cluster-config-file /data/nodes.conf \
             --cluster-node-timeout 5000 \
@@ -553,12 +562,12 @@ spec:
         resources:
           requests:
             cpu: 50m
-            memory: 96Mi
+            memory: 256Mi
           limits:
             cpu: 500m
-            # Checkout retains idempotency and saga records for 33 days. Keep
-            # enough reload headroom for deliberate open-loop overload runs.
-            memory: 2Gi
+            # Loading an RDB/AOF base and replacing an existing dataset can
+            # transiently exceed the steady-state resident set.
+            memory: 4Gi
       volumes:
       - name: redis-cluster-bootstrap
         configMap:

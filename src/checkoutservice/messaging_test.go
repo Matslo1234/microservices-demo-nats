@@ -4,6 +4,8 @@
 package main
 
 import (
+	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,6 +14,26 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/emptypb"
 )
+
+type testPubAckFuture struct {
+	message *nats.Msg
+	ok      chan *nats.PubAck
+	err     chan error
+}
+
+func newTestPubAckFuture() *testPubAckFuture {
+	return &testPubAckFuture{
+		message: &nats.Msg{},
+		ok:      make(chan *nats.PubAck, 1),
+		err:     make(chan error, 1),
+	}
+}
+
+func (future *testPubAckFuture) Ok() <-chan *nats.PubAck { return future.ok }
+
+func (future *testPubAckFuture) Err() <-chan error { return future.err }
+
+func (future *testPubAckFuture) Msg() *nats.Msg { return future.message }
 
 func TestCheckoutConsumerTerminalErrorsRestartWorker(t *testing.T) {
 	for _, err := range []error{nats.ErrBadSubscription, nats.ErrSubscriptionClosed, nats.ErrConsumerDeleted, nats.ErrNoResponders} {
@@ -168,5 +190,99 @@ func TestCheckoutProcessesIndependentProjectionsConcurrentlyInAggregateOrder(t *
 	case <-finished:
 	case <-time.After(time.Second):
 		t.Fatal("parallel stream processor did not stop")
+	}
+}
+
+func TestCheckoutPipelinesResultPublishesBeforeWaitingForAcknowledgements(t *testing.T) {
+	worker := &checkoutWorker{publishTimeout: time.Second}
+	results := []resultMessage{
+		{MessageID: "result-1", Subject: "boutique.test.1"},
+		{MessageID: "result-2", Subject: "boutique.test.2"},
+		{MessageID: "result-3", Subject: "boutique.test.3"},
+	}
+	futures := make([]*testPubAckFuture, 0, len(results))
+	queued := make(chan struct{}, len(results))
+	worker.publishAsyncHook = func(result resultMessage) (nats.PubAckFuture, error) {
+		future := newTestPubAckFuture()
+		future.message.Subject = result.Subject
+		futures = append(futures, future)
+		queued <- struct{}{}
+		return future, nil
+	}
+
+	finished := make(chan error, 1)
+	go func() { finished <- worker.publishResults(results) }()
+	for range results {
+		select {
+		case <-queued:
+		case <-time.After(time.Second):
+			t.Fatal("checkout waited for an acknowledgement before queuing every result")
+		}
+	}
+	for _, future := range futures {
+		future.ok <- &nats.PubAck{Stream: "BOUTIQUE_EVENTS"}
+	}
+	select {
+	case err := <-finished:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("checkout did not finish after all publish acknowledgements arrived")
+	}
+	if attempts := worker.metrics.resultPublishAttempts.Load(); attempts != 3 {
+		t.Fatalf("publish attempts = %d, want 3", attempts)
+	}
+	if successes := worker.metrics.resultPublishSuccesses.Load(); successes != 3 {
+		t.Fatalf("publish successes = %d, want 3", successes)
+	}
+	if failures := worker.metrics.resultPublishFailures.Load(); failures != 0 {
+		t.Fatalf("publish failures = %d, want 0", failures)
+	}
+}
+
+func TestCheckoutSettlesPipelinedPublishesAndReturnsFirstError(t *testing.T) {
+	worker := &checkoutWorker{publishTimeout: time.Second}
+	results := []resultMessage{
+		{MessageID: "result-1", Subject: "boutique.test.1"},
+		{MessageID: "result-2", Subject: "boutique.test.2"},
+		{MessageID: "result-3", Subject: "boutique.test.3"},
+	}
+	futures := make([]*testPubAckFuture, 0, len(results))
+	queued := make(chan struct{}, len(results))
+	worker.publishAsyncHook = func(result resultMessage) (nats.PubAckFuture, error) {
+		future := newTestPubAckFuture()
+		futures = append(futures, future)
+		queued <- struct{}{}
+		return future, nil
+	}
+
+	finished := make(chan error, 1)
+	go func() { finished <- worker.publishResults(results) }()
+	for range results {
+		select {
+		case <-queued:
+		case <-time.After(time.Second):
+			t.Fatal("checkout did not queue every result")
+		}
+	}
+	futures[0].ok <- &nats.PubAck{Stream: "BOUTIQUE_EVENTS"}
+	futures[1].err <- errors.New("injected acknowledgement loss")
+	futures[2].ok <- &nats.PubAck{Stream: "BOUTIQUE_EVENTS"}
+
+	var err error
+	select {
+	case err = <-finished:
+	case <-time.After(time.Second):
+		t.Fatal("checkout did not settle every pipelined publish")
+	}
+	if err == nil || !strings.Contains(err.Error(), "result-2") {
+		t.Fatalf("publish error = %v, want result-2 acknowledgement failure", err)
+	}
+	if successes := worker.metrics.resultPublishSuccesses.Load(); successes != 2 {
+		t.Fatalf("publish successes = %d, want 2", successes)
+	}
+	if failures := worker.metrics.resultPublishFailures.Load(); failures != 1 {
+		t.Fatalf("publish failures = %d, want 1", failures)
 	}
 }

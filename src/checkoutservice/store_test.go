@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -19,6 +20,31 @@ import (
 	"github.com/alicebob/miniredis/v2"
 	"github.com/redis/go-redis/v9"
 )
+
+type countingCheckoutRedisClient struct {
+	checkoutRedisClient
+	getCalls      atomic.Uint64
+	mgetCalls     atomic.Uint64
+	pipelineCalls atomic.Uint64
+}
+
+func (client *countingCheckoutRedisClient) Get(ctx context.Context, key string) *redis.StringCmd {
+	client.getCalls.Add(1)
+	return client.checkoutRedisClient.Get(ctx, key)
+}
+
+func (client *countingCheckoutRedisClient) MGet(ctx context.Context, keys ...string) *redis.SliceCmd {
+	client.mgetCalls.Add(1)
+	return client.checkoutRedisClient.MGet(ctx, keys...)
+}
+
+func (client *countingCheckoutRedisClient) Pipelined(
+	ctx context.Context,
+	fn func(redis.Pipeliner) error,
+) ([]redis.Cmder, error) {
+	client.pipelineCalls.Add(1)
+	return client.checkoutRedisClient.Pipelined(ctx, fn)
+}
 
 func newTestStateStore(t *testing.T) (*stateStore, *miniredis.Miniredis) {
 	t.Helper()
@@ -39,6 +65,33 @@ func openSharedTestStateStore(t *testing.T, server *miniredis.Miniredis) *stateS
 	}
 	t.Cleanup(func() { _ = store.Close() })
 	return store
+}
+
+func TestCheckoutBatchesOrderAndProjectionReads(t *testing.T) {
+	store, _ := newTestStateStore(t)
+	seedTestCheckoutState(t, store)
+	client := &countingCheckoutRedisClient{checkoutRedisClient: store.client}
+	store.client = client
+	worker := newTestWorker(t, store)
+
+	submitTestOrder(t, worker, "batched-order", testTime)
+	if calls := client.getCalls.Load(); calls != 0 {
+		t.Fatalf("direct Redis GET calls = %d, want 0", calls)
+	}
+	if calls := client.mgetCalls.Load(); calls != 1 {
+		t.Fatalf("Redis MGET calls = %d, want 1", calls)
+	}
+	if calls := client.pipelineCalls.Load(); calls != 2 {
+		t.Fatalf("Redis pipeline calls = %d, want 2", calls)
+	}
+
+	saga, err := store.LoadOrder("batched-order")
+	if err != nil || saga == nil {
+		t.Fatalf("load batched order: saga=%#v err=%v", saga, err)
+	}
+	if calls := client.mgetCalls.Load(); calls != 2 {
+		t.Fatalf("Redis MGET calls after LoadOrder = %d, want 2", calls)
+	}
 }
 
 func TestOrderCommitIsPartitionedAndHasNoGlobalRevisionOrOutbox(t *testing.T) {

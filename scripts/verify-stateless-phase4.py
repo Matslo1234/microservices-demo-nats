@@ -237,6 +237,7 @@ def verify_manifests() -> None:
         "--cluster-enabled yes",
         "--cluster-preferred-endpoint-type hostname",
         "--appendfsync always",
+        "--save 3600 1",
     ):
         if required not in cluster:
             raise VerificationError(

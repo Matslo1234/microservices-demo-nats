@@ -36,6 +36,8 @@ var errStateStoreClosed = errors.New("checkout state store is closed")
 
 type checkoutRedisClient interface {
 	stateless.UniversalRedisClient
+	MGet(ctx context.Context, keys ...string) *redis.SliceCmd
+	Pipelined(ctx context.Context, fn func(redis.Pipeliner) error) ([]redis.Cmder, error)
 	SetNX(ctx context.Context, key string, value any, expiration time.Duration) *redis.BoolCmd
 	Ping(ctx context.Context) *redis.StatusCmd
 	ZRangeByScore(ctx context.Context, key string, opt *redis.ZRangeBy) *redis.StringSliceCmd
@@ -327,23 +329,46 @@ func (store *stateStore) loadOrderWorkspace(orderID string, at time.Time, base *
 		}
 	}
 	orderBase := store.orderBase(orderID)
-	version, err := store.client.Get(context.Background(), orderBase+":version").Uint64()
-	if err != nil && !errors.Is(err, redis.Nil) {
+	values, err := store.client.MGet(
+		context.Background(),
+		orderBase+":version",
+		orderBase+":saga",
+		orderBase+":accepted",
+	).Result()
+	if err != nil {
 		return nil, 0, nil, err
 	}
-	encoded, err := store.client.Get(context.Background(), orderBase+":saga").Bytes()
-	if err == nil {
+	if len(values) != 3 {
+		return nil, 0, nil, fmt.Errorf("unexpected checkout workspace response length %d", len(values))
+	}
+	var version uint64
+	if values[0] != nil {
+		parsed, parseErr := redisInt64(values[0])
+		if parseErr != nil || parsed < 0 {
+			if parseErr != nil {
+				return nil, 0, nil, parseErr
+			}
+			return nil, 0, nil, fmt.Errorf("invalid negative checkout version %d", parsed)
+		}
+		version = uint64(parsed)
+	}
+	encoded, err := redisBytes(values[1])
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	if len(encoded) > 0 {
 		saga := &orderSaga{}
 		if err := json.Unmarshal(encoded, saga); err != nil {
 			return nil, 0, nil, fmt.Errorf("decode checkout saga: %w", err)
 		}
 		state.Orders[orderID] = saga
-	} else if !errors.Is(err, redis.Nil) {
-		return nil, 0, nil, err
 	}
 	var accepted *acceptedOrderRecord
-	encoded, err = store.client.Get(context.Background(), orderBase+":accepted").Bytes()
-	if err == nil {
+	encoded, err = redisBytes(values[2])
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	if len(encoded) > 0 {
 		accepted = &acceptedOrderRecord{}
 		if err := json.Unmarshal(encoded, accepted); err != nil {
 			return nil, 0, nil, fmt.Errorf("decode accepted order: %w", err)
@@ -356,8 +381,6 @@ func (store *stateStore) loadOrderWorkspace(orderID string, at time.Time, base *
 		for _, product := range accepted.Products {
 			state.Products[product.ProductId] = cloneProduct(product)
 		}
-	} else if !errors.Is(err, redis.Nil) {
-		return nil, 0, nil, err
 	}
 	return state, version, accepted, nil
 }
@@ -492,48 +515,77 @@ func (store *stateStore) ApplyProjection(subject string, envelope *commonv1.Mess
 
 func (store *stateStore) LoadOrderProjections(command *commandsv1.OrderSubmitCommand, at time.Time) (*persistedState, error) {
 	state := newPersistedState(at)
-	if err := store.loadJSON(store.projectionMarker("catalog"), &state.CatalogRevision); err != nil {
-		return nil, err
-	}
 	rates := &eventsv1.CurrencyRatesUpdatedEvent{}
-	if err := store.loadJSON(store.projectionMarker("rates"), rates); err != nil {
+	cart := &commonv1.CartSnapshot{}
+	if err := store.loadJSONBatch([]redisJSONLoad{
+		{base: store.projectionMarker("catalog"), target: &state.CatalogRevision},
+		{base: store.projectionMarker("rates"), target: rates},
+		{base: store.projectionBase("cart", command.UserId), target: cart},
+	}); err != nil {
 		return nil, err
 	}
 	if rates.RateRevision > 0 {
 		state.Rates = rates
 	}
-	cart := &commonv1.CartSnapshot{}
-	if err := store.loadJSON(store.projectionBase("cart", command.UserId), cart); err != nil {
-		return nil, err
-	}
 	if cart.UserId != "" {
 		state.Carts[command.UserId] = cart
+		products := make(map[string]*productProjection, len(cart.Items))
+		loads := make([]redisJSONLoad, 0, len(cart.Items))
 		for _, line := range cart.Items {
-			projection := &productProjection{}
-			if err := store.loadJSON(store.projectionBase("product", line.ProductId), projection); err != nil {
-				return nil, err
+			if _, exists := products[line.ProductId]; exists {
+				continue
 			}
+			projection := &productProjection{}
+			products[line.ProductId] = projection
+			loads = append(loads, redisJSONLoad{
+				base: store.projectionBase("product", line.ProductId), target: projection,
+			})
+		}
+		if err := store.loadJSONBatch(loads); err != nil {
+			return nil, err
+		}
+		for productID, projection := range products {
 			if projection.Product != nil {
-				state.Products[line.ProductId] = projection.Product
+				state.Products[productID] = projection.Product
 			}
 			if projection.Removed {
-				state.RemovedProducts[line.ProductId] = true
+				state.RemovedProducts[productID] = true
 			}
 		}
 	}
 	return state, nil
 }
 
-func (store *stateStore) loadJSON(base string, target any) error {
-	value, err := store.client.Get(context.Background(), base+":value").Bytes()
-	if errors.Is(err, redis.Nil) {
+type redisJSONLoad struct {
+	base   string
+	target any
+}
+
+func (store *stateStore) loadJSONBatch(loads []redisJSONLoad) error {
+	if len(loads) == 0 {
 		return nil
 	}
-	if err != nil {
+	commands := make([]*redis.StringCmd, len(loads))
+	_, err := store.client.Pipelined(context.Background(), func(pipeline redis.Pipeliner) error {
+		for index, load := range loads {
+			commands[index] = pipeline.Get(context.Background(), load.base+":value")
+		}
+		return nil
+	})
+	if err != nil && !errors.Is(err, redis.Nil) {
 		return err
 	}
-	if err := json.Unmarshal(value, target); err != nil {
-		return fmt.Errorf("decode projection %s: %w", base, err)
+	for index, command := range commands {
+		value, commandErr := command.Bytes()
+		if errors.Is(commandErr, redis.Nil) {
+			continue
+		}
+		if commandErr != nil {
+			return commandErr
+		}
+		if err := json.Unmarshal(value, loads[index].target); err != nil {
+			return fmt.Errorf("decode projection %s: %w", loads[index].base, err)
+		}
 	}
 	return nil
 }

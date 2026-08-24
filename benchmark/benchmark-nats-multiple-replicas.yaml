@@ -238,6 +238,13 @@ data:
       fi
 
       hostname="${metadata%%,*}"
+      if [ -z "${hostname}" ]; then
+        # A peer which stopped before persisting its announced hostname can
+        # leave an empty metadata field. Keep its last address; Redis will
+        # relearn the peer through cluster gossip after this node starts.
+        printf '%s\n' "${line}" >>"${repaired}"
+        continue
+      fi
       attempts=0
       address=""
       until [ -n "${address}" ]; do
@@ -456,6 +463,8 @@ spec:
             weight: 100
       containers:
       - env:
+        - name: ENABLE_TRACING
+          value: "0"
         - name: PORT
           value: "8080"
         - name: NATS_REQUIRED
@@ -466,8 +475,6 @@ spec:
           value: "32"
         - name: NATS_CONSUMER_CONCURRENCY
           value: "8"
-        - name: ENABLE_TRACING
-          value: "1"
         - name: COLLECTOR_SERVICE_ADDR
           value: alloy.observability.svc.cluster.local:4317
         - name: OTEL_EXPORTER_OTLP_ENDPOINT
@@ -683,6 +690,8 @@ spec:
             weight: 100
       containers:
       - env:
+        - name: ENABLE_TRACING
+          value: "0"
         - name: REDIS_ADDR
           value: redis-cart-cluster:6379
         - name: NATS_REQUIRED
@@ -691,8 +700,6 @@ spec:
           value: cart-catalog-v1,cart-commands-v1
         - name: CART_COMMAND_CONCURRENCY
           value: "32"
-        - name: ENABLE_TRACING
-          value: "1"
         - name: COLLECTOR_SERVICE_ADDR
           value: alloy.observability.svc.cluster.local:4317
         - name: OTEL_EXPORTER_OTLP_ENDPOINT
@@ -808,6 +815,8 @@ spec:
             weight: 100
       containers:
       - env:
+        - name: ENABLE_TRACING
+          value: "0"
         - name: PORT
           value: "8080"
         - name: NATS_REQUIRED
@@ -828,8 +837,6 @@ spec:
           value: 10m
         - name: GOMEMLIMIT
           value: 400MiB
-        - name: ENABLE_TRACING
-          value: "1"
         - name: COLLECTOR_SERVICE_ADDR
           value: alloy.observability.svc.cluster.local:4317
         - name: OTEL_EXPORTER_OTLP_ENDPOINT
@@ -851,7 +858,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-checkoutservice
-        image: matslo123/checkoutservice:v0.4.0@sha256:e1e7b9c48143ca89809ce19380a547b7a7bb2da193197b1868243ac68025a254
+        image: matslo123/checkoutservice:v0.4.0@sha256:5ac769ce381352fd2012fc8d3dc760335d3d1e328421ddfa26b6d82fb6a9fb5a
         livenessProbe:
           httpGet:
             path: /healthz
@@ -943,14 +950,14 @@ spec:
             weight: 100
       containers:
       - env:
+        - name: ENABLE_TRACING
+          value: "0"
         - name: PORT
           value: "8080"
         - name: DISABLE_PROFILER
           value: "1"
         - name: NATS_REQUIRED
           value: "true"
-        - name: ENABLE_TRACING
-          value: "1"
         - name: COLLECTOR_SERVICE_ADDR
           value: alloy.observability.svc.cluster.local:4317
         - name: OTEL_EXPORTER_OTLP_ENDPOINT
@@ -1058,6 +1065,8 @@ spec:
             weight: 100
       containers:
       - env:
+        - name: ENABLE_TRACING
+          value: "0"
         - name: PORT
           value: "8080"
         - name: NATS_REQUIRED
@@ -1068,8 +1077,6 @@ spec:
           value: "32"
         - name: NATS_CONSUMER_CONCURRENCY
           value: "8"
-        - name: ENABLE_TRACING
-          value: "1"
         - name: COLLECTOR_SERVICE_ADDR
           value: alloy.observability.svc.cluster.local:4317
         - name: OTEL_EXPORTER_OTLP_ENDPOINT
@@ -1218,6 +1225,8 @@ spec:
             weight: 100
       containers:
       - env:
+        - name: ENABLE_TRACING
+          value: "0"
         - name: PORT
           value: "8080"
         - name: NATS_REQUIRED
@@ -1234,8 +1243,6 @@ spec:
           value: "512"
         - name: ENABLE_PROFILER
           value: "0"
-        - name: ENABLE_TRACING
-          value: "1"
         - name: COLLECTOR_SERVICE_ADDR
           value: alloy.observability.svc.cluster.local:4317
         - name: OTEL_EXPORTER_OTLP_ENDPOINT
@@ -1498,6 +1505,8 @@ spec:
             weight: 100
       containers:
       - env:
+        - name: ENABLE_TRACING
+          value: "0"
         - name: PORT
           value: "8080"
         - name: DISABLE_PROFILER
@@ -1510,8 +1519,6 @@ spec:
           value: boutique.qry.payment.tokenize.v1,payment-commands-v1
         - name: PAYMENT_SIGNING_KEY_ID
           value: primary-v1
-        - name: ENABLE_TRACING
-          value: "1"
         - name: COLLECTOR_SERVICE_ADDR
           value: alloy.observability.svc.cluster.local:4317
         - name: OTEL_EXPORTER_OTLP_ENDPOINT
@@ -1623,14 +1630,14 @@ spec:
             weight: 100
       containers:
       - env:
+        - name: ENABLE_TRACING
+          value: "0"
         - name: PORT
           value: "8080"
         - name: DISABLE_PROFILER
           value: "1"
         - name: NATS_REQUIRED
           value: "true"
-        - name: ENABLE_TRACING
-          value: "1"
         - name: COLLECTOR_SERVICE_ADDR
           value: alloy.observability.svc.cluster.local:4317
         - name: OTEL_EXPORTER_OTLP_ENDPOINT
@@ -1738,6 +1745,8 @@ spec:
             weight: 100
       containers:
       - env:
+        - name: ENABLE_TRACING
+          value: "0"
         - name: PORT
           value: "8080"
         - name: DISABLE_PROFILER
@@ -1750,8 +1759,6 @@ spec:
           value: "32"
         - name: NATS_CONSUMER_CONCURRENCY
           value: "8"
-        - name: ENABLE_TRACING
-          value: "1"
         - name: COLLECTOR_SERVICE_ADDR
           value: alloy.observability.svc.cluster.local:4317
         - name: OTEL_EXPORTER_OTLP_ENDPOINT
@@ -1864,6 +1871,8 @@ spec:
             weight: 100
       containers:
       - env:
+        - name: ENABLE_TRACING
+          value: "0"
         - name: PORT
           value: "8080"
         - name: DISABLE_PROFILER
@@ -1874,8 +1883,6 @@ spec:
           value: "true"
         - name: NATS_REQUIRED_SUBSCRIPTIONS
           value: shipping-cart-quotes-v1,shipping-commands-v1
-        - name: ENABLE_TRACING
-          value: "1"
         - name: COLLECTOR_SERVICE_ADDR
           value: alloy.observability.svc.cluster.local:4317
         - name: OTEL_EXPORTER_OTLP_ENDPOINT
@@ -1988,6 +1995,8 @@ spec:
             weight: 100
       containers:
       - env:
+        - name: ENABLE_TRACING
+          value: "0"
         - name: NATS_REQUIRED
           value: "true"
         - name: NATS_REQUIRED_SUBSCRIPTIONS
@@ -2000,8 +2009,6 @@ spec:
           value: "32768"
         - name: STOREFRONT_CONTEXT_CACHE_ENTRIES
           value: "65536"
-        - name: ENABLE_TRACING
-          value: "1"
         - name: COLLECTOR_SERVICE_ADDR
           value: alloy.observability.svc.cluster.local:4317
         - name: OTEL_EXPORTER_OTLP_ENDPOINT
@@ -2108,6 +2115,7 @@ spec:
             --port 6379 \
             --appendonly yes \
             --appendfsync always \
+            --save 3600 1 \
             --cluster-enabled yes \
             --cluster-config-file /data/nodes.conf \
             --cluster-node-timeout 5000 \
@@ -2285,6 +2293,7 @@ spec:
             --port 6379 \
             --appendonly yes \
             --appendfsync always \
+            --save 3600 1 \
             --cluster-enabled yes \
             --cluster-config-file /data/nodes.conf \
             --cluster-node-timeout 5000 \
@@ -2327,10 +2336,10 @@ spec:
         resources:
           limits:
             cpu: 500m
-            memory: 2Gi
+            memory: 4Gi
           requests:
             cpu: 50m
-            memory: 96Mi
+            memory: 2Gi
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:

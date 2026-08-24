@@ -2521,6 +2521,13 @@ data:
       fi
 
       hostname="${metadata%%,*}"
+      if [ -z "${hostname}" ]; then
+        # A peer which stopped before persisting its announced hostname can
+        # leave an empty metadata field. Keep its last address; Redis will
+        # relearn the peer through cluster gossip after this node starts.
+        printf '%s\n' "${line}" >>"${repaired}"
+        continue
+      fi
       attempts=0
       address=""
       until [ -n "${address}" ]; do
@@ -2907,7 +2914,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-benchmarkservice
-        image: matslo123/benchmarkservice:v0.4.0@sha256:7dfbff4abbe4bf3aec814ac8f01e8677fc3145c9485f8323361bf0300ee7626c
+        image: matslo123/benchmarkservice:v0.4.0@sha256:64e3ee0a48a43565446a1b014067e79f05d39055a9608f7704d83157eedf2dd3
         livenessProbe:
           httpGet:
             path: /healthz
@@ -3178,7 +3185,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-checkoutservice
-        image: matslo123/checkoutservice:v0.4.0@sha256:e1e7b9c48143ca89809ce19380a547b7a7bb2da193197b1868243ac68025a254
+        image: matslo123/checkoutservice:v0.4.0@sha256:5ac769ce381352fd2012fc8d3dc760335d3d1e328421ddfa26b6d82fb6a9fb5a
         livenessProbe:
           httpGet:
             path: /healthz
@@ -4493,6 +4500,7 @@ spec:
             --port 6379 \
             --appendonly yes \
             --appendfsync always \
+            --save 3600 1 \
             --cluster-enabled yes \
             --cluster-config-file /data/nodes.conf \
             --cluster-node-timeout 5000 \
@@ -4676,6 +4684,7 @@ spec:
             --port 6379 \
             --appendonly yes \
             --appendfsync always \
+            --save 3600 1 \
             --cluster-enabled yes \
             --cluster-config-file /data/nodes.conf \
             --cluster-node-timeout 5000 \
@@ -4718,10 +4727,10 @@ spec:
         resources:
           limits:
             cpu: 500m
-            memory: 2Gi
+            memory: 4Gi
           requests:
             cpu: 50m
-            memory: 96Mi
+            memory: 2Gi
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:

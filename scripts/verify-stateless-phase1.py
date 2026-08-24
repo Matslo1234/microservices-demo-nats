@@ -80,6 +80,7 @@ def verify_redis_clusters(rendered: str) -> None:
             "--cluster-enabled yes",
             "--appendonly yes",
             "--appendfsync always",
+            "--save 3600 1",
             "--cluster-preferred-endpoint-type hostname",
             "topologySpreadConstraints:",
             "volumeClaimTemplates:",
