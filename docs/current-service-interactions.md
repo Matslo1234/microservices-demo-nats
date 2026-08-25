@@ -190,9 +190,12 @@ sequenceDiagram
     E->>N: notification result fact
 ```
 
-The checkout process manager persists each stage and deadline. Failures before
-completion cancel or reject the order. Failures after authorization trigger
-release/cancel compensations; a failed compensation reaches `MANUAL_REVIEW`.
+The checkout process manager persists each stage and deadline. Every replica
+scans the 64 deadline indexes every five seconds, reducing idle Redis polling
+while allowing timeout handling up to one scan interval after a deadline.
+Failures before completion cancel or reject the order. Failures after
+authorization trigger release/cancel compensations; a failed compensation
+reaches `MANUAL_REVIEW`.
 Email and cart clearing remain independent from the completed-order decision.
 Card PAN and CVV exist only in the frontend-to-payment tokenization request and
 are not stored or published to JetStream. Payment tokens contain only an order

@@ -291,7 +291,7 @@ spec:
             cpu: 100m
             memory: 64Mi
           limits:
-            cpu: 200m
+            cpu: 500m
             memory: 2Gi
 ---
 apiVersion: v1
@@ -895,10 +895,10 @@ spec:
             port: 3550
         resources:
           requests:
-            cpu: 5m
+            cpu: 100m
             memory: 64Mi
           limits:
-            cpu: 200m
+            cpu: 500m
             memory: 2Gi
 ---
 apiVersion: v1

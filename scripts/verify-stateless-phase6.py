@@ -34,11 +34,11 @@ COMPARABLE_CPU = {
     "adservice": ("125m", "300m"),
     "cartservice": ("300m", '"2"'),
     "checkoutservice": ("275m", '"2"'),
-    "currencyservice": ("100m", "200m"),
+    "currencyservice": ("100m", "500m"),
     "emailservice": ("175m", "200m"),
     "frontend": ("300m", '"1"'),
     "paymentservice": ("225m", '"2"'),
-    "productcatalogservice": ("5m", "200m"),
+    "productcatalogservice": ("100m", "500m"),
     "recommendationservice": ("300m", '"2"'),
     "shippingservice": ("175m", '"2"'),
 }
@@ -427,8 +427,9 @@ def verify_release_manifests() -> None:
                     "name: ENABLE_TRACING",
                     'value: "0"',
                 )
-        currency = document(content, "Deployment", "currencyservice")
-        require(currency, "cpu: 200m", "cpu: 400m")
+        for application in ("currencyservice", "productcatalogservice"):
+            deployment = document(content, "Deployment", application)
+            require(deployment, "cpu: 100m", "cpu: 500m")
         cart = document(content, "Deployment", "cartservice")
         require(
             cart,

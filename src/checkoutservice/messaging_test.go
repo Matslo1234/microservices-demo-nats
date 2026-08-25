@@ -46,6 +46,12 @@ func TestCheckoutConsumerTerminalErrorsRestartWorker(t *testing.T) {
 	}
 }
 
+func TestCheckoutDeadlineScanInterval(t *testing.T) {
+	if got, want := checkoutDeadlineScanInterval, 5*time.Second; got != want {
+		t.Fatalf("deadline scan interval = %s, want %s", got, want)
+	}
+}
+
 func TestCheckoutWorkflowConsumerFilters(t *testing.T) {
 	if !checkoutConsumerFiltersMatch("", checkoutShippingSagaSubjects, checkoutShippingSagaSubjects) {
 		t.Fatal("shipping saga filters do not match themselves")

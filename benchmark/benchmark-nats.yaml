@@ -878,10 +878,10 @@ spec:
             port: health
         resources:
           limits:
-            cpu: 400m
+            cpu: 500m
             memory: 2Gi
           requests:
-            cpu: 200m
+            cpu: 100m
             memory: 64Mi
         securityContext:
           allowPrivilegeEscalation: false
@@ -1558,10 +1558,10 @@ spec:
             port: health
         resources:
           limits:
-            cpu: 200m
+            cpu: 500m
             memory: 2Gi
           requests:
-            cpu: 5m
+            cpu: 100m
             memory: 64Mi
         securityContext:
           allowPrivilegeEscalation: false

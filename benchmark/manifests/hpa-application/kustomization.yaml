@@ -4,6 +4,7 @@ resources:
 - ../../../kubernetes-manifests
 - ../../../kubernetes-manifests/autoscaling.yaml
 components:
+- ../components/benchmark-resources
 - ../components/no-tracing
 - ../components/redis-retention
 

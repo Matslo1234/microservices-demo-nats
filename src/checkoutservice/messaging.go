@@ -34,6 +34,7 @@ const (
 	checkoutProjectionParallelism    = 16
 	checkoutWorkflowParallelism      = 32
 	checkoutAsyncPublishMaxPending   = 2048
+	checkoutDeadlineScanInterval     = 5 * time.Second
 )
 
 var checkoutShippingSagaSubjects = []string{
@@ -682,7 +683,7 @@ func checkoutMessageGroup(envelope *commonv1.MessageEnvelope) string {
 }
 
 func (worker *checkoutWorker) scanDeadlines() {
-	ticker := time.NewTicker(250 * time.Millisecond)
+	ticker := time.NewTicker(checkoutDeadlineScanInterval)
 	defer ticker.Stop()
 	for {
 		select {

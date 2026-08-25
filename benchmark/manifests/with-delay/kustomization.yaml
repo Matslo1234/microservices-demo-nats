@@ -6,6 +6,7 @@ kind: Kustomization
 resources:
 - ../../../kubernetes-manifests
 components:
+- ../components/benchmark-resources
 - ../components/no-tracing
 - ../components/redis-retention
 patches:

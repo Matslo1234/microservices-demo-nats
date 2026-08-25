@@ -430,9 +430,11 @@ Failure/compensation rules:
 - Invalid versions, missing products, invalid currency, or an empty cart produce
   `order.rejected` before payment.
 - Quote failure is retried according to policy, then cancels the order.
-- Every waiting saga state has a persisted deadline. The checkout deadline
-  scanner emits `order.step-timed-out` and performs the documented retry or
-  compensation instead of leaving an order pending forever.
+- Every waiting saga state has a persisted deadline. Every checkout replica
+  scans the 64 deadline indexes every five seconds; fencing leases ensure only
+  one handles each timeout. The scanner emits `order.step-timed-out` and
+  performs the documented retry or compensation instead of leaving an order
+  pending forever.
 - Payment decline cancels the order without creating a shipment.
 - Shipment creation failure after authorization issues
   `payment.release-authorization`.

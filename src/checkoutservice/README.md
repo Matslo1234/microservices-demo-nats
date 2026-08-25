@@ -32,7 +32,9 @@ The handling replica publishes the stored results with stable `Nats-Msg-Id`
 values and acknowledges the input only after JetStream acknowledges every
 publish. A duplicate delivery reloads and republishes the same bytes.
 
-All replicas scan bounded deadline shards. Expiring fencing leases and stable
+All replicas scan bounded deadline shards every five seconds. This avoids
+continuously polling all 64 Redis indexes while keeping timeout dispatch within
+one scan interval under normal operation. Expiring fencing leases and stable
 synthetic input IDs let another replica recover a deadline after a stop at
 either the state-commit or result-publication boundary. Projection consumers
 process independent aggregates concurrently while preserving the stream order
