@@ -164,6 +164,74 @@ func TestOrderTotalDoesNotOverflowFractionalNanos(t *testing.T) {
 	}
 }
 
+func TestSagaStepDeadlinesStartWhenEventsAreProcessed(t *testing.T) {
+	store, _ := newTestStateStore(t)
+	seedTestCheckoutState(t, store)
+	processingTime := testTime.Add(10 * time.Minute)
+	store.now = func() time.Time { return processingTime }
+	worker := newTestWorker(t, store)
+	orderID := "delayed-events"
+
+	assertDeadline := func(stage string) {
+		t.Helper()
+		saga, err := store.LoadOrder(orderID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := processingTime.Add(worker.stepTimeout)
+		if saga == nil || saga.Stage != stage || !saga.Deadline.Equal(want) {
+			t.Fatalf("saga = %#v, want stage %s and deadline %s", saga, stage, want)
+		}
+		due, err := store.DueDeadlines(processingTime, 16)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(due) != 0 {
+			t.Fatalf("stale input occurrence time made deadline immediately due: %#v", due)
+		}
+	}
+
+	submitted := submitTestOrder(t, worker, orderID, testTime)
+	assertDeadline(stageWaitingQuote)
+	for _, result := range submitted.Results {
+		envelope := &commonv1.MessageEnvelope{}
+		if err := proto.Unmarshal(result.Data, envelope); err != nil {
+			t.Fatal(err)
+		}
+		if got := envelope.GetOccurredAt().AsTime(); !got.Equal(testTime) {
+			t.Fatalf("result occurrence time = %s, want deterministic input time %s", got, testTime)
+		}
+	}
+
+	processingTime = processingTime.Add(20 * time.Second)
+	sagaEvent(t, worker, "boutique.evt.shipping.order-quote-calculated.v1", "delayed-quote", orderID, 1,
+		testTime.Add(time.Second), &eventsv1.ShippingOrderQuoteCalculatedEvent{
+			OrderId: orderID, CostUsd: &commonv1.Money{CurrencyCode: "USD", Units: 5},
+		})
+	assertDeadline(stageWaitingAuthorize)
+
+	processingTime = processingTime.Add(20 * time.Second)
+	sagaEvent(t, worker, "boutique.evt.payment.authorized.v1", "delayed-authorization", orderID, 2,
+		testTime.Add(2*time.Second), &eventsv1.PaymentAuthorizedEvent{
+			OrderId: orderID, AuthorizationId: "auth-delayed",
+		})
+	assertDeadline(stageWaitingShipment)
+
+	processingTime = processingTime.Add(20 * time.Second)
+	sagaEvent(t, worker, "boutique.evt.shipping.shipment-created.v1", "delayed-shipment", orderID, 3,
+		testTime.Add(3*time.Second), &eventsv1.ShippingShipmentCreatedEvent{
+			OrderId: orderID, ShipmentId: "ship-delayed", TrackingId: "track-delayed",
+		})
+	assertDeadline(stageWaitingCapture)
+
+	processingTime = processingTime.Add(20 * time.Second)
+	sagaEvent(t, worker, "boutique.evt.payment.capture-failed.v1", "delayed-capture-failure", orderID, 4,
+		testTime.Add(4*time.Second), &eventsv1.PaymentCaptureFailedEvent{
+			OrderId: orderID, Failure: &commonv1.Failure{Code: "CAPTURE_FAILED"},
+		})
+	assertDeadline(stageCompensating)
+}
+
 func TestSagaTransitionsAcrossRandomReplicasAtScale(t *testing.T) {
 	for _, replicas := range []int{1, 3, 10} {
 		t.Run(fmt.Sprintf("%d-replicas", replicas), func(t *testing.T) {

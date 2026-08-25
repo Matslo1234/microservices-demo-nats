@@ -19,10 +19,7 @@ from locust import FastHttpUser, between, events, task
 from locust.exception import StopUser
 
 import runtime
-from config import (
-    SATURATION_START_RATE,
-    SATURATION_STEP_RATE,
-)
+from config import SATURATION_STEP_RATE
 from runtime import (
     CONFIG,
     RECORDER,
@@ -1515,7 +1512,7 @@ class SaturationDriver(FastHttpUser):
                 self._schedule_window(
                     active=active,
                     duration_seconds=CONFIG.warmup_seconds,
-                    target_rate=SATURATION_START_RATE,
+                    target_rate=CONFIG.saturation_start_rate,
                     rung=None,
                 )
 
@@ -1527,7 +1524,8 @@ class SaturationDriver(FastHttpUser):
                 )
                 target_rate = min(
                     CONFIG.saturation_max_rate,
-                    SATURATION_START_RATE + rung * SATURATION_STEP_RATE,
+                    CONFIG.saturation_start_rate
+                    + rung * SATURATION_STEP_RATE,
                 )
                 runtime.set_saturation_rung(rung, target_rate)
                 completed_before = RECORDER.completed_count()

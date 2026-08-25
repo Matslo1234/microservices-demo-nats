@@ -47,8 +47,10 @@ the failure.
   Submission scheduling is independent of completion tracking, so slow
   outcomes do not reduce the requested arrival rate.
 - `saturation` runs an open-loop load ladder. After the optional warm-up at
-  10 orders/s, it measures 10 orders/s for 30 seconds by default and adds 10
-  orders/s each rung. The rung duration is configurable with
+  the starting rate, it measures 10 orders/s for 30 seconds by default and adds
+  10 orders/s each rung. The starting rate is configurable with
+  `saturation_start_rate` (or `--saturation-start-rate` in standalone mode),
+  and defaults to 10 orders/s. The rung duration is configurable with
   `saturation_step_seconds` (or `--saturation-step-seconds` in standalone
   mode). Saturation runs default to a 600-second steady interval, which reaches
   200 orders/s with the default ladder. It records the first rung where observed goodput no longer
@@ -168,6 +170,7 @@ python src/benchmarkservice/standalone.py \
   --workload saturation \
   --warmup-seconds 0 \
   --duration-seconds 600 \
+  --saturation-start-rate 10 \
   --saturation-max-rate 1000 \
   --output ./benchmark-results
 ```
@@ -262,8 +265,8 @@ bundle contains its own broker, client configuration, credentials, or store
 bootstrap resources.
 
 Run-level settings include workload, warm-up/steady/drain durations, user,
-arrival or saturation maximum rate, outcome/settlement timeouts, random seed,
-and collector interval.
+arrival rate or saturation starting/maximum rates, outcome/settlement timeouts,
+random seed, and collector interval.
 The web UI can also submit additional runs with the same settings, waiting for
 each run to finish and for a configurable delay before submitting the next.
 Each re-run has its own run ID and artifacts. Re-run scheduling is owned by the

@@ -47,6 +47,7 @@ type checkoutRedisClient interface {
 type stateStore struct {
 	client checkoutRedisClient
 	prefix string
+	now    func() time.Time
 
 	closed    atomic.Bool
 	conflicts atomic.Uint64
@@ -105,7 +106,7 @@ func openStateStore(address, prefix string, clustered bool) (*stateStore, error)
 		}
 		client = redis.NewClient(options)
 	}
-	store := &stateStore{client: client, prefix: strings.TrimSuffix(prefix, ":")}
+	store := &stateStore{client: client, prefix: strings.TrimSuffix(prefix, ":"), now: time.Now}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := client.Ping(ctx).Err(); err != nil {
@@ -201,6 +202,10 @@ func (store *stateStore) ApplyOrder(
 	if input.GetOccurredAt() == nil || at.IsZero() {
 		return transitionOutcome{}, errors.New("input occurrence time is required")
 	}
+	deadlineBaseTime := time.Now().UTC()
+	if store.now != nil {
+		deadlineBaseTime = store.now().UTC()
+	}
 	baseKey := store.orderBase(orderID)
 	keys := []string{
 		baseKey + ":saga",
@@ -217,6 +222,7 @@ func (store *stateStore) ApplyOrder(
 		if err != nil {
 			return transitionOutcome{}, err
 		}
+		state.DeadlineStart = deadlineBaseTime
 		state.Input = proto.Clone(input).(*commonv1.MessageEnvelope)
 		if err := update(state); err != nil {
 			return transitionOutcome{}, err

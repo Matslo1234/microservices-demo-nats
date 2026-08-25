@@ -33,7 +33,9 @@ const (
 	shippingCartMaxPending    = 1000
 	shippingCommandBatchSize  = 256
 	shippingCommandMaxPending = 512
-	shippingCommandWorkers    = 32
+	// Preserve headroom for the 300 order/s benchmark with two fixed replicas,
+	// including when delayed shipments temporarily occupy worker lanes.
+	shippingCommandWorkers = 96
 )
 
 type shippingConsumerDefinition struct {

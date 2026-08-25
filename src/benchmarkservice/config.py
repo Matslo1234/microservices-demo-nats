@@ -114,6 +114,7 @@ class BenchmarkConfig:
     users: int
     spawn_rate: float
     arrival_rate: float
+    saturation_start_rate: float
     saturation_max_rate: float
     saturation_step_seconds: int
     outcome_timeout_seconds: float
@@ -183,6 +184,26 @@ class BenchmarkConfig:
                 "for NATS saturation workloads"
             )
 
+        saturation_start_rate = _number(
+            values,
+            "saturation_start_rate",
+            SATURATION_START_RATE,
+            0.01,
+            10_000.0,
+        )
+        saturation_max_rate = _number(
+            values,
+            "saturation_max_rate",
+            1_000.0,
+            0.01,
+            10_000.0,
+        )
+        if saturation_max_rate < saturation_start_rate:
+            raise ConfigError(
+                "saturation_max_rate must be greater than or equal to "
+                "saturation_start_rate"
+            )
+
         return cls(
             application_type=app_type,
             target_url=target_url,
@@ -206,13 +227,8 @@ class BenchmarkConfig:
                 10_000.0,
             ),
             arrival_rate=_number(values, "arrival_rate", 1.0, 0.01, 10_000.0),
-            saturation_max_rate=_number(
-                values,
-                "saturation_max_rate",
-                1_000.0,
-                SATURATION_START_RATE,
-                10_000.0,
-            ),
+            saturation_start_rate=saturation_start_rate,
+            saturation_max_rate=saturation_max_rate,
             saturation_step_seconds=_integer(
                 values,
                 "saturation_step_seconds",
@@ -295,7 +311,7 @@ class BenchmarkConfig:
     @property
     def saturation_effective_max_rate(self) -> float:
         duration_limited_rate = (
-            SATURATION_START_RATE
+            self.saturation_start_rate
             + (self.saturation_step_count - 1) * SATURATION_STEP_RATE
         )
         return min(self.saturation_max_rate, duration_limited_rate)

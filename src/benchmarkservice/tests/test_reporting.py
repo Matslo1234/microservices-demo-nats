@@ -365,6 +365,7 @@ class ReportingTest(unittest.TestCase):
                     "warmup_seconds": 0,
                     "duration_seconds": 30,
                     "drain_seconds": 2,
+                    "saturation_start_rate": 30,
                 },
                 "NATS",
             )
@@ -380,7 +381,7 @@ class ReportingTest(unittest.TestCase):
                     record["context"].update(
                         {
                             "saturation_rung": rung,
-                            "target_requests_per_second": 10 + rung * 10,
+                            "target_requests_per_second": 30 + rung * 10,
                             "scheduled_at": 1,
                         }
                     )
@@ -390,10 +391,10 @@ class ReportingTest(unittest.TestCase):
                 encoding="utf-8",
             )
             decisions = [
-                self._saturation_decision(0, 10, 0, 10, 1, False, None),
+                self._saturation_decision(0, 30, 0, 10, 1, False, None),
                 self._saturation_decision(
                     1,
-                    20,
+                    40,
                     10,
                     20,
                     2,
@@ -402,7 +403,7 @@ class ReportingTest(unittest.TestCase):
                 ),
                 self._saturation_decision(
                     2,
-                    30,
+                    50,
                     20,
                     30,
                     1,
@@ -433,8 +434,9 @@ class ReportingTest(unittest.TestCase):
 
             saturation = summary["saturation"]
             self.assertNotIn("users", summary)
+            self.assertEqual(30, saturation["start_requests_per_second"])
             self.assertTrue(saturation["saturated"])
-            self.assertEqual(20, saturation["saturation_requests_per_second"])
+            self.assertEqual(40, saturation["saturation_requests_per_second"])
             self.assertEqual(
                 "goodput_stopped_increasing",
                 saturation["saturation_reason"],
@@ -443,7 +445,7 @@ class ReportingTest(unittest.TestCase):
                 "maximum_duration_reached", saturation["stop_reason"]
             )
             self.assertEqual(
-                10, saturation["highest_sustainable_requests_per_second"]
+                30, saturation["highest_sustainable_requests_per_second"]
             )
             self.assertEqual(3, len(saturation["rungs"]))
             self.assertEqual(

@@ -13,7 +13,6 @@ from typing import Any, Iterable
 
 from config import (
     BenchmarkConfig,
-    SATURATION_START_RATE,
     SATURATION_STEP_RATE,
 )
 from saturation import RAPID_PENDING_GROWTH_PER_SECOND
@@ -1295,7 +1294,7 @@ def saturation_summary(
             saturation_reason = first_saturated.get("stop_reason")
     return {
         "available": True,
-        "start_requests_per_second": SATURATION_START_RATE,
+        "start_requests_per_second": config.saturation_start_rate,
         "step_requests_per_second": SATURATION_STEP_RATE,
         "step_seconds": config.saturation_step_seconds,
         "maximum_requests_per_second": config.saturation_max_rate,

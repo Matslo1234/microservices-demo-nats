@@ -21,6 +21,11 @@ process independent aggregates concurrently while preserving the stream order
 within each aggregate; an envelope is decoded once before it is assigned to
 that aggregate's lane.
 
+Each saga stage gets its full timeout from when checkout begins processing the
+transition that enters that stage. Result and stage-event occurrence times
+still come from the input envelope so duplicate delivery republishes the same
+deterministic bytes even when processing was delayed in a queue.
+
 Required runtime configuration:
 
 - `CHECKOUT_REDIS_ADDR`: one or more comma-separated Redis Cluster seed

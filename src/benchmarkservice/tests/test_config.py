@@ -27,6 +27,7 @@ class BenchmarkConfigTest(unittest.TestCase):
             "https://metrics.example/snapshot", config.metrics_url
         )
         self.assertEqual("closed", config.workload)
+        self.assertEqual(10, config.saturation_start_rate)
         self.assertEqual(30, config.saturation_step_seconds)
         self.assertTrue(config.collect_nats_metrics)
         self.assertEqual(
@@ -248,6 +249,37 @@ class BenchmarkConfigTest(unittest.TestCase):
                 "NATS",
             )
 
+    def test_saturation_start_rate_is_configurable(self):
+        config = BenchmarkConfig.from_request(
+            {
+                **self.URLS,
+                "workload": "saturation",
+                "duration_seconds": 120,
+                "saturation_start_rate": 75,
+                "saturation_step_seconds": 30,
+            },
+            "NATS",
+        )
+
+        self.assertEqual(75, config.saturation_start_rate)
+        self.assertEqual(105, config.saturation_effective_max_rate)
+        self.assertEqual(2, config.worker_count)
+
+        with self.assertRaisesRegex(
+            ConfigError,
+            "saturation_max_rate must be greater than or equal to "
+            "saturation_start_rate",
+        ):
+            BenchmarkConfig.from_request(
+                {
+                    **self.URLS,
+                    "workload": "saturation",
+                    "saturation_start_rate": 100,
+                    "saturation_max_rate": 50,
+                },
+                "NATS",
+            )
+
     def test_saturation_defaults_reach_past_the_observed_knee(self):
         config = BenchmarkConfig.from_request(
             {**self.URLS, "workload": "saturation"},
@@ -267,6 +299,7 @@ class BenchmarkConfigTest(unittest.TestCase):
             }
         )
 
+        self.assertEqual(10, config.saturation_start_rate)
         self.assertEqual(10, config.saturation_step_seconds)
 
     def test_nats_saturation_requires_frequent_pending_samples(self):

@@ -25,7 +25,28 @@ class StandaloneTest(unittest.TestCase):
         config = config_from_args(arguments)
 
         self.assertEqual(600, config.duration_seconds)
+        self.assertEqual(10, config.saturation_start_rate)
         self.assertEqual(30, config.saturation_step_seconds)
+
+    def test_saturation_start_rate_is_configurable(self) -> None:
+        arguments = parser().parse_args(
+            [
+                "--url",
+                "https://shop.example",
+                "--metrics-url",
+                "https://metrics.example/snapshot",
+                "--application-type",
+                "NATS",
+                "--workload",
+                "saturation",
+                "--saturation-start-rate",
+                "42.5",
+            ]
+        )
+
+        self.assertEqual(
+            42.5, config_from_args(arguments).saturation_start_rate
+        )
 
     def test_required_urls_are_used_by_workers(self) -> None:
         arguments = parser().parse_args(

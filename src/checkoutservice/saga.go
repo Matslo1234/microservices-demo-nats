@@ -156,7 +156,7 @@ func (worker *checkoutWorker) applyOrderCommand(state *persistedState, envelope 
 		CurrencyCode: payload.CurrencyCode, PaymentToken: payload.PaymentToken,
 		CartVersion: payload.ExpectedCartVersion, CatalogRevision: payload.ExpectedCatalogRevision,
 		RateRevision: payload.ExpectedRateRevision, Version: 1, Stage: stageWaitingQuote,
-		Deadline: state.TransitionTime.Add(worker.stepTimeout), Snapshot: snapshot,
+		Deadline: state.deadlineAfter(worker.stepTimeout), Snapshot: snapshot,
 	}
 	state.setOrder(payload.OrderId, saga)
 	if err := queueEnvelope(state, "boutique.evt.order.submitted.v1", "boutique.order.Submitted.v1", "order",
@@ -226,7 +226,7 @@ func (worker *checkoutWorker) applySagaEvent(state *persistedState, subject stri
 		saga.Snapshot.Total = addMoney(saga.Snapshot.Total, shipping)
 		saga.Version++
 		saga.Stage = stageWaitingAuthorize
-		saga.Deadline = state.TransitionTime.Add(worker.stepTimeout)
+		saga.Deadline = state.deadlineAfter(worker.stepTimeout)
 		command := &commandsv1.PaymentAuthorizeCommand{CommandId: stableID("authorize", saga.OrderID), OrderId: saga.OrderID,
 			Amount: saga.Snapshot.Total, PaymentToken: saga.PaymentToken, IdempotencyKey: saga.OrderID + "/authorize"}
 		if err := queueEnvelope(state, "boutique.cmd.payment.authorize.v1", "boutique.payment.Authorize.v1", "order", saga.OrderID, saga.Version, saga.OrderID, cause, command); err != nil {
@@ -254,7 +254,7 @@ func (worker *checkoutWorker) applySagaEvent(state *persistedState, subject stri
 		saga.PaymentToken = ""
 		saga.Version++
 		saga.Stage = stageWaitingShipment
-		saga.Deadline = state.TransitionTime.Add(worker.stepTimeout)
+		saga.Deadline = state.deadlineAfter(worker.stepTimeout)
 		command := &commandsv1.ShippingCreateShipmentCommand{CommandId: stableID("shipment", saga.OrderID), OrderId: saga.OrderID,
 			ShippingAddress: saga.Address, IdempotencyKey: saga.OrderID + "/shipment"}
 		for _, line := range saga.Snapshot.Items {
@@ -286,7 +286,7 @@ func (worker *checkoutWorker) applySagaEvent(state *persistedState, subject stri
 		saga.Snapshot.TrackingId = payload.TrackingId
 		saga.Version++
 		saga.Stage = stageWaitingCapture
-		saga.Deadline = state.TransitionTime.Add(worker.stepTimeout)
+		saga.Deadline = state.deadlineAfter(worker.stepTimeout)
 		command := &commandsv1.PaymentCaptureCommand{CommandId: stableID("capture", saga.OrderID), OrderId: saga.OrderID,
 			AuthorizationId: saga.AuthorizationID, Amount: saga.Snapshot.Total, IdempotencyKey: saga.OrderID + "/capture"}
 		if err := queueEnvelope(state, "boutique.cmd.payment.capture.v1", "boutique.payment.Capture.v1", "order", saga.OrderID, saga.Version, saga.OrderID, cause, command); err != nil {
@@ -424,7 +424,7 @@ func (worker *checkoutWorker) cancel(state *persistedState, saga *orderSaga, cau
 func (worker *checkoutWorker) startCompensation(state *persistedState, saga *orderSaga, cause string, failure *commonv1.Failure, release, cancelShipment bool) error {
 	saga.Version++
 	saga.Stage = stageCompensating
-	saga.Deadline = state.TransitionTime.Add(worker.stepTimeout)
+	saga.Deadline = state.deadlineAfter(worker.stepTimeout)
 	saga.CancelReason = failure
 	saga.NeedRelease = release
 	saga.NeedShipmentCancel = cancelShipment

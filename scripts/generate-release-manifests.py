@@ -44,9 +44,9 @@ SERVICES = (
 )
 DEFAULT_IMAGE_DIGESTS = {
     "adservice": "9ea77de953468f3ddb47e31149dc934a04534bc75da892f46b824339b5963109",
-    "benchmarkservice": "64e3ee0a48a43565446a1b014067e79f05d39055a9608f7704d83157eedf2dd3",
+    "benchmarkservice": "3c27d27af5a9264a0181a7d492aef3e5f78812035bf051d05c23be3ce5bbbd10",
     "cartservice": "9afacf4cacc7793a59a0341937e723a7b03f5ffb0a7887b3b7ea47bd63e57f26",
-    "checkoutservice": "5ac769ce381352fd2012fc8d3dc760335d3d1e328421ddfa26b6d82fb6a9fb5a",
+    "checkoutservice": "69bb7672cfb68372642d16212a60f02ad044e8d8f7cc025284452e1acc5e0a64",
     "currencyservice": "aeccde52544263ceb7169be694250312e267a01104dc3dd3d68611975bd47cb8",
     "emailservice": "92c6ebe1fc527c6e5f46e6cb73cc5dc6db4ff392d05179ddcd29778447be5f59",
     "frontend": "476d4e2e2d50a56242c372770798ec63445b7033841b889f34a833462388b174",
@@ -55,7 +55,7 @@ DEFAULT_IMAGE_DIGESTS = {
     "paymentservice": "755e13249749163500bdb54898c5f23973e2012dde0b89e2b533bde45522ffaf",
     "productcatalogservice": "26d97784a6e105cf1586b2ff723772c583021491d5fa165ceaae6a3af12fe54d",
     "recommendationservice": "50a8d612442bd7415d7e247c3acf318af0773cfda704b3146719d3559b8cbac4",
-    "shippingservice": "68112b8dc949edd0558464cf5bcd0d7056ef51e337db42bae2b377f787f2cc5b",
+    "shippingservice": "d0dc6554058b3703611b174c65e7cd9b8c653f57b604b561082993896a5ebfd3",
     "storefrontprojectionservice": "ed0852a966f21f106532648920318b617d8d6923ef8062009b7fd78220b63355",
 }
 
@@ -213,6 +213,14 @@ def main() -> None:
     )
     benchmark = benchmark_application + "---\n" + target_metrics
     delayed_benchmark = delayed_application + "---\n" + target_metrics
+    if delayed_benchmark.count("--appendfsync always") != 2:
+        raise RuntimeError(
+            "expected appendfsync configuration on both delayed benchmark "
+            "Redis StatefulSets"
+        )
+    delayed_fsync1s_benchmark = delayed_benchmark.replace(
+        "--appendfsync always", "--appendfsync everysec"
+    )
     hpa_benchmark = (
         hpa_application
         + "---\n"
@@ -267,6 +275,18 @@ def main() -> None:
                 "to retain target-cluster resource samples.",
             ),
             delayed_benchmark,
+        ),
+        "benchmark-nats-with-delay-fsync1s.yaml": (
+            "Stateless NATS benchmark environment with "
+            "simulated provider latency.",
+            (
+                "A compatible NATS configuration must already be running in the cluster.",
+                "This uses two fixed application replicas without HPAs and adds 500 ms of",
+                "payment authorization latency plus 200 ms of shipment-creation latency.",
+                "Run Locust outside this cluster and use the external benchmarkmetrics URL",
+                "to retain target-cluster resource samples.",
+            ),
+            delayed_fsync1s_benchmark,
         ),
     }
     for filename, (

@@ -23,6 +23,7 @@ PROVIDER_MANIFESTS = (
     ROOT / "benchmark" / "benchmark-nats-multiple-replicas.yaml",
     ROOT / "benchmark" / "benchmark-nats-hpa.yaml",
     ROOT / "benchmark" / "benchmark-nats-with-delay.yaml",
+    ROOT / "benchmark" / "benchmark-nats-with-delay-fsync1s.yaml",
 )
 
 
@@ -213,6 +214,7 @@ def verify_manifests() -> None:
         ROOT / "benchmark" / "benchmark-nats-multiple-replicas.yaml",
         ROOT / "benchmark" / "benchmark-nats-hpa.yaml",
         ROOT / "benchmark" / "benchmark-nats-with-delay.yaml",
+        ROOT / "benchmark" / "benchmark-nats-with-delay-fsync1s.yaml",
     )
     for path in payment_manifests:
         if "PAYMENT_SIGNING_KEY_ID" not in deployment(path, "paymentservice"):

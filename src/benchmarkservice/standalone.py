@@ -51,6 +51,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--users", type=int, default=10)
     result.add_argument("--spawn-rate", type=float, default=1.0)
     result.add_argument("--arrival-rate", type=float, default=1.0)
+    result.add_argument("--saturation-start-rate", type=float, default=10.0)
     result.add_argument("--saturation-max-rate", type=float, default=1_000.0)
     result.add_argument("--saturation-step-seconds", type=int, default=30)
     result.add_argument("--outcome-timeout-seconds", type=float, default=30.0)

@@ -23,6 +23,7 @@ type persistedState struct {
 	Inbox           map[string]time.Time
 	Results         []resultMessage
 	TransitionTime  time.Time
+	DeadlineStart   time.Time
 	Input           *commonv1.MessageEnvelope
 }
 
@@ -54,7 +55,16 @@ func newPersistedState(at time.Time) *persistedState {
 		Inbox:           make(map[string]time.Time),
 		Results:         make([]resultMessage, 0, 4),
 		TransitionTime:  at.UTC(),
+		DeadlineStart:   at.UTC(),
 	}
+}
+
+func (state *persistedState) deadlineAfter(timeout time.Duration) time.Time {
+	base := state.DeadlineStart
+	if base.IsZero() {
+		base = state.TransitionTime
+	}
+	return base.Add(timeout)
 }
 
 func (state *persistedState) setCatalogRevision(revision uint64) {

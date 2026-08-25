@@ -312,6 +312,7 @@ def verify_release_manifests() -> None:
             "benchmark-nats-hpa.yaml",
             "benchmark-nats-multiple-replicas.yaml",
             "benchmark-nats-with-delay.yaml",
+            "benchmark-nats-with-delay-fsync1s.yaml",
         )
     )
     generated = (full, no_load, single_replica, *benchmarks)
@@ -435,10 +436,15 @@ def verify_release_manifests() -> None:
                 "redis-checkout-cluster",
             )
         }
+        appendfsync = (
+            "--appendfsync everysec"
+            if path.name == "benchmark-nats-with-delay-fsync1s.yaml"
+            else "--appendfsync always"
+        )
         for stateful_set in redis_stateful_sets.values():
             require(
                 stateful_set,
-                "--appendfsync always",
+                appendfsync,
                 "--save 3600 1",
             )
         controller = document(content, "Deployment", "benchmarkservice")
@@ -475,7 +481,10 @@ def verify_release_manifests() -> None:
             require(content, "kind: HorizontalPodAutoscaler")
         else:
             forbid(content, "kind: HorizontalPodAutoscaler")
-        if path.name == "benchmark-nats-with-delay.yaml":
+        if path.name in (
+            "benchmark-nats-with-delay.yaml",
+            "benchmark-nats-with-delay-fsync1s.yaml",
+        ):
             payment = document(content, "Deployment", "paymentservice")
             shipping = document(content, "Deployment", "shippingservice")
             require(payment, "name: PROCESSING_TIME_MS", 'value: "500"')

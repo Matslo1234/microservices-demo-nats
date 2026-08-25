@@ -68,8 +68,10 @@ HTML = r"""<!doctype html>
       <label>Closed-loop users<input name="users" type="number" min="1" value="10"></label>
       <label>User spawn rate/s<input name="spawn_rate" type="number" min=".01" step=".01" value="1"></label>
       <label>Open-loop orders/s<input name="arrival_rate" type="number" min=".01" step=".01" value="1"></label>
+      <label>Saturation starting orders/s<input name="saturation_start_rate"
+        type="number" min=".01" max="10000" step=".01" value="10"></label>
       <label>Saturation maximum orders/s<input name="saturation_max_rate"
-        type="number" min="10" step="10" value="1000"></label>
+        type="number" min=".01" max="10000" step=".01" value="1000"></label>
       <label>Saturation rung (seconds)<input name="saturation_step_seconds"
         type="number" min="10" max="300" value="30"></label>
       <label>Outcome timeout (seconds)<input name="outcome_timeout_seconds" type="number" min="1" value="30"></label>
@@ -87,9 +89,10 @@ HTML = r"""<!doctype html>
       <button id="stop" class="danger" type="button" disabled>Stop active run</button></div>
     <p class="muted">Use <code>local</code> for either target to use the application
       or collect metrics in the cluster running benchmarkservice.</p>
-    <p class="muted">The saturation ladder starts at 10 orders/s and adds 10 every
-      configured rung interval (30 seconds by default), holding at the maximum rate once
-      reached. Backlog growth and falling goodput are recorded without ending the run.
+    <p class="muted">The saturation ladder starts at the configured rate (10 orders/s
+      by default) and adds 10 every configured rung interval (30 seconds by default),
+      holding at the maximum rate once reached. Backlog growth and falling goodput are
+      recorded without ending the run.
       Re-runs use the same settings and produce separate results. Keep this browser tab
       open until the sequence finishes.</p>
     <p id="message" class="muted" role="status" aria-live="polite"></p></form>
@@ -121,7 +124,7 @@ workload.addEventListener("change",()=>{
   previousWorkload=workload.value;
 });
 const fields=["warmup_seconds","duration_seconds","drain_seconds","users","spawn_rate",
-  "arrival_rate","saturation_max_rate","saturation_step_seconds","outcome_timeout_seconds","settlement_timeout_seconds",
+  "arrival_rate","saturation_start_rate","saturation_max_rate","saturation_step_seconds","outcome_timeout_seconds","settlement_timeout_seconds",
   "resource_sample_interval_seconds","seed"];
 async function api(path,options={}) {
   const response=await fetch(path,options), data=await response.json().catch(()=>({error:response.statusText}));
