@@ -48,7 +48,8 @@ forbid(ROOT / "src/checkoutservice", checkout,
        'key("revision")', 'key("outbox")')
 require(ROOT / "src/checkoutservice", checkout,
         "checkout-order-commands-v1", "CHECKOUT_REDIS_ADDR", "commitOrderScript",
-        "ApplyOrder", "resultJournalRetention", "NewResultEnvelope",
+        "ApplyOrder", "defaultRedisRetention", "NewResultEnvelope",
+        "encodeRedisJSON", "decodeRedisJSON", "CHECKOUT_REDIS_RETENTION",
         "PublishMsgAsync", "Nats-Msg-Id", "RedisLeaseStore", "DueDeadlines",
         "checkoutDeadlineShards", "LoadOrderProjections",
         "WAITING_FOR_QUOTE", "WAITING_FOR_AUTHORIZATION", "WAITING_FOR_SHIPMENT",
@@ -110,7 +111,7 @@ checkout_manifest_path, checkout_manifest = source(
     "kubernetes-manifests", "checkoutservice.yaml")
 require(checkout_manifest_path, checkout_manifest,
         "CHECKOUT_REDIS_ADDR", "redis-checkout-cluster:6379", "CHECKOUT_REDIS_MODE",
-        "checkout:v2", "CHECKOUT_DEADLINE_LEASE",
+        "checkout:v2", "CHECKOUT_REDIS_RETENTION", "792h", "CHECKOUT_DEADLINE_LEASE",
         "type: RollingUpdate", "maxUnavailable: 0",
         "nats-client-config", "nats-ca")
 forbid(checkout_manifest_path, checkout_manifest,

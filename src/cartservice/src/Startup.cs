@@ -1,4 +1,5 @@
 using System;
+using System.Globalization;
 using System.Linq;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
@@ -57,6 +58,9 @@ namespace cartservice
                 throw new InvalidOperationException(
                     "REDIS_ADDR is required for the aggregate-local cart store.");
             }
+            var redisRetention = Duration(
+                "CART_REDIS_RETENTION",
+                RedisAggregateCartStore.DefaultResultRetention);
 
             cartStoreDescription = "Using aggregate-local Redis Cluster cart store";
             services.AddSingleton<CartMetrics>();
@@ -83,7 +87,14 @@ namespace cartservice
                 provider.GetRequiredService<RedisCatalogProjection>());
             services.AddSingleton<ICatalogProjection>(provider =>
                 provider.GetRequiredService<RedisCatalogProjection>());
-            services.AddSingleton<RedisAggregateCartStore>();
+            services.AddSingleton(provider =>
+                new RedisAggregateCartStore(
+                    provider.GetRequiredService<IAtomicAggregateStore>(),
+                    provider.GetRequiredService<IProductCatalog>(),
+                    provider.GetRequiredService<CartMetrics>(),
+                    provider.GetRequiredService<ILogger<RedisAggregateCartStore>>(),
+                    provider.GetRequiredService<IConnectionMultiplexer>(),
+                    redisRetention));
             services.AddSingleton<ICartStore>(provider =>
                 provider.GetRequiredService<RedisAggregateCartStore>());
             services.AddSingleton<ICartCommandStore>(provider =>
@@ -137,6 +148,46 @@ namespace cartservice
                         messaging.All(health => health.Ready)));
                 });
             });
+        }
+
+        private TimeSpan Duration(string name, TimeSpan fallback)
+        {
+            var configured = Configuration[name];
+            if (string.IsNullOrWhiteSpace(configured))
+            {
+                return fallback;
+            }
+            var value = configured.Trim();
+            var units = new (string Suffix, Func<double, TimeSpan> Convert)[]
+            {
+                ("ms", TimeSpan.FromMilliseconds),
+                ("d", TimeSpan.FromDays),
+                ("h", TimeSpan.FromHours),
+                ("m", TimeSpan.FromMinutes),
+                ("s", TimeSpan.FromSeconds)
+            };
+            foreach (var unit in units)
+            {
+                if (!value.EndsWith(unit.Suffix, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+                if (!double.TryParse(
+                    value[..^unit.Suffix.Length],
+                    NumberStyles.Float,
+                    CultureInfo.InvariantCulture,
+                    out var amount))
+                {
+                    break;
+                }
+                var duration = unit.Convert(amount);
+                if (duration > TimeSpan.Zero)
+                {
+                    return duration;
+                }
+                break;
+            }
+            throw new InvalidOperationException($"Invalid positive duration in {name}.");
         }
     }
 }

@@ -364,6 +364,16 @@ def verify_release_manifests() -> None:
                 "name: ENABLE_TRACING",
                 'value: "1"',
             )
+        require(
+            document(content, "Deployment", "cartservice"),
+            "name: CART_REDIS_RETENTION",
+            "value: 792h",
+        )
+        require(
+            document(content, "Deployment", "checkoutservice"),
+            "name: CHECKOUT_REDIS_RETENTION",
+            "value: 792h",
+        )
     for path in benchmarks:
         content = path.read_text()
         require(
@@ -424,6 +434,14 @@ def verify_release_manifests() -> None:
             cart,
             "name: CART_COMMAND_CONCURRENCY",
             'value: "32"',
+            "name: CART_REDIS_RETENTION",
+            "value: 10m",
+        )
+        checkout = document(content, "Deployment", "checkoutservice")
+        require(
+            checkout,
+            "name: CHECKOUT_REDIS_RETENTION",
+            "value: 10m",
         )
         message_operations = document(
             content, "Deployment", "messageoperationsservice"

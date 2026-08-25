@@ -169,6 +169,8 @@ def verify_manifests() -> None:
         "name: CHECKOUT_REDIS_MODE",
         "value: cluster",
         "value: checkout:v2",
+        "name: CHECKOUT_REDIS_RETENTION",
+        "value: 792h",
         "name: CHECKOUT_DEADLINE_LEASE",
     )
     forbid(checkout, "value: redis-checkout:6379")

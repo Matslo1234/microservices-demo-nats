@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -45,7 +46,7 @@ func newCheckoutRuntime() *checkoutRuntime {
 	return &checkoutRuntime{stop: make(chan struct{}), done: make(chan struct{})}
 }
 
-func (runtime *checkoutRuntime) run(address, prefix string, clustered bool) {
+func (runtime *checkoutRuntime) run(address, prefix string, clustered bool, retention time.Duration) {
 	defer close(runtime.done)
 	for attempt := 0; ; attempt++ {
 		select {
@@ -53,7 +54,7 @@ func (runtime *checkoutRuntime) run(address, prefix string, clustered bool) {
 			return
 		default:
 		}
-		store, err := openStateStore(address, prefix, clustered)
+		store, err := openStateStoreWithRetention(address, prefix, clustered, retention)
 		if err == nil {
 			var worker *checkoutWorker
 			worker, err = startCheckoutWorker(store)
@@ -147,8 +148,15 @@ func main() {
 		redisPrefix = defaultRedisStatePrefix
 	}
 	clustered := !strings.EqualFold(os.Getenv("CHECKOUT_REDIS_MODE"), "standalone")
+	redisRetention, err := durationEnv("CHECKOUT_REDIS_RETENTION", defaultRedisRetention)
+	if err != nil || redisRetention <= 0 {
+		if err == nil {
+			err = errors.New("retention must be positive")
+		}
+		log.WithError(err).Fatal("invalid CHECKOUT_REDIS_RETENTION")
+	}
 	runtime := newCheckoutRuntime()
-	go runtime.run(redisAddress, redisPrefix, clustered)
+	go runtime.run(redisAddress, redisPrefix, clustered, redisRetention)
 
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -182,6 +190,7 @@ func main() {
 	go func() { serveErrors <- server.ListenAndServe() }()
 	log.WithFields(logrus.Fields{
 		"port": port, "store_prefix": redisPrefix, "redis_cluster": clustered,
+		"redis_retention": redisRetention.String(),
 	}).Info("checkout saga service started")
 
 	signals := make(chan os.Signal, 1)

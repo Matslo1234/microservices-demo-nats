@@ -7,6 +7,23 @@ namespace Boutique.Stateless.Tests;
 
 public sealed class PrimitivesTests
 {
+    [Fact]
+    public void RedisRecordsRequireCompressedData()
+    {
+        var plain = Enumerable.Repeat("checkout-cart-state", 100)
+            .SelectMany(value => System.Text.Encoding.UTF8.GetBytes(value))
+            .ToArray();
+
+        var compressed = RedisRecordCompression.Compress(plain);
+
+        Assert.Equal((byte)0x1f, compressed[0]);
+        Assert.Equal((byte)0x8b, compressed[1]);
+        Assert.True(compressed.Length < plain.Length);
+        Assert.Equal(plain, RedisRecordCompression.Decompress(compressed));
+        Assert.Throws<InvalidDataException>(() =>
+            RedisRecordCompression.Decompress(plain));
+    }
+
     [Theory]
     [InlineData(
         "01J0INPUT000000000000000001",

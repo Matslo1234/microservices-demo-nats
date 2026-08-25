@@ -12,6 +12,15 @@ Every run requires two explicit targets:
 - `target_url` (or standalone `--url`) is the externally reachable frontend;
 - `metrics_url` is the tested cluster's `/snapshot` endpoint.
 
+Runner Jobs prefer nodes in the EKS managed node group `benchmark-pool`
+through soft node affinity. If that group is absent or cannot accommodate the
+runner, Kubernetes can schedule the Job on any other eligible node. Override
+the defaults with `BENCHMARK_JOB_NODE_POOL_LABEL` and
+`BENCHMARK_JOB_NODE_POOL_NAME` on the benchmarkservice Deployment when a
+cluster uses a different node-pool label or name. Runner Jobs tolerate the
+`workload=benchmark-runner:NoSchedule` taint so the preferred pool can be
+reserved for benchmark workloads.
+
 For benchmarkservice API runs, either value can be the exact sentinel `local`.
 A local application target uses the `frontend` Service in the runner's
 namespace. A local metrics target collects directly from the Kubernetes API

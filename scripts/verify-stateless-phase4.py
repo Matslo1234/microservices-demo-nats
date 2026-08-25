@@ -93,7 +93,8 @@ def verify_sources() -> None:
         "CartResultJournal.Serialize",
         "ResultEnvelopes.CreateMetadata",
         'ResultSlot = "cart.mutation"',
-        "ResultRetention = TimeSpan.FromDays(8)",
+        "DefaultResultRetention = TimeSpan.FromDays(33)",
+        '"CART_REDIS_RETENTION"',
         "commit.Duplicate",
         "RedisCatalogProjection",
         'new ConsumerConfig("cart-catalog-v1")',
@@ -128,6 +129,9 @@ def verify_sources() -> None:
             'if ARGV[5] == "1" then',
             'redis.call("SET", KEYS[3], ARGV[3], "PX", ARGV[4])',
             "AdvanceVersion",
+            "RedisRecordCompression.Compress",
+            "RedisRecordCompression.Decompress",
+            "Uncompressed records are intentionally unsupported",
         ),
     )
     del shared
@@ -191,6 +195,8 @@ def verify_manifests() -> None:
         "maxUnavailable: 0",
         "maxSurge: 1",
         "value: redis-cart-cluster:6379",
+        "name: CART_REDIS_RETENTION",
+        "value: 792h",
     ):
         if required not in cart:
             raise VerificationError(

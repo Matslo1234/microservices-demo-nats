@@ -479,7 +479,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-benchmarkservice
-        image: matslo123/benchmarkservice:v0.4.0@sha256:3c27d27af5a9264a0181a7d492aef3e5f78812035bf051d05c23be3ce5bbbd10
+        image: matslo123/benchmarkservice:v0.4.0@sha256:9c79b9f4229a715c1b9e5ddd3e1e3d0f0cd9730880b649b67bf3d6addf216a86
         livenessProbe:
           httpGet:
             path: /healthz
@@ -570,6 +570,8 @@ spec:
             weight: 100
       containers:
       - env:
+        - name: CART_REDIS_RETENTION
+          value: 10m
         - name: ENABLE_TRACING
           value: "0"
         - name: REDIS_ADDR
@@ -601,7 +603,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-cartservice
-        image: matslo123/cartservice:v0.4.0@sha256:9afacf4cacc7793a59a0341937e723a7b03f5ffb0a7887b3b7ea47bd63e57f26
+        image: matslo123/cartservice:v0.4.0@sha256:a981b8dd94d28910e3003aeb985ade8d1f3e9aa33f204d4a9323cd142870f648
         livenessProbe:
           failureThreshold: 6
           httpGet:
@@ -695,6 +697,8 @@ spec:
             weight: 100
       containers:
       - env:
+        - name: CHECKOUT_REDIS_RETENTION
+          value: 10m
         - name: ENABLE_TRACING
           value: "0"
         - name: CHECKOUT_REDIS_MODE
@@ -738,7 +742,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-checkoutservice
-        image: matslo123/checkoutservice:v0.4.0@sha256:69bb7672cfb68372642d16212a60f02ad044e8d8f7cc025284452e1acc5e0a64
+        image: matslo123/checkoutservice:v0.4.0@sha256:be8734683306bf87782b63caa9438043bc963fd3f94474e89be6dc98133ef080
         livenessProbe:
           httpGet:
             path: /healthz
@@ -2172,7 +2176,7 @@ spec:
             memory: 4Gi
           requests:
             cpu: 50m
-            memory: 2Gi
+            memory: 256Mi
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:
@@ -2888,7 +2892,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-benchmarkservice
-        image: matslo123/benchmarkservice:v0.4.0@sha256:3c27d27af5a9264a0181a7d492aef3e5f78812035bf051d05c23be3ce5bbbd10
+        image: matslo123/benchmarkservice:v0.4.0@sha256:9c79b9f4229a715c1b9e5ddd3e1e3d0f0cd9730880b649b67bf3d6addf216a86
         imagePullPolicy: IfNotPresent
         livenessProbe:
           httpGet:

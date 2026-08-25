@@ -30,7 +30,7 @@ public sealed class RedisAggregateCartStore : ICartStore, ICartCommandStore
 {
     private const string ResultSlot = "cart.mutation";
     private const int MaximumStoreAttempts = 8;
-    private static readonly TimeSpan ResultRetention = TimeSpan.FromDays(8);
+    public static readonly TimeSpan DefaultResultRetention = TimeSpan.FromDays(33);
     private static readonly TimeSpan MinimumRetryDelay = TimeSpan.FromMilliseconds(5);
     private static readonly TimeSpan MaximumRetryDelay = TimeSpan.FromMilliseconds(250);
 
@@ -39,19 +39,28 @@ public sealed class RedisAggregateCartStore : ICartStore, ICartCommandStore
     private readonly IConnectionMultiplexer? _connection;
     private readonly CartMetrics _metrics;
     private readonly ILogger<RedisAggregateCartStore> _logger;
+    private readonly TimeSpan _resultRetention;
 
     public RedisAggregateCartStore(
         IAtomicAggregateStore aggregates,
         IProductCatalog products,
         CartMetrics metrics,
         ILogger<RedisAggregateCartStore> logger,
-        IConnectionMultiplexer? connection = null)
+        IConnectionMultiplexer? connection = null,
+        TimeSpan? resultRetention = null)
     {
         _aggregates = aggregates;
         _products = products;
         _metrics = metrics;
         _logger = logger;
         _connection = connection;
+        _resultRetention = resultRetention ?? DefaultResultRetention;
+        if (_resultRetention <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(resultRetention),
+                "Cart Redis retention must be positive.");
+        }
     }
 
     public async Task<CartCommandCommit> HandleAddItemCommandAsync(
@@ -240,7 +249,7 @@ public sealed class RedisAggregateCartStore : ICartStore, ICartCommandStore
                         current.Version,
                         selected.State.ToByteArray(),
                         journal,
-                        ResultRetention,
+                        _resultRetention,
                         selected.AdvanceVersion),
                     cancellationToken);
                 return new CartCommandCommit(

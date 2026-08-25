@@ -22,6 +22,11 @@ def job_name(run_id: str) -> str:
 
 
 class KubernetesJobClient:
+    DEFAULT_NODE_POOL_LABEL = "eks.amazonaws.com/nodegroup"
+    DEFAULT_NODE_POOL_NAME = "benchmark-pool"
+    node_pool_label = DEFAULT_NODE_POOL_LABEL
+    node_pool_name = DEFAULT_NODE_POOL_NAME
+
     def __init__(self) -> None:
         host = os.environ.get("KUBERNETES_SERVICE_HOST")
         port = os.environ.get("KUBERNETES_SERVICE_PORT_HTTPS", "443")
@@ -38,6 +43,20 @@ class KubernetesJobClient:
         # transient Kubernetes API outage must not terminate the HTTP API or
         # make liveness depend on the control plane.
         self.image = os.environ.get("BENCHMARK_JOB_IMAGE")
+        self.node_pool_label = (
+            os.environ.get(
+                "BENCHMARK_JOB_NODE_POOL_LABEL",
+                self.DEFAULT_NODE_POOL_LABEL,
+            ).strip()
+            or self.DEFAULT_NODE_POOL_LABEL
+        )
+        self.node_pool_name = (
+            os.environ.get(
+                "BENCHMARK_JOB_NODE_POOL_NAME",
+                self.DEFAULT_NODE_POOL_NAME,
+            ).strip()
+            or self.DEFAULT_NODE_POOL_NAME
+        )
 
     def _request(
         self,
@@ -128,6 +147,37 @@ class KubernetesJobClient:
                         "serviceAccountName": "benchmark-runner",
                         "restartPolicy": "Never",
                         "terminationGracePeriodSeconds": 90,
+                        # Prefer the dedicated benchmark pool without making
+                        # it a scheduling requirement. Clusters with one pool
+                        # or without the preferred pool remain supported.
+                        "affinity": {
+                            "nodeAffinity": {
+                                "preferredDuringSchedulingIgnoredDuringExecution": [
+                                    {
+                                        "weight": 100,
+                                        "preference": {
+                                            "matchExpressions": [
+                                                {
+                                                    "key": self.node_pool_label,
+                                                    "operator": "In",
+                                                    "values": [
+                                                        self.node_pool_name
+                                                    ],
+                                                }
+                                            ]
+                                        },
+                                    }
+                                ]
+                            }
+                        },
+                        "tolerations": [
+                            {
+                                "key": "workload",
+                                "operator": "Equal",
+                                "value": "benchmark-runner",
+                                "effect": "NoSchedule",
+                            }
+                        ],
                         "securityContext": {
                             "fsGroup": 1000,
                             "runAsGroup": 1000,

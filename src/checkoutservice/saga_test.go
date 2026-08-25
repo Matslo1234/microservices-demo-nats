@@ -24,7 +24,7 @@ var testTime = time.Date(2026, 7, 27, 10, 0, 0, 123000000, time.UTC)
 
 func newTestWorker(t *testing.T, store *stateStore) *checkoutWorker {
 	t.Helper()
-	leases, err := stateless.NewRedisLeaseStore(store.client, store.prefix+":deadline-lease", resultJournalRetention)
+	leases, err := stateless.NewRedisLeaseStore(store.client, store.prefix+":deadline-lease", store.retention)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -58,6 +58,35 @@ class KubernetesJobClientTest(unittest.TestCase):
         self.assertEqual(600, job["spec"]["activeDeadlineSeconds"])
         pod = job["spec"]["template"]["spec"]
         self.assertEqual("benchmark-runner", pod["serviceAccountName"])
+        node_affinity = pod["affinity"]["nodeAffinity"]
+        self.assertNotIn(
+            "requiredDuringSchedulingIgnoredDuringExecution", node_affinity
+        )
+        preferred = node_affinity[
+            "preferredDuringSchedulingIgnoredDuringExecution"
+        ]
+        self.assertEqual(100, preferred[0]["weight"])
+        self.assertEqual(
+            [
+                {
+                    "key": "eks.amazonaws.com/nodegroup",
+                    "operator": "In",
+                    "values": ["benchmark-pool"],
+                }
+            ],
+            preferred[0]["preference"]["matchExpressions"],
+        )
+        self.assertEqual(
+            [
+                {
+                    "key": "workload",
+                    "operator": "Equal",
+                    "value": "benchmark-runner",
+                    "effect": "NoSchedule",
+                }
+            ],
+            pod["tolerations"],
+        )
         self.assertEqual(
             "registry.example/benchmark@sha256:abc",
             pod["containers"][0]["image"],

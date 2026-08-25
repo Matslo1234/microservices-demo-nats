@@ -84,6 +84,8 @@ spec:
             value: cluster
           - name: CHECKOUT_REDIS_PREFIX
             value: checkout:v2
+          - name: CHECKOUT_REDIS_RETENTION
+            value: 792h
           - name: CHECKOUT_DEADLINE_LEASE
             value: 15s
           - name: CHECKOUT_SAGA_STEP_TIMEOUT

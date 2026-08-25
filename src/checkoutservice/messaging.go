@@ -155,7 +155,7 @@ func startCheckoutWorker(store *stateStore) (*checkoutWorker, error) {
 		hostname, _ := os.Hostname()
 		workerID = hostname + "/" + strings.TrimPrefix(nats.NewInbox(), "_INBOX.")
 	}
-	leaseStore, err := stateless.NewRedisLeaseStore(store.client, store.prefix+":deadline-lease", resultJournalRetention)
+	leaseStore, err := stateless.NewRedisLeaseStore(store.client, store.prefix+":deadline-lease", store.retention)
 	if err != nil {
 		return nil, err
 	}

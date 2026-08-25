@@ -67,6 +67,60 @@ func openSharedTestStateStore(t *testing.T, server *miniredis.Miniredis) *stateS
 	return store
 }
 
+func TestCheckoutRedisPayloadsAreCompressedAndUseConfiguredRetention(t *testing.T) {
+	store, server := newTestStateStore(t)
+	store.retention = 10 * time.Minute
+	seedTestCheckoutState(t, store)
+	submitTestOrder(t, newTestWorker(t, store), "compressed-order", testTime)
+
+	assertCompressed := func(name string, value []byte) {
+		t.Helper()
+		if !bytes.HasPrefix(value, []byte{0x1f, 0x8b}) {
+			t.Fatalf("%s is not a gzip record", name)
+		}
+	}
+	base := store.orderBase("compressed-order")
+	for _, suffix := range []string{":saga", ":accepted", ":deadline"} {
+		value, err := server.Get(base + suffix)
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertCompressed(suffix, []byte(value))
+	}
+	fields, err := server.HKeys(base + ":results")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fields) == 0 {
+		t.Fatal("result journal is empty")
+	}
+	for _, field := range fields {
+		assertCompressed(":results", []byte(server.HGet(base+":results", field)))
+	}
+	if got := server.TTL(base + ":results"); got != 10*time.Minute {
+		t.Fatalf("result retention = %s, want 10m", got)
+	}
+
+	projectionFound := false
+	for _, key := range server.Keys() {
+		if strings.Contains(key, ":projection:") && strings.HasSuffix(key, ":value") {
+			value, getErr := server.Get(key)
+			if getErr != nil {
+				t.Fatal(getErr)
+			}
+			assertCompressed(":projection:value", []byte(value))
+			projectionFound = true
+		}
+	}
+	if !projectionFound {
+		t.Fatal("no compressed projection values found")
+	}
+
+	if err := decodeRedisJSON([]byte(`{"legacy":true}`), &map[string]bool{}); err == nil {
+		t.Fatal("legacy uncompressed Redis JSON was accepted")
+	}
+}
+
 func TestCheckoutBatchesOrderAndProjectionReads(t *testing.T) {
 	store, _ := newTestStateStore(t)
 	seedTestCheckoutState(t, store)

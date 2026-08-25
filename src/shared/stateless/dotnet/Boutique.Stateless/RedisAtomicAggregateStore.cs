@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0 (the "License");
 
 using System.Globalization;
+using System.IO.Compression;
 using System.Security.Cryptography;
 using System.Text;
 using StackExchange.Redis;
@@ -76,9 +77,47 @@ public interface IAtomicAggregateStore
         CancellationToken cancellationToken = default);
 }
 
-// RedisAtomicAggregateStore uses the same key layout and Lua transaction as
-// the Go helper. StackExchange.Redis routes the operation to the hash slot
-// encoded in all three keys and follows MOVED/ASK responses for the caller.
+public static class RedisRecordCompression
+{
+    public static byte[] Compress(ReadOnlySpan<byte> value)
+    {
+        if (value.IsEmpty)
+        {
+            throw new ArgumentException("Redis record data is required.", nameof(value));
+        }
+        using var output = new MemoryStream();
+        using (var compressor = new GZipStream(
+            output,
+            CompressionLevel.Fastest,
+            leaveOpen: true))
+        {
+            compressor.Write(value);
+        }
+        return output.ToArray();
+    }
+
+    public static byte[] Decompress(ReadOnlySpan<byte> value)
+    {
+        if (value.IsEmpty)
+        {
+            throw new InvalidDataException("Compressed Redis record is empty.");
+        }
+        using var input = new MemoryStream(value.ToArray(), writable: false);
+        using var decompressor = new GZipStream(
+            input,
+            CompressionMode.Decompress,
+            leaveOpen: false);
+        using var output = new MemoryStream();
+        decompressor.CopyTo(output);
+        return output.ToArray();
+    }
+}
+
+// RedisAtomicAggregateStore stores gzip-compressed aggregate state and result
+// journals. Uncompressed records are intentionally unsupported. It uses the
+// same key layout and Lua transaction as the Go helper; StackExchange.Redis
+// routes the operation to the hash slot encoded in all three keys and follows
+// MOVED/ASK responses for the caller.
 public sealed class RedisAtomicAggregateStore : IAtomicAggregateStore
 {
     private const string LoadScript = """
@@ -133,7 +172,10 @@ public sealed class RedisAtomicAggregateStore : IAtomicAggregateStore
             throw new RedisServerException("Unexpected aggregate load response.");
         }
         var version = checked((ulong)(long)values[0]);
-        var state = (byte[]?)values[1] ?? [];
+        var compressedState = (byte[]?)values[1] ?? [];
+        var state = compressedState.Length == 0
+            ? []
+            : RedisRecordCompression.Decompress(compressedState);
         return new AtomicAggregateSnapshot(version, state);
     }
 
@@ -155,13 +197,15 @@ public sealed class RedisAtomicAggregateStore : IAtomicAggregateStore
         }
 
         var keys = AggregateKeys.For(_prefix, request.AggregateId, request.InputMessageId);
+        var compressedState = RedisRecordCompression.Compress(request.NextState.Span);
+        var compressedJournal = RedisRecordCompression.Compress(request.Journal.Span);
         var raw = await _database.ScriptEvaluateAsync(
             CommitScript,
             [(RedisKey)keys.State, (RedisKey)keys.Version, (RedisKey)keys.Inbox],
             [
                 request.ExpectedVersion.ToString(CultureInfo.InvariantCulture),
-                request.NextState.ToArray(),
-                request.Journal.ToArray(),
+                compressedState,
+                compressedJournal,
                 retentionMilliseconds,
                 request.AdvanceVersion ? 1 : 0
             ]).WaitAsync(cancellationToken);
@@ -172,11 +216,16 @@ public sealed class RedisAtomicAggregateStore : IAtomicAggregateStore
         }
         var status = (long)values[0];
         var version = checked((ulong)(long)values[1]);
-        var journal = (byte[]?)values[2] ?? [];
         return status switch
         {
-            0 => new AtomicCommitOutcome(version, journal, false),
-            1 => new AtomicCommitOutcome(version, journal, true),
+            0 => new AtomicCommitOutcome(
+                version,
+                RedisRecordCompression.Decompress((byte[]?)values[2] ?? []),
+                false),
+            1 => new AtomicCommitOutcome(
+                version,
+                RedisRecordCompression.Decompress((byte[]?)values[2] ?? []),
+                true),
             2 => throw new AggregateConflictException(request.ExpectedVersion, version),
             _ => throw new RedisServerException($"Unknown aggregate commit status {status}.")
         };
@@ -193,6 +242,7 @@ public sealed class RedisAtomicAggregateStore : IAtomicAggregateStore
         {
             return null;
         }
-        return new ReadOnlyMemory<byte>((byte[])value!);
+        return new ReadOnlyMemory<byte>(
+            RedisRecordCompression.Decompress((byte[])value!));
     }
 }

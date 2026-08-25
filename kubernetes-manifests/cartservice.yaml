@@ -59,6 +59,8 @@ spec:
         env:
         - name: REDIS_ADDR
           value: "redis-cart-cluster:6379"
+        - name: CART_REDIS_RETENTION
+          value: "792h"
         - name: NATS_REQUIRED
           value: "true"
         - name: NATS_REQUIRED_SUBSCRIPTIONS

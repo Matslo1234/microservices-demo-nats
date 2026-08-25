@@ -1,47 +1,42 @@
 # Copyright 2026 Google LLC
 # Licensed under the Apache License, Version 2.0 (the "License");
 
-apiVersion: kustomize.config.k8s.io/v1beta1
-kind: Kustomization
-resources:
-- ../../../kubernetes-manifests
-components:
-- ../components/no-tracing
-- ../components/redis-retention
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
 patches:
 - target:
     group: apps
     version: v1
     kind: Deployment
-    name: paymentservice
+    name: cartservice
   patch: |-
     apiVersion: apps/v1
     kind: Deployment
     metadata:
-      name: paymentservice
+      name: cartservice
     spec:
       template:
         spec:
           containers:
           - name: server
             env:
-            - name: PROCESSING_TIME_MS
-              value: "500"
+            - name: CART_REDIS_RETENTION
+              value: "10m"
 - target:
     group: apps
     version: v1
     kind: Deployment
-    name: shippingservice
+    name: checkoutservice
   patch: |-
     apiVersion: apps/v1
     kind: Deployment
     metadata:
-      name: shippingservice
+      name: checkoutservice
     spec:
       template:
         spec:
           containers:
           - name: server
             env:
-            - name: PROCESSING_TIME_MS
-              value: "200"
+            - name: CHECKOUT_REDIS_RETENTION
+              value: "10m"

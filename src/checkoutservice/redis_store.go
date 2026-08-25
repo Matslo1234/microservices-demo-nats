@@ -4,12 +4,15 @@
 package main
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strconv"
 	"strings"
 	"sync"
@@ -25,11 +28,11 @@ import (
 )
 
 const (
-	redisStateSchemaVersion = 2
+	redisStateSchemaVersion = 3
 	redisTransactionRetries = 16
 	defaultRedisStatePrefix = "checkout:v2"
 	checkoutDeadlineShards  = 64
-	resultJournalRetention  = 33 * 24 * time.Hour
+	defaultRedisRetention   = 33 * 24 * time.Hour
 )
 
 var errStateStoreClosed = errors.New("checkout state store is closed")
@@ -45,9 +48,10 @@ type checkoutRedisClient interface {
 }
 
 type stateStore struct {
-	client checkoutRedisClient
-	prefix string
-	now    func() time.Time
+	client    checkoutRedisClient
+	prefix    string
+	now       func() time.Time
+	retention time.Duration
 
 	closed    atomic.Bool
 	conflicts atomic.Uint64
@@ -77,11 +81,18 @@ func openStateStoreWithPrefix(address, prefix string) (*stateStore, error) {
 }
 
 func openStateStore(address, prefix string, clustered bool) (*stateStore, error) {
+	return openStateStoreWithRetention(address, prefix, clustered, defaultRedisRetention)
+}
+
+func openStateStoreWithRetention(address, prefix string, clustered bool, retention time.Duration) (*stateStore, error) {
 	if strings.TrimSpace(address) == "" {
 		return nil, errors.New("CHECKOUT_REDIS_ADDR is required")
 	}
 	if strings.TrimSpace(prefix) == "" {
 		prefix = defaultRedisStatePrefix
+	}
+	if retention <= 0 {
+		return nil, errors.New("checkout Redis retention must be positive")
 	}
 	var client checkoutRedisClient
 	if clustered {
@@ -106,7 +117,10 @@ func openStateStore(address, prefix string, clustered bool) (*stateStore, error)
 		}
 		client = redis.NewClient(options)
 	}
-	store := &stateStore{client: client, prefix: strings.TrimSuffix(prefix, ":"), now: time.Now}
+	store := &stateStore{
+		client: client, prefix: strings.TrimSuffix(prefix, ":"), now: time.Now,
+		retention: retention,
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := client.Ping(ctx).Err(); err != nil {
@@ -156,6 +170,42 @@ func (store *stateStore) projectionBase(kind, identity string) string {
 
 func (store *stateStore) projectionMarker(kind string) string {
 	return store.prefix + ":projection:{" + kind + "}"
+}
+
+func encodeRedisJSON(value any) ([]byte, error) {
+	plain, err := json.Marshal(value)
+	if err != nil {
+		return nil, err
+	}
+	var encoded bytes.Buffer
+	writer, err := gzip.NewWriterLevel(&encoded, gzip.BestSpeed)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := writer.Write(plain); err != nil {
+		_ = writer.Close()
+		return nil, err
+	}
+	if err := writer.Close(); err != nil {
+		return nil, err
+	}
+	return encoded.Bytes(), nil
+}
+
+func decodeRedisJSON(encoded []byte, target any) error {
+	reader, err := gzip.NewReader(bytes.NewReader(encoded))
+	if err != nil {
+		return err
+	}
+	plain, readErr := io.ReadAll(reader)
+	closeErr := reader.Close()
+	if readErr != nil {
+		return readErr
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	return json.Unmarshal(plain, target)
 }
 
 const commitOrderScript = `
@@ -235,7 +285,7 @@ func (store *stateStore) ApplyOrder(
 		var encodedDeadline []byte
 		if saga != nil {
 			nextVersion = saga.Version
-			sagaJSON, err = json.Marshal(saga)
+			sagaJSON, err = encodeRedisJSON(saga)
 			if err != nil {
 				return transitionOutcome{}, fmt.Errorf("encode checkout saga: %w", err)
 			}
@@ -243,20 +293,20 @@ func (store *stateStore) ApplyOrder(
 				deadlineMode = "set"
 				deadlineMillis = saga.Deadline.UTC().UnixMilli()
 				record := newDeadlineRecord(saga)
-				encodedDeadline, err = json.Marshal(record)
+				encodedDeadline, err = encodeRedisJSON(record)
 				if err != nil {
 					return transitionOutcome{}, fmt.Errorf("encode checkout deadline: %w", err)
 				}
 			}
 			if accepted == nil && expected == 0 {
 				accepted = acceptedFromState(orderID, state, saga)
-				acceptedJSON, err = json.Marshal(accepted)
+				acceptedJSON, err = encodeRedisJSON(accepted)
 				if err != nil {
 					return transitionOutcome{}, fmt.Errorf("encode accepted order: %w", err)
 				}
 			}
 		}
-		journal, err := json.Marshal(state.Results)
+		journal, err := encodeRedisJSON(state.Results)
 		if err != nil {
 			return transitionOutcome{}, fmt.Errorf("encode checkout result journal: %w", err)
 		}
@@ -267,7 +317,7 @@ func (store *stateStore) ApplyOrder(
 		}
 		response, err := store.client.Eval(context.Background(), commitOrderScript, keys,
 			inputKey, expected, nextVersion, sagaJSON, acceptedJSON, journal,
-			resultJournalRetention.Milliseconds(), deadlineMode, deadlineMillis, orderID, encodedDeadline).Result()
+			store.retention.Milliseconds(), deadlineMode, deadlineMillis, orderID, encodedDeadline).Result()
 		if err != nil {
 			if stateless.ClassifyRetry(err) == stateless.RetryDependency && attempt+1 < redisTransactionRetries {
 				time.Sleep(stateless.Backoff(attempt, time.Millisecond, 100*time.Millisecond))
@@ -301,7 +351,7 @@ func (store *stateStore) ApplyOrder(
 		}
 		results := []resultMessage{}
 		if len(stored) > 0 {
-			if err := json.Unmarshal(stored, &results); err != nil {
+			if err := decodeRedisJSON(stored, &results); err != nil {
 				return transitionOutcome{}, fmt.Errorf("decode checkout result journal: %w", err)
 			}
 		}
@@ -364,7 +414,7 @@ func (store *stateStore) loadOrderWorkspace(orderID string, at time.Time, base *
 	}
 	if len(encoded) > 0 {
 		saga := &orderSaga{}
-		if err := json.Unmarshal(encoded, saga); err != nil {
+		if err := decodeRedisJSON(encoded, saga); err != nil {
 			return nil, 0, nil, fmt.Errorf("decode checkout saga: %w", err)
 		}
 		state.Orders[orderID] = saga
@@ -376,7 +426,7 @@ func (store *stateStore) loadOrderWorkspace(orderID string, at time.Time, base *
 	}
 	if len(encoded) > 0 {
 		accepted = &acceptedOrderRecord{}
-		if err := json.Unmarshal(encoded, accepted); err != nil {
+		if err := decodeRedisJSON(encoded, accepted); err != nil {
 			return nil, 0, nil, fmt.Errorf("decode accepted order: %w", err)
 		}
 		state.Rates = cloneRates(accepted.Rates)
@@ -446,7 +496,7 @@ type productProjection struct {
 }
 
 func (store *stateStore) applyProjectionValue(base string, version uint64, value any) error {
-	encoded, err := json.Marshal(value)
+	encoded, err := encodeRedisJSON(value)
 	if err != nil {
 		return err
 	}
@@ -589,7 +639,7 @@ func (store *stateStore) loadJSONBatch(loads []redisJSONLoad) error {
 		if commandErr != nil {
 			return commandErr
 		}
-		if err := json.Unmarshal(value, loads[index].target); err != nil {
+		if err := decodeRedisJSON(value, loads[index].target); err != nil {
 			return fmt.Errorf("decode projection %s: %w", loads[index].base, err)
 		}
 	}
@@ -637,7 +687,7 @@ func (store *stateStore) LoadDeadline(orderID string) (*deadlineRecord, []byte, 
 		return nil, nil, err
 	}
 	record := &deadlineRecord{}
-	if err := json.Unmarshal(value, record); err != nil {
+	if err := decodeRedisJSON(value, record); err != nil {
 		return nil, nil, fmt.Errorf("decode checkout deadline: %w", err)
 	}
 	return record, value, nil

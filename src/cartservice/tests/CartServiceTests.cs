@@ -86,6 +86,29 @@ public sealed class CartServiceTests
     }
 
     [Fact]
+    public async Task ConfiguredRedisRetentionIsAppliedToResultJournals()
+    {
+        var backend = new FakeAtomicAggregateStore();
+        var retention = TimeSpan.FromMinutes(10);
+        var metrics = new CartMetrics();
+        var store = new RedisAggregateCartStore(
+            backend,
+            new FakeProductCatalog(true),
+            metrics,
+            NullLogger<RedisAggregateCartStore>.Instance,
+            resultRetention: retention);
+        var processor = new CartCommandProcessor(store, metrics);
+        var command = AddCommand("command-retention", "user-retention", 1);
+
+        await processor.HandleAddItemAsync(
+            command,
+            Envelope(command, "boutique.cart.AddItem.v1", 0),
+            (_, _) => Task.CompletedTask);
+
+        Assert.Equal(retention, backend.LastJournalRetention);
+    }
+
+    [Fact]
     public async Task ConcurrentAddCommandsBothCommitAfterInternalConflictRetry()
     {
         var backend = new FakeAtomicAggregateStore();
@@ -455,6 +478,7 @@ public sealed class CartServiceTests
         public int LoadCalls { get; private set; }
         public int LoadResultCalls { get; private set; }
         public int CommitCalls { get; private set; }
+        public TimeSpan? LastJournalRetention { get; private set; }
         private bool _failedAfterCommit;
 
         public Task<AtomicAggregateSnapshot> LoadAsync(
@@ -499,6 +523,7 @@ public sealed class CartServiceTests
             lock (_gate)
             {
                 CommitCalls++;
+                LastJournalRetention = request.JournalRetention;
                 var key = (request.AggregateId, request.InputMessageId);
                 var current = Current(request.AggregateId);
                 if (_journals.TryGetValue(key, out var existing))

@@ -7,3 +7,4 @@ resources:
 - ../single-replica-base
 components:
 - ../components/no-tracing
+- ../components/redis-retention
