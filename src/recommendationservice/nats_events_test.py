@@ -4,11 +4,11 @@
 
 import asyncio
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from nats.js.errors import NoKeysError, ServiceUnavailableError
 
-from nats_events import _NATSCatalogStore, _consume, _ready, _stop
+from nats_events import _NATSCatalogStore, _consume, _ready, _run, _stop
 
 
 class Message:
@@ -118,6 +118,46 @@ class StreamingConsumerTests(unittest.IsolatedAsyncioTestCase):
       await _consume(FailedSubscription(), lambda _message: None)
 
     self.assertFalse(_ready.is_set())
+
+  async def test_worker_uses_bounded_reconnects_for_supervised_recovery(self):
+    connection = MagicMock()
+    connection.is_closed = False
+    connection.close = AsyncMock()
+    jetstream = connection.jetstream.return_value
+    bucket = AsyncMock()
+    jetstream.key_value = AsyncMock(return_value=bucket)
+
+    with (
+        patch.dict(
+            "os.environ",
+            {
+                "NATS_REQUIRED": "true",
+                "NATS_URL": "tls://nats:4222",
+                "NATS_USER": "user",
+                "NATS_PASSWORD": "password",
+                "NATS_CA_FILE": "/ca.crt",
+                "REGION_ID": "local",
+                "K8S_CLUSTER_NAME": "test",
+            },
+            clear=True,
+        ),
+        patch("nats_events.ssl.create_default_context"),
+        patch(
+            "nats_events.nats.connect",
+            AsyncMock(return_value=connection),
+        ) as connect,
+        patch("nats_events.ensure_catalog_index", AsyncMock()),
+        patch("nats_events._durable", AsyncMock(return_value=MagicMock())),
+        patch(
+            "nats_events._consume",
+            AsyncMock(side_effect=RuntimeError("interrupted")),
+        ),
+    ):
+      with self.assertRaisesRegex(RuntimeError, "interrupted"):
+        await _run()
+
+    self.assertEqual(3, connect.await_args.kwargs["max_reconnect_attempts"])
+    connection.close.assert_awaited_once()
 
 
 if __name__ == "__main__":

@@ -159,6 +159,9 @@ metadata:
   name: online-boutique-benchmark-runner
 rules:
 - apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list"]
+- apiGroups: [""]
   resources: ["nodes"]
   verbs: ["get", "list"]
 - apiGroups: [""]

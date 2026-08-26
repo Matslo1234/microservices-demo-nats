@@ -12,6 +12,9 @@ metadata:
   name: online-boutique-benchmarkmetrics
 rules:
 - apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list"]
+- apiGroups: [""]
   resources: ["nodes"]
   verbs: ["get", "list"]
 - apiGroups: [""]
@@ -65,6 +68,18 @@ spec:
           value: "8080"
         - name: APPLICATION_TYPE
           value: "NATS"
+        - name: NATS_CONNECT_TIMEOUT
+          value: "4s"
+        - name: NATS_METRICS_CACHE_INTERVAL_SECONDS
+          value: "1"
+        - name: KUBERNETES_METRICS_CACHE_INTERVAL_SECONDS
+          value: "5"
+        - name: KUBERNETES_METRICS_SNAPSHOT_DEADLINE_SECONDS
+          value: "4"
+        - name: KUBERNETES_METRICS_WORKERS
+          value: "8"
+        - name: CADVISOR_SAMPLE_INTERVAL_SECONDS
+          value: "30"
         - name: BENCHMARK_METRICS_TOKEN
           valueFrom:
             secretKeyRef:
@@ -93,11 +108,11 @@ spec:
           periodSeconds: 10
         resources:
           requests:
-            cpu: 25m
+            cpu: 100m
             memory: 48Mi
           limits:
-            cpu: 200m
-            memory: 128Mi
+            cpu: 500m
+            memory: 256Mi
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:

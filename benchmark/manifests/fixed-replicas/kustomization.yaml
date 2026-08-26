@@ -7,5 +7,6 @@ resources:
 - ../../../kubernetes-manifests
 components:
 - ../components/benchmark-resources
+- ../components/disable-clustered-redis-rdb
 - ../components/no-tracing
 - ../components/redis-retention

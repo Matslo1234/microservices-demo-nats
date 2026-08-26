@@ -18,7 +18,7 @@
 # NATS configuration before applying this bundle. Benchmark run state and
 # artifacts use its JetStream stores while runner workloads execute as
 # disposable Kubernetes Jobs:
-#   kubectl apply -k kubernetes-manifests/nats/fresh-cluster
+#   kubectl apply -k kubernetes-manifests/nats/benchmark
 #   kubectl -n nats rollout status deployment/nats-setup --timeout=5m
 #   kubectl -n nats rollout status statefulset/nats --timeout=10m
 #   kubectl -n nats wait --for=condition=complete job/nats-global-bootstrap --timeout=10m
@@ -416,6 +416,10 @@ spec:
           privileged: false
           readOnlyRootFilesystem: true
         image: redis:alpine
+        args:
+        - redis-server
+        - --save
+        - ""
         ports:
         - containerPort: 6379
         readinessProbe:
@@ -1011,7 +1015,7 @@ spec:
             app: benchmarkservice
       containers:
       - name: server
-        image: matslo123/benchmarkservice:v0.5.0@sha256:9c79b9f4229a715c1b9e5ddd3e1e3d0f0cd9730880b649b67bf3d6addf216a86
+        image: matslo123/benchmarkservice:v0.5.0@sha256:ecc951e4811a7b0b188776c94507d2da871d5b4030c3323c73ff44609caf6a36
         env:
         - name: PORT
           value: "8080"
@@ -1164,7 +1168,7 @@ spec:
           type: RuntimeDefault
       containers:
       - name: server
-        image: matslo123/benchmarkservice:v0.5.0@sha256:9c79b9f4229a715c1b9e5ddd3e1e3d0f0cd9730880b649b67bf3d6addf216a86
+        image: matslo123/benchmarkservice:v0.5.0@sha256:ecc951e4811a7b0b188776c94507d2da871d5b4030c3323c73ff44609caf6a36
         imagePullPolicy: IfNotPresent
         command: ["python", "metrics_server.py"]
         env:

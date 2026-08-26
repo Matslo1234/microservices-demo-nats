@@ -174,15 +174,6 @@ class BenchmarkConfig:
         resource_sample_interval_seconds = _number(
             values, "resource_sample_interval_seconds", 5.0, 1.0, 60.0
         )
-        if (
-            workload == "saturation"
-            and collect_nats_metrics
-            and resource_sample_interval_seconds > 5.0
-        ):
-            raise ConfigError(
-                "resource_sample_interval_seconds must be no more than 5 "
-                "for NATS saturation workloads"
-            )
 
         saturation_start_rate = _number(
             values,

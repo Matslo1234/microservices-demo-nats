@@ -374,7 +374,13 @@ async def _run():
         tls=tls_context,
         connect_timeout=_duration("NATS_CONNECT_TIMEOUT", 2),
         reconnect_time_wait=_duration("NATS_RECONNECT_WAIT", 2),
-        max_reconnect_attempts=_integer("NATS_MAX_RECONNECTS", -1),
+        # Let this connection try a few quick reconnects, then return control
+        # to _thread_main.  An unlimited nats-py reconnect can remain stuck on
+        # a transport created while the node network was unavailable.  The
+        # outer supervisor is the unbounded retry mechanism and rebuilds the
+        # connection, JetStream context, KV handle, and durable consumers.
+        max_reconnect_attempts=_integer(
+            "NATS_WORKER_RECONNECT_ATTEMPTS", 3),
         ping_interval=_duration("NATS_PING_INTERVAL", 20),
         max_outstanding_pings=_integer("NATS_MAX_PINGS_OUT", 2),
         allow_reconnect=True,
@@ -414,7 +420,12 @@ async def _run():
             consumer.cancel()
         await asyncio.gather(*consumers, return_exceptions=True)
         if not _connection.is_closed:
-            await _connection.drain()
+            # This path means at least one consumer failed.  Do not drain a
+            # damaged connection: drain waits for pending protocol traffic and
+            # delayed recovery by its full timeout during the benchmark
+            # outage.  Durable messages which were not acked will be
+            # redelivered after the supervisor reconnects.
+            await _connection.close()
 
 
 def _thread_main():

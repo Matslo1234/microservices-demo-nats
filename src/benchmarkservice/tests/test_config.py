@@ -302,16 +302,18 @@ class BenchmarkConfigTest(unittest.TestCase):
         self.assertEqual(10, config.saturation_start_rate)
         self.assertEqual(10, config.saturation_step_seconds)
 
-    def test_nats_saturation_requires_frequent_pending_samples(self):
-        with self.assertRaisesRegex(ConfigError, "no more than 5"):
-            BenchmarkConfig.from_request(
-                {
-                    **self.URLS,
-                    "workload": "saturation",
-                    "resource_sample_interval_seconds": 10,
-                },
-                "NATS",
-            )
+    def test_nats_saturation_allows_one_metrics_sample_per_rung(self):
+        config = BenchmarkConfig.from_request(
+            {
+                **self.URLS,
+                "workload": "saturation",
+                "saturation_step_seconds": 30,
+                "resource_sample_interval_seconds": 30,
+            },
+            "NATS",
+        )
+
+        self.assertEqual(30, config.resource_sample_interval_seconds)
 
     def test_minimum_spawn_rate_remains_valid_after_ten_way_split(self):
         config = BenchmarkConfig.from_request(

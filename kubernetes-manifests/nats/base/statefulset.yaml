@@ -93,14 +93,26 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       affinity:
-        podAntiAffinity:
+        nodeAffinity:
           preferredDuringSchedulingIgnoredDuringExecution:
           - weight: 100
-            podAffinityTerm:
-              topologyKey: kubernetes.io/hostname
-              labelSelector:
-                matchLabels:
-                  app.kubernetes.io/name: nats
+            preference:
+              matchExpressions:
+              - key: eks.amazonaws.com/nodegroup
+                operator: In
+                values:
+                - nats-group
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - topologyKey: kubernetes.io/hostname
+            labelSelector:
+              matchLabels:
+                app.kubernetes.io/name: nats
+      tolerations:
+      - key: dedicated
+        operator: Equal
+        value: nats
+        effect: NoSchedule
       topologySpreadConstraints:
       - maxSkew: 1
         topologyKey: kubernetes.io/hostname

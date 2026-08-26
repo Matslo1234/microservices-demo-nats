@@ -35,6 +35,27 @@ func (future *testPubAckFuture) Err() <-chan error { return future.err }
 
 func (future *testPubAckFuture) Msg() *nats.Msg { return future.message }
 
+type checkoutJetStreamStub struct {
+	nats.JetStreamContext
+	consumers map[string]*nats.ConsumerInfo
+	added     *nats.ConsumerConfig
+}
+
+func (stub *checkoutJetStreamStub) ConsumerInfo(_ string, consumer string, _ ...nats.JSOpt) (*nats.ConsumerInfo, error) {
+	info := stub.consumers[consumer]
+	if info == nil {
+		return nil, nats.ErrConsumerNotFound
+	}
+	return info, nil
+}
+
+func (stub *checkoutJetStreamStub) AddConsumer(_ string, config *nats.ConsumerConfig, _ ...nats.JSOpt) (*nats.ConsumerInfo, error) {
+	copy := *config
+	copy.FilterSubjects = append([]string(nil), config.FilterSubjects...)
+	stub.added = &copy
+	return &nats.ConsumerInfo{Config: copy}, nil
+}
+
 func TestCheckoutConsumerTerminalErrorsRestartWorker(t *testing.T) {
 	for _, err := range []error{nats.ErrBadSubscription, nats.ErrSubscriptionClosed, nats.ErrConsumerDeleted, nats.ErrNoResponders} {
 		if !checkoutConsumerTerminal(err) {
@@ -53,22 +74,51 @@ func TestCheckoutDeadlineScanInterval(t *testing.T) {
 }
 
 func TestCheckoutWorkflowConsumerFilters(t *testing.T) {
-	if !checkoutConsumerFiltersMatch("", checkoutShippingSagaSubjects, checkoutShippingSagaSubjects) {
-		t.Fatal("shipping saga filters do not match themselves")
+	if !checkoutConsumerFiltersMatch("", checkoutShippingQuoteSagaSubjects, checkoutShippingQuoteSagaSubjects) {
+		t.Fatal("shipping quote saga filters do not match themselves")
 	}
-	if checkoutConsumerFiltersMatch("boutique.evt.shipping.>", nil, checkoutShippingSagaSubjects) {
-		t.Fatal("legacy broad shipping filter unexpectedly matches optimized filters")
+	if !checkoutConsumerFiltersMatch("", checkoutShipmentSagaSubjects, checkoutShipmentSagaSubjects) {
+		t.Fatal("shipment saga filters do not match themselves")
+	}
+	if checkoutConsumerFiltersMatch("boutique.evt.shipping.>", nil, checkoutShippingQuoteSagaSubjects) {
+		t.Fatal("legacy broad shipping filter unexpectedly matches quote filters")
+	}
+	if checkoutConsumerFiltersMatch("boutique.evt.shipping.>", nil, checkoutShipmentSagaSubjects) {
+		t.Fatal("legacy broad shipping filter unexpectedly matches shipment filters")
 	}
 	if !checkoutConsumerFiltersMatch(
-		checkoutPaymentSagaSubjects[0],
+		checkoutPaymentAuthorizationSagaSubjects[0],
 		nil,
-		[]string{checkoutPaymentSagaSubjects[0]},
+		[]string{checkoutPaymentAuthorizationSagaSubjects[0]},
 	) {
 		t.Fatal("single-subject consumer filter did not match")
 	}
+	for _, quoteSubject := range checkoutShippingQuoteSagaSubjects {
+		if isCheckoutShipmentEvent(quoteSubject) {
+			t.Errorf("quote subject %q also enters the shipment handler", quoteSubject)
+		}
+	}
+	for _, shipmentSubject := range checkoutShipmentSagaSubjects {
+		if isCheckoutShippingQuoteEvent(shipmentSubject) {
+			t.Errorf("shipment subject %q also enters the quote handler", shipmentSubject)
+		}
+	}
+	for _, authorizationSubject := range checkoutPaymentAuthorizationSagaSubjects {
+		if isCheckoutPaymentLateStageEvent(authorizationSubject) {
+			t.Errorf("authorization subject %q also enters the late-stage payment handler", authorizationSubject)
+		}
+	}
+	for _, lateStageSubject := range checkoutPaymentLateStageSagaSubjects {
+		if isCheckoutPaymentAuthorizationEvent(lateStageSubject) {
+			t.Errorf("late-stage payment subject %q also enters the authorization handler", lateStageSubject)
+		}
+	}
 	for _, subject := range append(
-		append([]string(nil), checkoutShippingSagaSubjects...),
-		checkoutPaymentSagaSubjects...,
+		append(
+			append(append([]string(nil), checkoutShippingQuoteSagaSubjects...), checkoutShipmentSagaSubjects...),
+			checkoutPaymentAuthorizationSagaSubjects...,
+		),
+		checkoutPaymentLateStageSagaSubjects...,
 	) {
 		if !isCheckoutSagaEvent(subject) {
 			t.Errorf("configured workflow subject %q is not handled", subject)
@@ -76,6 +126,79 @@ func TestCheckoutWorkflowConsumerFilters(t *testing.T) {
 	}
 	if isCheckoutSagaEvent("boutique.evt.shipping.cart-quote-updated.v1") {
 		t.Fatal("cart quote event unexpectedly enters the order saga")
+	}
+}
+
+func TestCheckoutSplitConsumerStartsAfterLegacyAcknowledgementFloor(t *testing.T) {
+	jetStream := &checkoutJetStreamStub{consumers: map[string]*nats.ConsumerInfo{
+		"checkout-saga-shipping-v1": {AckFloor: nats.SequenceInfo{Stream: 4321}},
+	}}
+	worker := &checkoutWorker{js: jetStream}
+	definition := checkoutConsumerDefinition{
+		filters: checkoutShippingQuoteSagaSubjects, durable: "checkout-saga-shipping-quote-v1",
+		stream: "BOUTIQUE_EVENTS", maxPending: checkoutWorkflowMaxPending,
+		migrationSource: "checkout-saga-shipping-v1",
+	}
+
+	if err := worker.ensureConsumer(definition); err != nil {
+		t.Fatal(err)
+	}
+	if jetStream.added == nil {
+		t.Fatal("split consumer was not created")
+	}
+	if got, want := jetStream.added.DeliverPolicy, nats.DeliverByStartSequencePolicy; got != want {
+		t.Fatalf("delivery policy = %v, want %v", got, want)
+	}
+	if got, want := jetStream.added.OptStartSeq, uint64(4322); got != want {
+		t.Fatalf("start sequence = %d, want %d", got, want)
+	}
+}
+
+func TestCheckoutSplitConsumerReplaysWhenLegacyConsumerIsAbsent(t *testing.T) {
+	jetStream := &checkoutJetStreamStub{consumers: map[string]*nats.ConsumerInfo{}}
+	worker := &checkoutWorker{js: jetStream}
+	definition := checkoutConsumerDefinition{
+		filters: checkoutShippingQuoteSagaSubjects, durable: "checkout-saga-shipping-quote-v1",
+		stream: "BOUTIQUE_EVENTS", maxPending: checkoutWorkflowMaxPending,
+		migrationSource: "checkout-saga-shipping-v1",
+	}
+
+	if err := worker.ensureConsumer(definition); err != nil {
+		t.Fatal(err)
+	}
+	if jetStream.added == nil {
+		t.Fatal("split consumer was not created")
+	}
+	if got, want := jetStream.added.DeliverPolicy, nats.DeliverAllPolicy; got != want {
+		t.Fatalf("delivery policy = %v, want %v", got, want)
+	}
+}
+
+func TestCheckoutPaymentAuthorizationConsumerStartsAfterLegacyAcknowledgementFloor(t *testing.T) {
+	jetStream := &checkoutJetStreamStub{consumers: map[string]*nats.ConsumerInfo{
+		"checkout-saga-payment-v1": {AckFloor: nats.SequenceInfo{Stream: 9876}},
+	}}
+	worker := &checkoutWorker{js: jetStream}
+	definition := checkoutConsumerDefinition{
+		filters: checkoutPaymentAuthorizationSagaSubjects, durable: "checkout-saga-payment-authorization-v1",
+		stream: "BOUTIQUE_EVENTS", maxPending: checkoutWorkflowMaxPending,
+		migrationSource: "checkout-saga-payment-v1",
+	}
+
+	if err := worker.ensureConsumer(definition); err != nil {
+		t.Fatal(err)
+	}
+	if jetStream.added == nil {
+		t.Fatal("payment authorization consumer was not created")
+	}
+	if got, want := jetStream.added.DeliverPolicy, nats.DeliverByStartSequencePolicy; got != want {
+		t.Fatalf("delivery policy = %v, want %v", got, want)
+	}
+	if got, want := jetStream.added.OptStartSeq, uint64(9877); got != want {
+		t.Fatalf("start sequence = %d, want %d", got, want)
+	}
+	if !checkoutConsumerFiltersMatch("", jetStream.added.FilterSubjects, checkoutPaymentAuthorizationSagaSubjects) {
+		t.Fatalf("authorization filters = %v, want %v", jetStream.added.FilterSubjects, checkoutPaymentAuthorizationSagaSubjects)
 	}
 }
 

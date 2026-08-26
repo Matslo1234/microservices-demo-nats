@@ -1,0 +1,19 @@
+# Copyright 2026 Google LLC
+# Licensed under the Apache License, Version 2.0 (the "License");
+
+# Benchmark runs retain JetStream persistence but suspend the scheduled account
+# backup so it cannot add background I/O while measurements are in progress.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- ../fresh-cluster
+patches:
+- target:
+    group: batch
+    version: v1
+    kind: CronJob
+    name: nats-backup
+  patch: |-
+    - op: add
+      path: /spec/suspend
+      value: true

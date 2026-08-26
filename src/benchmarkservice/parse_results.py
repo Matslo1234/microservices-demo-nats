@@ -141,6 +141,37 @@ def saturation_points(
     pending_points: list[tuple[float, float]] = []
     p95_latency_points: list[tuple[float, float]] = []
     is_nats = str(result.summary.get("application_type", "")).upper() == "NATS"
+    pending_series = _nested(
+        result.summary, "nats", "consumer_pending", "series"
+    )
+    parsed_pending_series: list[tuple[float, float]] = []
+    if is_nats and isinstance(pending_series, list):
+        for index, sample in enumerate(pending_series):
+            if not isinstance(sample, dict):
+                raise ResultError(
+                    f"{result.path}: nats.consumer_pending.series[{index}] "
+                    "must be an object"
+                )
+            parsed_pending_series.append(
+                (
+                    _number(
+                        sample.get("elapsed_seconds"),
+                        (
+                            f"nats.consumer_pending.series[{index}]."
+                            "elapsed_seconds"
+                        ),
+                        result.path,
+                    ),
+                    _number(
+                        sample.get("waiting_events"),
+                        (
+                            f"nats.consumer_pending.series[{index}]."
+                            "waiting_events"
+                        ),
+                        result.path,
+                    ),
+                )
+            )
     for index, rung in enumerate(rungs):
         if not isinstance(rung, dict):
             raise ResultError(
@@ -203,16 +234,60 @@ def saturation_points(
             )
 
         if is_nats:
-            pending_points.append(
-                (
-                    rate,
-                    _number(
-                        _nested(rung, "nats", "consumer_pending", "max"),
-                        f"saturation.rungs[{index}].nats.consumer_pending.max",
+            pending_max = _nested(rung, "nats", "consumer_pending", "max")
+            if pending_max is None:
+                pending_candidates = [
+                    value
+                    for value in (
+                        rung.get("pending_start"),
+                        rung.get("pending_end"),
+                    )
+                    if value is not None
+                ]
+                started = rung.get("started_elapsed_seconds")
+                ended = rung.get("ended_elapsed_seconds")
+                if started is not None and ended is not None:
+                    started_number = _number(
+                        started,
+                        f"saturation.rungs[{index}].started_elapsed_seconds",
                         result.path,
-                    ),
+                    )
+                    ended_number = _number(
+                        ended,
+                        f"saturation.rungs[{index}].ended_elapsed_seconds",
+                        result.path,
+                    )
+                    pending_candidates.extend(
+                        waiting_events
+                        for elapsed_seconds, waiting_events in parsed_pending_series
+                        if started_number <= elapsed_seconds <= ended_number
+                    )
+                if pending_candidates:
+                    pending_max = max(
+                        _number(
+                            value,
+                            f"saturation.rungs[{index}].pending events",
+                            result.path,
+                        )
+                        for value in pending_candidates
+                    )
+
+            # NATS metrics can legitimately be entirely unavailable for a
+            # rung. Such a rung still contains valid business measurements.
+            if pending_max is not None:
+                pending_points.append(
+                    (
+                        rate,
+                        _number(
+                            pending_max,
+                            (
+                                f"saturation.rungs[{index}].nats."
+                                "consumer_pending.max"
+                            ),
+                            result.path,
+                        ),
+                    )
                 )
-            )
 
     return (
         sorted(submitted_goodput_points),
@@ -286,6 +361,53 @@ def fault_tolerance_points(
     return sorted(successful_points), sorted(queued_points)
 
 
+def fault_tolerance_markers(
+    result: Result,
+) -> list[tuple[float, str, str]]:
+    faults = _nested(result.summary, "fault_tolerance", "faults")
+    if faults is None:
+        return []
+    if not isinstance(faults, list):
+        raise ResultError(f"{result.path}: fault_tolerance.faults must be a list")
+
+    service_colors = {
+        "paymentservice": "red",
+        "shippingservice": "orange",
+    }
+    markers: list[tuple[float, str, str]] = []
+    for index, fault in enumerate(faults):
+        if not isinstance(fault, dict):
+            raise ResultError(
+                f"{result.path}: fault_tolerance.faults[{index}] "
+                "must be an object"
+            )
+        service = str(fault.get("service", "")).lower()
+        color = service_colors.get(service)
+        if color is None:
+            continue
+        for field_name, action in (
+            ("disabled_at_elapsed_seconds", "disabled"),
+            ("reenabled_at_elapsed_seconds", "enabled"),
+        ):
+            value = fault.get(field_name)
+            if value is None:
+                continue
+            elapsed_seconds = _number(
+                value,
+                f"fault_tolerance.faults[{index}].{field_name}",
+                result.path,
+            )
+            if elapsed_seconds < 0:
+                raise ResultError(
+                    f"{result.path}: fault_tolerance.faults[{index}]."
+                    f"{field_name} must not be negative"
+                )
+            markers.append(
+                (elapsed_seconds, f"{service} {action}", color)
+            )
+    return markers
+
+
 def _axis_limit(maximum: float, *, headroom: float = 1.0) -> float:
     """Return an axis limit whose five evenly spaced ticks are integers."""
     target = maximum * headroom
@@ -300,6 +422,7 @@ def write_png_chart(
     y_label: str,
     x_label: str = "Št. naročil na sekundo",
     error_bars: list[tuple[float, float]] | None = None,
+    vertical_lines: list[tuple[float, str, str]] | None = None,
 ) -> None:
     _write_png_series_chart(
         destination,
@@ -308,6 +431,7 @@ def write_png_chart(
         y_label=y_label,
         x_label=x_label,
         error_bars=error_bars,
+        vertical_lines=vertical_lines,
         show_legend=False,
     )
 
@@ -346,6 +470,7 @@ def _write_png_series_chart(
     y_label: str,
     x_label: str,
     error_bars: list[tuple[float, float]] | None = None,
+    vertical_lines: list[tuple[float, str, str]] | None = None,
     show_legend: bool,
 ) -> None:
     populated_series = [item for item in series if item[1]]
@@ -372,8 +497,20 @@ def _write_png_series_chart(
             f"cannot create {destination}: error bars must match points "
             "and be finite and non-negative"
         )
+    if vertical_lines is not None and any(
+        position < 0 or not math.isfinite(position)
+        for position, _, _ in vertical_lines
+    ):
+        raise ResultError(
+            f"cannot create {destination}: vertical lines must be finite "
+            "and non-negative"
+        )
 
     maximum_x = max(point[0] for point in all_points)
+    if vertical_lines:
+        maximum_x = max(
+            maximum_x, max(position for position, _, _ in vertical_lines)
+        )
     maximum_y = max(point[1] for point in all_points)
     if error_bars:
         maximum_y = max(
@@ -426,7 +563,17 @@ def _write_png_series_chart(
             label=label or None,
             zorder=3,
         )
-    if show_legend:
+    if vertical_lines:
+        for position, label, color in vertical_lines:
+            axes.axvline(
+                position,
+                color=color,
+                linestyle="--",
+                linewidth=2,
+                label=label,
+                zorder=2,
+            )
+    if show_legend or vertical_lines:
         axes.legend(loc="center left", bbox_to_anchor=(1.02, 0.5))
 
     figure.savefig(
@@ -481,6 +628,7 @@ def write_saturation_graphs(result: Result) -> list[Path]:
 
 def write_fault_tolerance_graphs(result: Result) -> list[Path]:
     successful, queued = fault_tolerance_points(result)
+    markers = fault_tolerance_markers(result)
     base = result.path.with_suffix("")
     successful_path = base.with_name(f"{base.name}_successful_requests.png")
     write_png_chart(
@@ -489,6 +637,7 @@ def write_fault_tolerance_graphs(result: Result) -> list[Path]:
         title=f"{result.path.stem}: successfully processed requests",
         x_label="Elapsed time (s)",
         y_label="Successful requests/s",
+        vertical_lines=markers,
     )
     outputs = [successful_path]
     if queued:
@@ -499,6 +648,7 @@ def write_fault_tolerance_graphs(result: Result) -> list[Path]:
             title=f"{result.path.stem}: queued NATS events",
             x_label="Elapsed time (s)",
             y_label="Queued events",
+            vertical_lines=markers,
         )
         outputs.append(queued_path)
     return outputs

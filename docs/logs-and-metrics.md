@@ -199,6 +199,28 @@ availability, connection counts, message rates, storage, quorum, consumer
 pending messages, acknowledgement backlog, and redeliveries. Application
 services do not reproduce those broker metrics.
 
+Checkout shipping- and payment-stage lag must be inspected by durable consumer,
+because early- and late-stage responses intentionally have independent handler
+capacity:
+
+```promql
+max by (consumer_name) (
+  jetstream_consumer_num_pending{
+    account="BOUTIQUE",
+    consumer_name=~"checkout-saga-(shipping(-quote)?|payment(-authorization)?)-v1",
+    is_consumer_leader="true"
+  }
+)
+```
+
+`checkout-saga-shipping-quote-v1` reports quote-response pressure;
+`checkout-saga-shipping-v1` reports shipment creation/cancellation pressure.
+`checkout-saga-payment-authorization-v1` reports authorization-response
+pressure; `checkout-saga-payment-v1` reports capture and release pressure.
+Growth in either late-stage durable can directly delay completed-order events.
+The benchmark HPA recording rule sums all four queues for checkout scaling,
+while keeping the `consumer_name` series available for stage-level diagnosis.
+
 ### Prometheus discovery, storage, and rules
 
 [`prometheus.yaml`](../kubernetes-manifests/observability/prometheus.yaml) runs

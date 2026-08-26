@@ -77,7 +77,7 @@ spec:
           - name: NATS_REQUIRED
             value: "true"
           - name: NATS_REQUIRED_SUBSCRIPTIONS
-            value: "checkout-catalog-v1,checkout-currency-v1,checkout-cart-v1,checkout-order-commands-v1,checkout-saga-shipping-v1,checkout-saga-payment-v1"
+            value: "checkout-catalog-v1,checkout-currency-v1,checkout-cart-v1,checkout-order-commands-v1,checkout-saga-shipping-quote-v1,checkout-saga-shipping-v1,checkout-saga-payment-authorization-v1,checkout-saga-payment-v1"
           - name: CHECKOUT_REDIS_ADDR
             value: redis-checkout-cluster:6379
           - name: CHECKOUT_REDIS_MODE

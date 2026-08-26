@@ -9,3 +9,20 @@ components:
 - ../components/benchmark-resources
 - ../components/no-tracing
 - ../components/redis-retention
+patches:
+- target:
+    group: apps
+    version: v1
+    kind: StatefulSet
+    name: redis-cart-cluster|redis-checkout-cluster
+  patch: |-
+    - op: replace
+      path: /spec/template/spec/containers/0/args/0
+      value: |-
+        exec redis-server \
+          --bind 0.0.0.0 \
+          --protected-mode no \
+          --port 6379 \
+          --appendonly yes \
+          --appendfsync always \
+          --save ""

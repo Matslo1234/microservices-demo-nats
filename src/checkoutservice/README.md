@@ -5,6 +5,44 @@ next event for an order because each saga, immutable accepted-order snapshot,
 applied-input result journal, and deadline record is stored in the
 checkout-owned Redis Cluster.
 
+## Workflow consumers
+
+Checkout isolates workflow stages that have different load behavior:
+
+| Durable consumer | Subjects | Handler |
+| --- | --- | --- |
+| `checkout-saga-shipping-quote-v1` | `boutique.evt.shipping.order-quote-calculated.v1`, `boutique.evt.shipping.order-quote-failed.v1` | Shipping quote response handler |
+| `checkout-saga-shipping-v1` | Shipment creation/cancellation success and failure subjects | Shipment response handler |
+| `checkout-saga-payment-authorization-v1` | Authorization success and decline subjects | Payment authorization response handler |
+| `checkout-saga-payment-v1` | Capture and authorization-release success and failure subjects | Late-stage payment response handler |
+| `checkout-order-commands-v1` | `boutique.cmd.order.submit.v1` | Order admission handler |
+
+Every durable owns a separate pull loop and 32-lane processing pool. Messages
+for one aggregate remain ordered within that consumer, while unrelated orders
+can use different lanes. Separating quote and shipment responses prevents the
+continuous quote rate from occupying the same handler capacity as shipment
+responses. Separating authorization from capture responses likewise reserves
+an independent processing pool for capture outcomes, which emit
+`boutique.evt.order.completed.v1`.
+
+Workflow response consumers start before the order-command consumer. During an
+upgrade from a combined consumer, each new early-stage durable is created first
+at its legacy durable's acknowledgement floor; only then is the legacy durable
+narrowed to late-stage outcomes. For shipping, the new quote durable migrates
+from `checkout-saga-shipping-v1`; for payment, the new authorization durable
+migrates from `checkout-saga-payment-v1`, whose cursor remains attached to
+capture and release outcomes. This prevents a filter gap and avoids replaying
+all historical early-stage events. Any overlap can deliver a duplicate, which
+the Redis input journal handles safely. On a fresh or recovery deployment where
+the legacy consumer is absent, the new durable uses `DeliverAll` so retained
+responses are not skipped.
+
+Readiness must include both members of each shipping and payment split.
+Autoscaling aggregates their pending counts, but operators should inspect each
+consumer independently when diagnosing overload: quote and authorization
+backlogs indicate early-stage pressure, whereas shipment and capture/release
+backlogs can directly suppress completed-order throughput.
+
 ## Redis storage format
 
 Redis schema version 3 changes every checkout JSON payload—sagas, immutable

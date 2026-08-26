@@ -73,9 +73,11 @@ The architecture uses five interaction styles:
 
 Commands and events use the protobuf envelope and identity conventions in
 [`development/nats-message-conventions.md`](development/nats-message-conventions.md).
-Durable consumers acknowledge only after their state/inbox/outbox commit. A
-stable `Nats-Msg-Id` makes publish retries safe, while consumer inboxes and
-provider outcome stores make delivery retries idempotent.
+Durable consumers acknowledge only after their owning state/input decision is
+committed and every required result publication is acknowledged. A stable
+`Nats-Msg-Id` makes publish retries safe, while consumer inboxes, exact result
+journals, and deterministic provider outcomes make delivery retries
+idempotent.
 
 ### Frontend reads and writes
 
@@ -118,7 +120,7 @@ they operate on the complete cart state.
 | `cartservice` | `boutique.cmd.cart.>` and catalog facts | Redis-authoritative carts; cart success/rejection facts |
 | `recommendationservice` | Catalog, cart and page-view facts | Recommendation selection facts |
 | `adservice` | Page-view facts | Ad selection facts |
-| `checkoutservice` | Order command plus catalog/currency/cart/payment/shipping facts | Stateless workers over shared Redis saga/projection/inbox/outbox state; order lifecycle and downstream commands |
+| `checkoutservice` | Order command plus catalog/currency/cart/payment/shipping facts | Stateless workers over shared Redis saga/projection/inbox/result-journal state; order lifecycle and downstream commands |
 | `shippingservice` | Shipping commands and cart facts | Deterministic fake-provider outcomes and shipping facts; no pod-owned provider state |
 | `paymentservice` | Tokenization query and payment commands | Key-ID-addressed short-lived tokens, deterministic signed provider references, and payment facts |
 | `emailservice` | Completed-order facts | Order/notification-keyed deterministic provider result and notification facts |
@@ -134,13 +136,46 @@ These buckets are derived state and can be deleted and rebuilt by replaying
 `BOUTIQUE_EVENTS`. Domain owner snapshots provide the current catalog and
 currency baselines before consumers become ready.
 
-Checkout workers attach to the same durable consumers and use optimistic Redis
-transactions. Every transition reloads committed shared state and atomically
-commits the input inbox record, saga/projection changes, and outbox entries.
+Checkout replicas compete on the same set of durable consumers and use
+optimistic Redis transactions. Every transition reloads committed shared state
+and atomically commits the input inbox record, saga/projection changes, and the
+exact result journal.
 Consequently, the pod that processes a shipping result does not need to be the
 pod that processed the preceding payment or order event. Transaction conflicts
 are retried, and duplicate deliveries observe the shared inbox before applying
 another transition.
+
+Shipping and payment responses are deliberately divided into early- and
+late-stage durable consumers:
+
+| Durable consumer | Filtered outcomes | Checkout responsibility |
+| --- | --- | --- |
+| `checkout-saga-shipping-quote-v1` | `order-quote-calculated`, `order-quote-failed` | Advance or reject `WAITING_FOR_QUOTE` orders |
+| `checkout-saga-shipping-v1` | `shipment-created`, `shipment-creation-failed`, `shipment-cancelled`, `shipment-cancellation-failed` | Advance `WAITING_FOR_SHIPMENT` orders and finish shipment compensation |
+| `checkout-saga-payment-authorization-v1` | `authorized`, `authorization-declined` | Advance or cancel `WAITING_FOR_AUTHORIZATION` orders |
+| `checkout-saga-payment-v1` | Capture and authorization-release outcomes | Complete `WAITING_FOR_CAPTURE` orders and finish payment compensation |
+
+Each durable has an independent pull loop and aggregate-ordered processing
+pool. Quote ingress therefore cannot consume the processing slots needed by
+shipment outcomes that unlock capture and completion. Authorization ingress
+likewise cannot consume the slots reserved for capture outcomes, which publish
+completed-order events. These separations matter under open-loop overload:
+early responses arrive approximately with newly accepted orders, while later
+responses represent work that has already passed preceding saga stages. A
+combined queue had to process both rates; once their sum exceeded its capacity,
+new early-stage traffic delayed later-stage traffic and completed-order event
+throughput fell even though order acceptance remained high. That fall is
+visible in the independent `boutique.evt.order.completed.v1` observer and is
+distinct from the benchmark's per-order outcome timeout, which only changes how
+the client classifies an unfinished submission.
+
+The legacy `checkout-saga-shipping-v1` and `checkout-saga-payment-v1` names are
+retained for shipment and late-stage payment outcomes, respectively, so their
+cursors and pending late-stage work survive the cutover. On the first split
+deployment, checkout creates each early-stage consumer at its legacy consumer's
+acknowledged stream position before narrowing the legacy filter. The temporary
+overlap is safe because the shared Redis inbox is idempotent. If no legacy
+consumer exists, the new consumer uses retained-event replay instead.
 
 ### Dead-letter and replay flow
 
@@ -178,13 +213,19 @@ sequenceDiagram
     C->>N: shipping.calculate-order-quote
     N->>S: Durable shipping command
     S->>N: quote result fact
+    N->>C: Quote-response durable
     C->>N: payment.authorize
     N->>P: Durable payment command
     P->>N: authorization result fact
+    N->>C: Payment-authorization durable
     C->>N: shipping.create-shipment
+    N->>S: Durable shipping command
     S->>N: shipment result fact
+    N->>C: Shipment-response durable
     C->>N: payment.capture
+    N->>P: Durable payment command
     P->>N: capture result fact
+    N->>C: Late-stage payment durable
     C->>N: order.completed + cart.clear
     N->>E: completed-order fact
     E->>N: notification result fact
@@ -217,6 +258,12 @@ a business message. Prometheus scrapes `/metrics`, including
 ack-pending, and redelivery counts. Alerts cover consumer lag, acknowledgement
 backlog, unavailable dependencies, storage, server quorum, dead-letter cases,
 and failed DLQ transfers.
+
+Checkout readiness requires both members of the shipping and payment splits,
+and the checkout HPA lag record includes all their pending counts. For
+saturation diagnosis, inspect the consumers separately: aggregate checkout lag
+shows scaling pressure, while the individual early- and late-stage series show
+which saga stage is falling behind.
 
 The default namespace has default-deny ingress and egress. Application pods can
 reach DNS, NATS, optional OTLP, and only their explicit local dependency

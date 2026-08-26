@@ -57,24 +57,25 @@ type storefrontCartItemView struct {
 }
 
 type storefrontQueryResponse struct {
-	Products        []storefrontProductView  `json:"products"`
-	Product         *storefrontProductView   `json:"product"`
-	ProductMeta     []*pb.Product            `json:"product_meta"`
-	Items           []storefrontCartItemView `json:"items"`
-	Currencies      []string                 `json:"currencies"`
-	Recommendations []*pb.Product            `json:"recommendations"`
-	Ad              *pb.Ad                   `json:"ad"`
-	ShippingCost    *pb.Money                `json:"shipping_cost"`
-	ShippingPending bool                     `json:"shipping_pending"`
-	CartSize        int                      `json:"cart_size"`
-	CartVersion     uint64                   `json:"cart_version"`
-	CatalogRevision uint64                   `json:"catalog_revision"`
-	RateRevision    uint64                   `json:"rate_revision"`
-	UpdatedAt       time.Time                `json:"updated_at"`
-	Stale           []string                 `json:"stale"`
-	Operation       *cartOperation           `json:"operation"`
-	Order           *orderStatus             `json:"order"`
-	Error           string                   `json:"error"`
+	Products          []storefrontProductView  `json:"products"`
+	Product           *storefrontProductView   `json:"product"`
+	ProductMeta       []*pb.Product            `json:"product_meta"`
+	Items             []storefrontCartItemView `json:"items"`
+	Currencies        []string                 `json:"currencies"`
+	Recommendations   []*pb.Product            `json:"recommendations"`
+	Ad                *pb.Ad                   `json:"ad"`
+	ShippingCost      *pb.Money                `json:"shipping_cost"`
+	ShippingPending   bool                     `json:"shipping_pending"`
+	CartSize          int                      `json:"cart_size"`
+	CartVersion       uint64                   `json:"cart_version"`
+	CatalogRevision   uint64                   `json:"catalog_revision"`
+	RateRevision      uint64                   `json:"rate_revision"`
+	UpdatedAt         time.Time                `json:"updated_at"`
+	Stale             []string                 `json:"stale"`
+	Operation         *cartOperation           `json:"operation"`
+	Order             *orderStatus             `json:"order"`
+	Error             string                   `json:"error"`
+	RetryAfterSeconds int                      `json:"retry_after_seconds"`
 }
 
 func connectFrontendNATS(regionalConfig frontendRegionalConfig) (*nats.Conn, nats.JetStreamContext, time.Duration, time.Duration, error) {

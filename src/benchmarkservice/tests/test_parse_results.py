@@ -12,6 +12,7 @@ from parse_results import (
     Result,
     ResultError,
     collect_closed_nats_waiting_series,
+    fault_tolerance_markers,
     find_results,
     main,
     process_folder,
@@ -275,6 +276,61 @@ class ParseResultsTest(unittest.TestCase):
 
         self.assertEqual([(20.0, 17.5)], processed)
 
+    def test_parses_saturation_when_nats_metrics_are_unavailable(self) -> None:
+        summary = self._saturation_summary("NATS")
+        for rung in summary["saturation"]["rungs"]:
+            rung["nats"] = {
+                "available": False,
+                "reason": "no steady-state samples",
+            }
+
+        submitted, processed, pending, latency = saturation_points(
+            Result(path=Path("summary.json"), summary=summary)
+        )
+
+        self.assertEqual([(10.0, 9.5), (20.0, 18.5)], submitted)
+        self.assertEqual([(10.0, 9.2), (20.0, 17.5)], processed)
+        self.assertEqual([], pending)
+        self.assertEqual([(10.0, 125.0), (20.0, 250.0)], latency)
+
+    def test_derives_saturation_pending_maxima_from_top_level_series(self) -> None:
+        summary = self._saturation_summary("NATS")
+        first, second = summary["saturation"]["rungs"]
+        first.update(
+            {
+                "started_elapsed_seconds": 30.2,
+                "ended_elapsed_seconds": 60.2,
+                "pending_start": 1,
+                "pending_end": 3,
+                "nats": {"available": False},
+            }
+        )
+        second.update(
+            {
+                "started_elapsed_seconds": 60.3,
+                "ended_elapsed_seconds": 90.3,
+                "pending_start": 3,
+                "pending_end": 8,
+                "nats": {"available": False},
+            }
+        )
+        summary["nats"] = {
+            "consumer_pending": {
+                "series": [
+                    {"elapsed_seconds": 31, "waiting_events": 2},
+                    {"elapsed_seconds": 45, "waiting_events": 7},
+                    {"elapsed_seconds": 61, "waiting_events": 5},
+                    {"elapsed_seconds": 75, "waiting_events": 11},
+                ]
+            }
+        }
+
+        _, _, pending, _ = saturation_points(
+            Result(path=Path("summary.json"), summary=summary)
+        )
+
+        self.assertEqual([(10.0, 7.0), (20.0, 11.0)], pending)
+
     def test_writes_single_rung_nats_saturation_pngs(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             folder = Path(temporary)
@@ -340,6 +396,23 @@ class ParseResultsTest(unittest.TestCase):
             )
             for output in outputs:
                 self.assert_png(output)
+
+    def test_fault_tolerance_markers_use_service_colors(self) -> None:
+        summary = self._fault_tolerance_summary("NATS")
+
+        markers = fault_tolerance_markers(
+            Result(Path("fault-summary.json"), summary)
+        )
+
+        self.assertEqual(
+            [
+                (0.2, "paymentservice disabled", "red"),
+                (0.4, "paymentservice enabled", "red"),
+                (0.6, "shippingservice disabled", "orange"),
+                (0.8, "shippingservice enabled", "orange"),
+            ],
+            markers,
+        )
 
     def test_rejects_folder_without_result_summaries(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -510,6 +583,18 @@ class ParseResultsTest(unittest.TestCase):
             "workload": "fault_tolerance",
             "business": {"submitted": 20, "completed": 17},
             "fault_tolerance": {
+                "faults": [
+                    {
+                        "service": "paymentservice",
+                        "disabled_at_elapsed_seconds": 0.2,
+                        "reenabled_at_elapsed_seconds": 0.4,
+                    },
+                    {
+                        "service": "shippingservice",
+                        "disabled_at_elapsed_seconds": 0.6,
+                        "reenabled_at_elapsed_seconds": 0.8,
+                    },
+                ],
                 "per_second": [
                     {
                         "elapsed_seconds": 0,

@@ -10,7 +10,7 @@
 #
 # A default dynamic StorageClass is required.
 # Install and wait for NATS before applying this benchmark bundle:
-#   kubectl apply -k kubernetes-manifests/nats/fresh-cluster
+#   kubectl apply -k kubernetes-manifests/nats/benchmark
 #   kubectl -n nats rollout status deployment/nats-setup --timeout=5m
 #   kubectl -n nats rollout status statefulset/nats --timeout=10m
 #   kubectl -n nats wait --for=condition=complete job/nats-global-bootstrap --timeout=10m
@@ -119,6 +119,13 @@ kind: ClusterRole
 metadata:
   name: online-boutique-benchmark-runner
 rules:
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  verbs:
+  - get
+  - list
 - apiGroups:
   - ""
   resources:
@@ -599,7 +606,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-benchmarkservice
-        image: matslo123/benchmarkservice:v0.4.0@sha256:9c79b9f4229a715c1b9e5ddd3e1e3d0f0cd9730880b649b67bf3d6addf216a86
+        image: matslo123/benchmarkservice:v0.4.0@sha256:ecc951e4811a7b0b188776c94507d2da871d5b4030c3323c73ff44609caf6a36
         livenessProbe:
           httpGet:
             path: /healthz
@@ -826,7 +833,7 @@ spec:
         - name: NATS_REQUIRED
           value: "true"
         - name: NATS_REQUIRED_SUBSCRIPTIONS
-          value: checkout-catalog-v1,checkout-currency-v1,checkout-cart-v1,checkout-order-commands-v1,checkout-saga-shipping-v1,checkout-saga-payment-v1
+          value: checkout-catalog-v1,checkout-currency-v1,checkout-cart-v1,checkout-order-commands-v1,checkout-saga-shipping-quote-v1,checkout-saga-shipping-v1,checkout-saga-payment-authorization-v1,checkout-saga-payment-v1
         - name: CHECKOUT_REDIS_ADDR
           value: redis-checkout-cluster:6379
         - name: CHECKOUT_REDIS_MODE
@@ -862,7 +869,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-checkoutservice
-        image: matslo123/checkoutservice:v0.4.0@sha256:be8734683306bf87782b63caa9438043bc963fd3f94474e89be6dc98133ef080
+        image: matslo123/checkoutservice:v0.4.0@sha256:ee7b5fed8dcf83c447a67dfe46c33c6593983af1953e82492889199c4891550b
         livenessProbe:
           httpGet:
             path: /healthz
@@ -1270,7 +1277,7 @@ spec:
             name: nats-credentials-frontend
         - secretRef:
             name: global-application-secrets
-        image: matslo123/frontend:v0.4.0@sha256:476d4e2e2d50a56242c372770798ec63445b7033841b889f34a833462388b174
+        image: matslo123/frontend:v0.4.0@sha256:91926f976936706a21c9aed6bbfbe923b4430a0aa803892088c6e877a9e08b45
         livenessProbe:
           failureThreshold: 6
           httpGet:
@@ -1786,7 +1793,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-recommendationservice
-        image: matslo123/recommendationservice:v0.4.0@sha256:50a8d612442bd7415d7e247c3acf318af0773cfda704b3146719d3559b8cbac4
+        image: matslo123/recommendationservice:v0.4.0@sha256:9bfef53c8e0ca086f44780a7e6a030885de4932a727f40690f5414d097d78805
         livenessProbe:
           failureThreshold: 6
           httpGet:
@@ -2012,7 +2019,13 @@ spec:
         - name: GOMEMLIMIT
           value: 400MiB
         - name: STOREFRONT_QUERY_CONCURRENCY
-          value: "8"
+          value: "16"
+        - name: STOREFRONT_QUERY_MAX_IN_FLIGHT
+          value: "12"
+        - name: STOREFRONT_QUERY_PENDING_MESSAGES
+          value: "512"
+        - name: STOREFRONT_QUERY_PENDING_BYTES
+          value: "2097152"
         - name: STOREFRONT_CART_CACHE_ENTRIES
           value: "32768"
         - name: STOREFRONT_CONTEXT_CACHE_ENTRIES
@@ -2038,7 +2051,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-storefrontprojectionservice
-        image: matslo123/storefrontprojectionservice:v0.4.0@sha256:ed0852a966f21f106532648920318b617d8d6923ef8062009b7fd78220b63355
+        image: matslo123/storefrontprojectionservice:v0.4.0@sha256:0a51671d6e0502d7bd68ef2034bdb5697d20d020f5edfe2a0110af993e09b382
         livenessProbe:
           failureThreshold: 6
           httpGet:
@@ -2058,7 +2071,7 @@ spec:
           timeoutSeconds: 5
         resources:
           limits:
-            cpu: "2"
+            cpu: "4"
             memory: 2Gi
           requests:
             cpu: 400m
@@ -2116,14 +2129,14 @@ spec:
     spec:
       containers:
       - args:
-        - |
+        - |-
           exec redis-server \
             --bind 0.0.0.0 \
             --protected-mode no \
             --port 6379 \
             --appendonly yes \
             --appendfsync always \
-            --save 3600 1 \
+            --save "" \
             --cluster-enabled yes \
             --cluster-config-file /data/nodes.conf \
             --cluster-node-timeout 5000 \
@@ -2294,14 +2307,14 @@ spec:
     spec:
       containers:
       - args:
-        - |
+        - |-
           exec redis-server \
             --bind 0.0.0.0 \
             --protected-mode no \
             --port 6379 \
             --appendonly yes \
             --appendfsync always \
-            --save 3600 1 \
+            --save "" \
             --cluster-enabled yes \
             --cluster-config-file /data/nodes.conf \
             --cluster-node-timeout 5000 \
@@ -3199,6 +3212,13 @@ rules:
 - apiGroups:
   - ""
   resources:
+  - pods
+  verbs:
+  - get
+  - list
+- apiGroups:
+  - ""
+  resources:
   - nodes
   verbs:
   - get
@@ -3265,6 +3285,18 @@ spec:
           value: "8080"
         - name: APPLICATION_TYPE
           value: NATS
+        - name: NATS_CONNECT_TIMEOUT
+          value: 4s
+        - name: NATS_METRICS_CACHE_INTERVAL_SECONDS
+          value: "1"
+        - name: KUBERNETES_METRICS_CACHE_INTERVAL_SECONDS
+          value: "5"
+        - name: KUBERNETES_METRICS_SNAPSHOT_DEADLINE_SECONDS
+          value: "4"
+        - name: KUBERNETES_METRICS_WORKERS
+          value: "8"
+        - name: CADVISOR_SAMPLE_INTERVAL_SECONDS
+          value: "30"
         - name: BENCHMARK_METRICS_TOKEN
           valueFrom:
             secretKeyRef:
@@ -3276,7 +3308,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-benchmarkservice
-        image: matslo123/benchmarkservice:v0.4.0@sha256:9c79b9f4229a715c1b9e5ddd3e1e3d0f0cd9730880b649b67bf3d6addf216a86
+        image: matslo123/benchmarkservice:v0.4.0@sha256:ecc951e4811a7b0b188776c94507d2da871d5b4030c3323c73ff44609caf6a36
         imagePullPolicy: IfNotPresent
         livenessProbe:
           httpGet:
@@ -3296,10 +3328,10 @@ spec:
           periodSeconds: 5
         resources:
           limits:
-            cpu: 200m
-            memory: 128Mi
+            cpu: 500m
+            memory: 256Mi
           requests:
-            cpu: 25m
+            cpu: 100m
             memory: 48Mi
         securityContext:
           allowPrivilegeEscalation: false

@@ -4,14 +4,16 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import math
 import os
 import re
 import ssl
 import threading
+import time
 import uuid
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import Any
 from urllib.request import Request, urlopen
@@ -117,15 +119,37 @@ class KubernetesSummaryClient:
         ca_path = Path("/var/run/secrets/kubernetes.io/serviceaccount/ca.crt")
         self.token = token_path.read_text(encoding="utf-8").strip()
         self.context = ssl.create_default_context(cafile=str(ca_path))
-        self.nodes = self._node_names()
+        self.request_timeout = float(
+            os.environ.get("KUBERNETES_METRICS_REQUEST_TIMEOUT_SECONDS", "2")
+        )
+        self.snapshot_deadline = float(
+            os.environ.get("KUBERNETES_METRICS_SNAPSHOT_DEADLINE_SECONDS", "4")
+        )
+        workers = int(os.environ.get("KUBERNETES_METRICS_WORKERS", "8"))
+        self._executor = ThreadPoolExecutor(
+            max_workers=max(1, min(workers, 32)),
+            thread_name_prefix="benchmark-kube-metrics",
+        )
+        self._cached_nodes: list[str] = []
+        self.cadvisor_interval = float(
+            os.environ.get("CADVISOR_SAMPLE_INTERVAL_SECONDS", "30")
+        )
+        self.cadvisor_enabled = os.environ.get(
+            "COLLECT_CADVISOR_METRICS", "true"
+        ).lower() not in {"0", "false", "no"}
+        self._last_cadvisor = 0.0
+        self._cadvisor_cache: dict[str, dict[str, int | float]] = {}
         self.errors: list[str] = []
+        self.diagnostics: dict[str, Any] = {}
 
     def _request(self, path: str) -> Any:
         request = Request(
             self.base_url + path,
             headers={"Authorization": f"Bearer {self.token}"},
         )
-        return urlopen(request, timeout=3, context=self.context)
+        return urlopen(
+            request, timeout=self.request_timeout, context=self.context
+        )
 
     def _get(self, path: str) -> dict[str, Any]:
         with self._request(path) as response:
@@ -140,55 +164,139 @@ class KubernetesSummaryClient:
         with self._request(path) as response:
             return response.read().decode("utf-8", errors="replace")
 
-    def _node_names(self) -> list[str]:
-        value = self._get("/api/v1/nodes")
-        return [
-            str(item.get("metadata", {}).get("name"))
-            for item in value.get("items", [])
-            if item.get("metadata", {}).get("name")
-        ]
+    def _relevant_nodes(self) -> list[str]:
+        value = self._get("/api/v1/pods")
+        nodes: set[str] = set()
+        for item in value.get("items", []):
+            metadata = item.get("metadata", {})
+            namespace = str(metadata.get("namespace", ""))
+            name = str(metadata.get("name", ""))
+            if service_for_pod(
+                namespace,
+                name,
+                self.application_type,
+                self.application_namespace,
+                self.nats_namespace,
+            ) is None:
+                continue
+            node = str(item.get("spec", {}).get("nodeName", ""))
+            if node:
+                nodes.add(node)
+        discovered = sorted(nodes)
+        if discovered:
+            self._cached_nodes = discovered
+        return discovered or list(self._cached_nodes)
 
-    def sample(self) -> dict[str, dict[str, Any]]:
+    def _sample_node(
+        self, node: str, collect_cadvisor: bool
+    ) -> tuple[dict[str, dict[str, Any]], list[str]]:
         pods: dict[str, dict[str, Any]] = {}
-        self.errors = []
-        for node in self.nodes:
-            summary = self._get(
-                f"/api/v1/nodes/{node}/proxy/stats/summary"
+        errors: list[str] = []
+        summary = self._get(f"/api/v1/nodes/{node}/proxy/stats/summary")
+        for pod in summary.get("pods", []):
+            reference = pod.get("podRef", {})
+            namespace = str(reference.get("namespace", ""))
+            name = str(reference.get("name", ""))
+            service = service_for_pod(
+                namespace,
+                name,
+                self.application_type,
+                self.application_namespace,
+                self.nats_namespace,
             )
-            for pod in summary.get("pods", []):
-                reference = pod.get("podRef", {})
-                namespace = str(reference.get("namespace", ""))
-                name = str(reference.get("name", ""))
-                service = service_for_pod(
-                    namespace,
-                    name,
-                    self.application_type,
-                    self.application_namespace,
-                    self.nats_namespace,
-                )
-                if service is None:
-                    continue
-                network = pod.get("network", {})
-                pods[f"{namespace}/{name}"] = {
-                    "service": service,
-                    "node": node,
-                    "cpu_usage_core_nanoseconds": int(
-                        pod.get("cpu", {}).get("usageCoreNanoSeconds", 0)
-                    ),
-                    "memory_working_set_bytes": int(
-                        pod.get("memory", {}).get("workingSetBytes", 0)
-                    ),
-                    "network_rx_bytes": int(network.get("rxBytes", 0)),
-                    "network_tx_bytes": int(network.get("txBytes", 0)),
-                }
+            if service is None:
+                continue
+            network = pod.get("network", {})
+            pods[f"{namespace}/{name}"] = {
+                "service": service,
+                "node": node,
+                "cpu_usage_core_nanoseconds": int(
+                    pod.get("cpu", {}).get("usageCoreNanoSeconds", 0)
+                ),
+                "memory_working_set_bytes": int(
+                    pod.get("memory", {}).get("workingSetBytes", 0)
+                ),
+                "network_rx_bytes": int(network.get("rxBytes", 0)),
+                "network_tx_bytes": int(network.get("txBytes", 0)),
+            }
+        if collect_cadvisor:
             try:
                 body = self._get_text(
                     f"/api/v1/nodes/{node}/proxy/metrics/cadvisor"
                 )
                 add_cadvisor_metrics(pods, body, node)
             except Exception as error:
-                self.errors.append(f"{node} cAdvisor: {error}")
+                errors.append(f"{node} cAdvisor: {error}")
+        return pods, errors
+
+    def sample(self) -> dict[str, dict[str, Any]]:
+        started = time.monotonic()
+        pods: dict[str, dict[str, Any]] = {}
+        self.errors = []
+        try:
+            nodes = self._relevant_nodes()
+        except Exception as error:
+            nodes = list(self._cached_nodes)
+            self.errors.append(f"pod discovery: {error}")
+        collect_cadvisor = self.cadvisor_enabled and (
+            started - self._last_cadvisor >= self.cadvisor_interval
+        )
+        if collect_cadvisor:
+            self._last_cadvisor = started
+        futures = {
+            self._executor.submit(self._sample_node, node, collect_cadvisor): node
+            for node in nodes
+        }
+        remaining = max(0.0, self.snapshot_deadline - (time.monotonic() - started))
+        completed, unfinished = wait(futures, timeout=remaining)
+        for future in completed:
+            node = futures[future]
+            try:
+                node_pods, errors = future.result()
+                pods.update(node_pods)
+                self.errors.extend(errors)
+            except Exception as error:
+                self.errors.append(f"{node}: {error}")
+        for future in unfinished:
+            future.cancel()
+            self.errors.append(
+                f"{futures[future]}: snapshot deadline exceeded"
+            )
+        base_fields = {
+            "service",
+            "node",
+            "cpu_usage_core_nanoseconds",
+            "memory_working_set_bytes",
+            "network_rx_bytes",
+            "network_tx_bytes",
+        }
+        if collect_cadvisor:
+            for pod_key, pod in pods.items():
+                counters = {
+                    key: value
+                    for key, value in pod.items()
+                    if key not in base_fields
+                    and isinstance(value, (int, float))
+                    and not isinstance(value, bool)
+                }
+                if counters:
+                    self._cadvisor_cache[pod_key] = counters
+        for pod_key, pod in pods.items():
+            for key, value in self._cadvisor_cache.get(pod_key, {}).items():
+                pod.setdefault(key, value)
+        duration = time.monotonic() - started
+        self.diagnostics = {
+            "duration_seconds": round(duration, 6),
+            "nodes_requested": len(nodes),
+            "nodes_completed": len(completed),
+            "nodes_timed_out": len(unfinished),
+            "cadvisor_collected": collect_cadvisor,
+            "partial": bool(self.errors),
+        }
         return pods
+
+    def close(self) -> None:
+        self._executor.shutdown(wait=False, cancel_futures=True)
 
 
 def parse_labels(raw: str) -> dict[str, str]:
@@ -231,9 +339,18 @@ def parse_prometheus(
     return metrics
 
 
-def scrape_prometheus(url: str) -> list[dict[str, Any]]:
+def scrape_prometheus(
+    url: str, timeout: float | None = None
+) -> list[dict[str, Any]]:
     request = Request(url, headers={"Accept": "text/plain"})
-    with urlopen(request, timeout=3) as response:
+    with urlopen(
+        request,
+        timeout=(
+            timeout
+            if timeout is not None
+            else float(os.environ.get("NATS_METRICS_REQUEST_TIMEOUT_SECONDS", "2"))
+        ),
+    ) as response:
         body = response.read().decode("utf-8", errors="replace")
     return parse_prometheus(body, NATS_METRICS, url)
 
@@ -336,10 +453,10 @@ class NatsMicroStatsClient:
 
     def __init__(self) -> None:
         self.response_timeout = float(
-            os.environ.get("NATS_MICRO_STATS_TIMEOUT_SECONDS", "0.25")
+            os.environ.get("NATS_MICRO_STATS_TIMEOUT_SECONDS", "0.5")
         )
         self.connect_timeout = float(
-            os.environ.get("NATS_CONNECT_TIMEOUT", "2s").rstrip("s")
+            os.environ.get("NATS_CONNECT_TIMEOUT", "4s").rstrip("s")
         )
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(
@@ -513,45 +630,148 @@ class ClusterMetricsCollector:
             if self.application_type == "NATS" and os.environ.get("NATS_URL")
             else None
         )
+        self.snapshot_deadline = float(
+            os.environ.get("METRICS_SNAPSHOT_DEADLINE_SECONDS", "5")
+        )
+        self.nats_deadline = float(
+            os.environ.get("NATS_METRICS_SNAPSHOT_DEADLINE_SECONDS", "3")
+        )
+        self._source_executor = ThreadPoolExecutor(
+            max_workers=2, thread_name_prefix="benchmark-metrics-source"
+        )
+        self._nats_executor = ThreadPoolExecutor(
+            max_workers=max(1, len(self.nats_urls) + 2),
+            thread_name_prefix="benchmark-nats-exporter",
+        )
+
+    def _collect_kubernetes(self) -> dict[str, Any]:
+        started_at = time.time()
+        started = time.monotonic()
+        value: dict[str, Any] = {"pods": {}, "errors": []}
+        try:
+            value["pods"] = self.kubernetes.sample()
+            value["errors"].extend(
+                str(error) for error in getattr(self.kubernetes, "errors", [])
+            )
+        except Exception as error:
+            value["errors"].append(str(error))
+        value["sample"] = {
+            "requested_at": started_at,
+            "collected_at": time.time(),
+            "duration_seconds": round(time.monotonic() - started, 6),
+            "diagnostics": copy.deepcopy(
+                getattr(self.kubernetes, "diagnostics", {})
+            ),
+            "partial": bool(value["errors"]),
+        }
+        return value
+
+    def _collect_nats(self) -> dict[str, Any]:
+        started_at = time.time()
+        started = time.monotonic()
+        value: dict[str, Any] = {
+            "nats_metrics": [],
+            "nats_micro_endpoints": [],
+            "nats_order_completed_observer": None,
+            "errors": [],
+        }
+        futures: dict[Future[Any], tuple[str, str]] = {
+            self._nats_executor.submit(scrape_prometheus, url): (
+                "exporter",
+                url,
+            )
+            for url in self.nats_urls
+        }
+        if self.nats_micro is not None:
+            futures[self._nats_executor.submit(self.nats_micro.sample)] = (
+                "micro",
+                "micro stats",
+            )
+            futures[
+                self._nats_executor.submit(
+                    self.nats_micro.order_completed_sample
+                )
+            ] = ("observer", "completed-order count")
+        completed, unfinished = wait(futures, timeout=self.nats_deadline)
+        for future in completed:
+            kind, endpoint = futures[future]
+            try:
+                response = future.result()
+                if kind == "exporter":
+                    value["nats_metrics"].extend(response)
+                elif kind == "micro":
+                    value["nats_micro_endpoints"] = response
+                else:
+                    value["nats_order_completed_observer"] = response
+            except Exception as error:
+                value["errors"].append(f"{endpoint}: {error}")
+        for future in unfinished:
+            future.cancel()
+            value["errors"].append(
+                f"{futures[future][1]}: NATS snapshot deadline exceeded"
+            )
+        value["sample"] = {
+            "requested_at": started_at,
+            "collected_at": time.time(),
+            "duration_seconds": round(time.monotonic() - started, 6),
+            "requests": len(futures),
+            "requests_completed": len(completed),
+            "requests_timed_out": len(unfinished),
+            "partial": bool(value["errors"]),
+        }
+        return value
 
     def snapshot(self) -> dict[str, Any]:
+        requested_at = time.time()
+        started = time.monotonic()
         result: dict[str, Any] = {
             "pods": {},
             "nats_metrics": [],
             "nats_micro_endpoints": [],
             "nats_order_completed_observer": None,
             "errors": [],
+            "source_samples": {},
         }
-        try:
-            result["pods"] = self.kubernetes.sample()
-            result["errors"].extend(
-                f"kubernetes: {error}"
-                for error in getattr(self.kubernetes, "errors", [])
-            )
-        except Exception as error:
-            result["errors"].append(f"kubernetes: {error}")
+        futures = {
+            self._source_executor.submit(self._collect_kubernetes): "kubernetes"
+        }
         if self.application_type == "NATS":
-            for url in self.nats_urls:
-                try:
-                    result["nats_metrics"].extend(scrape_prometheus(url))
-                except Exception as error:
-                    result["errors"].append(f"{url}: {error}")
-            if self.nats_micro is not None:
-                try:
-                    result["nats_micro_endpoints"] = self.nats_micro.sample()
-                except Exception as error:
-                    result["errors"].append(f"nats micro stats: {error}")
-                try:
-                    result["nats_order_completed_observer"] = (
-                        self.nats_micro.order_completed_sample()
-                    )
-                except Exception as error:
-                    result["errors"].append(
-                        f"NATS completed-order count: {error}"
-                    )
+            futures[self._source_executor.submit(self._collect_nats)] = "nats"
+        completed, unfinished = wait(futures, timeout=self.snapshot_deadline)
+        for future in completed:
+            source = futures[future]
+            try:
+                value = future.result()
+            except Exception as error:
+                result["errors"].append(f"{source}: {error}")
+                continue
+            result["source_samples"][source] = value.pop("sample")
+            for error in value.pop("errors", []):
+                result["errors"].append(f"{source}: {error}")
+            result.update(value)
+        for future in unfinished:
+            source = futures[future]
+            future.cancel()
+            result["errors"].append(
+                f"{source}: whole-snapshot deadline exceeded"
+            )
+        result["snapshot"] = {
+            "requested_at": requested_at,
+            "completed_at": time.time(),
+            "duration_seconds": round(time.monotonic() - started, 6),
+            "sources_completed": sorted(futures[future] for future in completed),
+            "sources_timed_out": sorted(futures[future] for future in unfinished),
+        }
         return result
 
     def nats_order_completed_sample(self) -> dict[str, Any] | None:
         if self.nats_micro is None:
             return None
         return self.nats_micro.order_completed_sample()
+
+    def close(self) -> None:
+        self.kubernetes.close()
+        self._source_executor.shutdown(wait=False, cancel_futures=True)
+        self._nats_executor.shutdown(wait=False, cancel_futures=True)
+        if self.nats_micro is not None:
+            self.nats_micro.close()

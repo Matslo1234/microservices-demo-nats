@@ -27,10 +27,8 @@ import (
 var errInvalidCurrency = errors.New("invalid currency")
 
 const (
-	browseQueryRole              = "browse"
-	trackingQueryRole            = "tracking"
-	queryEndpointPendingMessages = 128
-	queryEndpointPendingBytes    = 1024 * 1024
+	browseQueryRole   = "browse"
+	trackingQueryRole = "tracking"
 )
 
 var queryNamesByRole = map[string][]string{
@@ -62,25 +60,47 @@ type cartItemView struct {
 }
 
 type queryResponse struct {
-	Products        []localizedProduct        `json:"products,omitempty"`
-	Product         *localizedProduct         `json:"product,omitempty"`
-	ProductMeta     []*hipstershop.Product    `json:"product_meta,omitempty"`
-	Items           []cartItemView            `json:"items,omitempty"`
-	Currencies      []string                  `json:"currencies,omitempty"`
-	Recommendations []*hipstershop.Product    `json:"recommendations,omitempty"`
-	Ad              *hipstershop.Ad           `json:"ad,omitempty"`
-	ShippingCost    *hipstershop.Money        `json:"shipping_cost,omitempty"`
-	ShippingPending bool                      `json:"shipping_pending,omitempty"`
-	CartSize        int                       `json:"cart_size"`
-	CartVersion     uint64                    `json:"cart_version"`
-	CatalogRevision uint64                    `json:"catalog_revision"`
-	RateRevision    uint64                    `json:"rate_revision"`
-	QueryRevision   uint64                    `json:"query_revision"`
-	UpdatedAt       time.Time                 `json:"updated_at"`
-	Stale           []string                  `json:"stale,omitempty"`
-	Operation       *storefront.OperationView `json:"operation,omitempty"`
-	Order           *storefront.OrderView     `json:"order,omitempty"`
-	Error           string                    `json:"error,omitempty"`
+	Products          []localizedProduct        `json:"products,omitempty"`
+	Product           *localizedProduct         `json:"product,omitempty"`
+	ProductMeta       []*hipstershop.Product    `json:"product_meta,omitempty"`
+	Items             []cartItemView            `json:"items,omitempty"`
+	Currencies        []string                  `json:"currencies,omitempty"`
+	Recommendations   []*hipstershop.Product    `json:"recommendations,omitempty"`
+	Ad                *hipstershop.Ad           `json:"ad,omitempty"`
+	ShippingCost      *hipstershop.Money        `json:"shipping_cost,omitempty"`
+	ShippingPending   bool                      `json:"shipping_pending,omitempty"`
+	CartSize          int                       `json:"cart_size"`
+	CartVersion       uint64                    `json:"cart_version"`
+	CatalogRevision   uint64                    `json:"catalog_revision"`
+	RateRevision      uint64                    `json:"rate_revision"`
+	QueryRevision     uint64                    `json:"query_revision"`
+	UpdatedAt         time.Time                 `json:"updated_at"`
+	Stale             []string                  `json:"stale,omitempty"`
+	Operation         *storefront.OperationView `json:"operation,omitempty"`
+	Order             *storefront.OrderView     `json:"order,omitempty"`
+	Error             string                    `json:"error,omitempty"`
+	RetryAfterSeconds int                       `json:"retry_after_seconds,omitempty"`
+}
+
+type queryAdmission struct {
+	active atomic.Int64
+	limit  int64
+}
+
+func (admission *queryAdmission) acquire() bool {
+	for {
+		active := admission.active.Load()
+		if active >= admission.limit {
+			return false
+		}
+		if admission.active.CompareAndSwap(active, active+1) {
+			return true
+		}
+	}
+}
+
+func (admission *queryAdmission) release() {
+	admission.active.Add(-1)
 }
 
 type queryHandler func(queryRequest) (queryResponse, error)
@@ -133,8 +153,16 @@ func (p *projector) registerQueries(nc *nats.Conn, role string, stopped chan<- s
 	endpointCount := 0
 	for name, handler := range handlers {
 		name, handler := name, handler
+		admission := &queryAdmission{limit: int64(p.config.queryMaxInFlight)}
 		subject := "boutique.qry.storefront." + name + ".v1"
 		requestHandler := micro.HandlerFunc(func(request micro.Request) {
+			if !admission.acquire() {
+				_ = request.RespondJSON(queryResponse{
+					Error: "OVERLOADED", RetryAfterSeconds: 1,
+				})
+				return
+			}
+			defer admission.release()
 			var decoded queryRequest
 			var decodeErr error
 			if len(request.Data()) > 0 {
@@ -198,7 +226,7 @@ func (p *projector) registerQueries(nc *nats.Conn, role string, stopped chan<- s
 				endpointName,
 				endpointHandler,
 				micro.WithEndpointSubject(subject),
-				micro.WithEndpointPendingLimits(queryEndpointPendingMessages, queryEndpointPendingBytes),
+				micro.WithEndpointPendingLimits(p.config.queryPendingMessages, p.config.queryPendingBytes),
 			); err != nil {
 				endpointPendingMutex.Lock()
 				delete(endpointPending, endpointName)

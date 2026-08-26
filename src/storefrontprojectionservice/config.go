@@ -21,23 +21,26 @@ var (
 )
 
 type projectionConfig struct {
-	regionID            string
-	regionKey           string
-	k8sClusterName      string
-	natsClusterName     string
-	streamOwnerRegion   string
-	eventStream         string
-	durable             string
-	productsBucket      string
-	cartsBucket         string
-	contextBucket       string
-	ordersBucket        string
-	operationsBucket    string
-	livePrefix          string
-	catchupTimeout      time.Duration
-	queryConcurrency    int
-	cartCacheEntries    int
-	contextCacheEntries int
+	regionID             string
+	regionKey            string
+	k8sClusterName       string
+	natsClusterName      string
+	streamOwnerRegion    string
+	eventStream          string
+	durable              string
+	productsBucket       string
+	cartsBucket          string
+	contextBucket        string
+	ordersBucket         string
+	operationsBucket     string
+	livePrefix           string
+	catchupTimeout       time.Duration
+	queryConcurrency     int
+	queryMaxInFlight     int
+	queryPendingMessages int
+	queryPendingBytes    int
+	cartCacheEntries     int
+	contextCacheEntries  int
 }
 
 func requiredEnvironment(name string) (string, error) {
@@ -104,6 +107,18 @@ func loadProjectionConfig() (projectionConfig, error) {
 	if err != nil {
 		return projectionConfig{}, err
 	}
+	queryMaxInFlight, err := boundedEnvInt("STOREFRONT_QUERY_MAX_IN_FLIGHT", 12, 1, 256)
+	if err != nil {
+		return projectionConfig{}, err
+	}
+	queryPendingMessages, err := boundedEnvInt("STOREFRONT_QUERY_PENDING_MESSAGES", 512, 1, 8192)
+	if err != nil {
+		return projectionConfig{}, err
+	}
+	queryPendingBytes, err := boundedEnvInt("STOREFRONT_QUERY_PENDING_BYTES", 2*1024*1024, 64*1024, 64*1024*1024)
+	if err != nil {
+		return projectionConfig{}, err
+	}
 	cartCacheEntries, err := boundedEnvInt("STOREFRONT_CART_CACHE_ENTRIES", 32768, 1, 262144)
 	if err != nil {
 		return projectionConfig{}, err
@@ -120,23 +135,26 @@ func loadProjectionConfig() (projectionConfig, error) {
 		return projectionConfig{}, fmt.Errorf("STREAM_OWNER_REGION must be a stable lower-case DNS label")
 	}
 	return projectionConfig{
-		regionID:            values["REGION_ID"],
-		regionKey:           values["REGION_KEY"],
-		k8sClusterName:      values["K8S_CLUSTER_NAME"],
-		natsClusterName:     values["NATS_CLUSTER_NAME"],
-		streamOwnerRegion:   ownerRegion,
-		eventStream:         values["STOREFRONT_EVENT_STREAM"],
-		durable:             values["STOREFRONT_PROJECTION_DURABLE"],
-		productsBucket:      values["STOREFRONT_PRODUCTS_BUCKET"],
-		cartsBucket:         values["STOREFRONT_CARTS_BUCKET"],
-		contextBucket:       values["STOREFRONT_CONTEXT_BUCKET"],
-		ordersBucket:        values["STOREFRONT_ORDERS_BUCKET"],
-		operationsBucket:    values["STOREFRONT_OPERATIONS_BUCKET"],
-		livePrefix:          values["LIVE_OPERATION_PREFIX"],
-		catchupTimeout:      catchupTimeout,
-		queryConcurrency:    queryConcurrency,
-		cartCacheEntries:    cartCacheEntries,
-		contextCacheEntries: contextCacheEntries,
+		regionID:             values["REGION_ID"],
+		regionKey:            values["REGION_KEY"],
+		k8sClusterName:       values["K8S_CLUSTER_NAME"],
+		natsClusterName:      values["NATS_CLUSTER_NAME"],
+		streamOwnerRegion:    ownerRegion,
+		eventStream:          values["STOREFRONT_EVENT_STREAM"],
+		durable:              values["STOREFRONT_PROJECTION_DURABLE"],
+		productsBucket:       values["STOREFRONT_PRODUCTS_BUCKET"],
+		cartsBucket:          values["STOREFRONT_CARTS_BUCKET"],
+		contextBucket:        values["STOREFRONT_CONTEXT_BUCKET"],
+		ordersBucket:         values["STOREFRONT_ORDERS_BUCKET"],
+		operationsBucket:     values["STOREFRONT_OPERATIONS_BUCKET"],
+		livePrefix:           values["LIVE_OPERATION_PREFIX"],
+		catchupTimeout:       catchupTimeout,
+		queryConcurrency:     queryConcurrency,
+		queryMaxInFlight:     queryMaxInFlight,
+		queryPendingMessages: queryPendingMessages,
+		queryPendingBytes:    queryPendingBytes,
+		cartCacheEntries:     cartCacheEntries,
+		contextCacheEntries:  contextCacheEntries,
 	}, nil
 }
 

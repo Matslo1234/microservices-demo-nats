@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 	"log/slog"
+	"math/rand/v2"
 	"net/http"
 	"os"
 	"os/signal"
@@ -48,7 +49,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(response http.ResponseWriter, _ *http.Request) {
 		if current := activeRuntime.Load(); current != nil && !current.healthy() {
-			http.Error(response, "query service stopped", http.StatusServiceUnavailable)
+			http.Error(response, "runtime cannot recover", http.StatusServiceUnavailable)
 			return
 		}
 		_, _ = response.Write([]byte("ok"))
@@ -139,6 +140,8 @@ func main() {
 		runtime.queryEndpointCount(),
 	)
 
+	repairFailures := make(map[string]int)
+	repairedAt := make(map[string]time.Time)
 	running := true
 	for running {
 		select {
@@ -148,13 +151,36 @@ func main() {
 			log.Printf("HTTP server failed: %v", serveErr)
 			running = false
 		case role := <-runtime.queryStopped:
-			// A slow-consumer error makes nats.go stop the complete micro.Service.
-			// Give the overloaded callers a moment to observe Retry-After before
-			// restoring only the affected service role.
-			time.Sleep(time.Second)
-			if err := runtime.repairQueryService(role); err != nil {
-				log.Printf("NATS query service recovery failed role=%q error=%v; exiting for pod restart", role, err)
-				running = false
+			// A slow-consumer error stops the complete micro.Service. Keep the
+			// projector alive and back off repairs so overload cannot become a
+			// tight stop/re-register loop.
+			if last := repairedAt[role]; !last.IsZero() && time.Since(last) >= 30*time.Second {
+				repairFailures[role] = 0
+			}
+			for running {
+				delay := queryRepairBackoff(repairFailures[role])
+				jitter := time.Duration(rand.Int64N(int64(delay/4) + 1))
+				timer := time.NewTimer(delay + jitter)
+				select {
+				case <-signals:
+					timer.Stop()
+					running = false
+					continue
+				case serveErr := <-serveErrors:
+					timer.Stop()
+					log.Printf("HTTP server failed: %v", serveErr)
+					running = false
+					continue
+				case <-timer.C:
+				}
+				if err := runtime.repairQueryService(role); err != nil {
+					repairFailures[role]++
+					log.Printf("NATS query service recovery failed role=%q error=%v; backing off", role, err)
+					continue
+				}
+				repairFailures[role]++
+				repairedAt[role] = time.Now()
+				break
 			}
 		}
 	}
@@ -283,18 +309,24 @@ func (runtime *projectionRuntime) ready() bool {
 }
 
 func (runtime *projectionRuntime) healthy() bool {
-	if !runtime.consumerHealthy.Load() || runtime.nc == nil || runtime.nc.IsClosed() {
-		return false
+	// Query services and the projection consumer supervise and repair their own
+	// transient failures. Readiness exposes those failures; liveness only asks
+	// whether the process still owns a runtime capable of recovery.
+	return runtime.nc != nil && !runtime.nc.IsClosed()
+}
+
+func queryRepairBackoff(failures int) time.Duration {
+	if failures < 0 {
+		failures = 0
 	}
-	runtime.queryMu.RLock()
-	defer runtime.queryMu.RUnlock()
-	for _, queryRuntime := range runtime.queryServices {
-		if queryRuntime.nc == nil || queryRuntime.nc.IsClosed() ||
-			queryRuntime.service == nil || queryRuntime.service.Stopped() {
-			return false
-		}
+	delay := time.Second
+	for i := 0; i < failures && delay < 30*time.Second; i++ {
+		delay *= 2
 	}
-	return true
+	if delay > 30*time.Second {
+		return 30 * time.Second
+	}
+	return delay
 }
 
 func (runtime *projectionRuntime) setSubscription(subscription *nats.Subscription) {

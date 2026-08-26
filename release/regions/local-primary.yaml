@@ -2357,6 +2357,13 @@ rules:
 - apiGroups:
   - ""
   resources:
+  - pods
+  verbs:
+  - get
+  - list
+- apiGroups:
+  - ""
+  resources:
   - nodes
   verbs:
   - get
@@ -2914,7 +2921,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-benchmarkservice
-        image: matslo123/benchmarkservice:v0.4.0@sha256:3c27d27af5a9264a0181a7d492aef3e5f78812035bf051d05c23be3ce5bbbd10
+        image: matslo123/benchmarkservice:v0.4.0@sha256:1bd79362f9d71a97b90d1608bca1adbaedf5b4b54546c1f890327a58200d5d27
         livenessProbe:
           httpGet:
             path: /healthz
@@ -3044,7 +3051,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-cartservice
-        image: matslo123/cartservice:v0.4.0@sha256:9afacf4cacc7793a59a0341937e723a7b03f5ffb0a7887b3b7ea47bd63e57f26
+        image: matslo123/cartservice:v0.4.0@sha256:a981b8dd94d28910e3003aeb985ade8d1f3e9aa33f204d4a9323cd142870f648
         livenessProbe:
           failureThreshold: 6
           httpGet:
@@ -3147,7 +3154,7 @@ spec:
         - name: NATS_REQUIRED
           value: "true"
         - name: NATS_REQUIRED_SUBSCRIPTIONS
-          value: checkout-catalog-v1,checkout-currency-v1,checkout-cart-v1,checkout-order-commands-v1,checkout-saga-shipping-v1,checkout-saga-payment-v1
+          value: checkout-catalog-v1,checkout-currency-v1,checkout-cart-v1,checkout-order-commands-v1,checkout-saga-shipping-quote-v1,checkout-saga-shipping-v1,checkout-saga-payment-authorization-v1,checkout-saga-payment-v1
         - name: CHECKOUT_REDIS_ADDR
           value: redis-checkout-cluster:6379
         - name: CHECKOUT_REDIS_MODE
@@ -3189,7 +3196,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-checkoutservice
-        image: matslo123/checkoutservice:v0.4.0@sha256:69bb7672cfb68372642d16212a60f02ad044e8d8f7cc025284452e1acc5e0a64
+        image: matslo123/checkoutservice:v0.4.0@sha256:ee7b5fed8dcf83c447a67dfe46c33c6593983af1953e82492889199c4891550b
         livenessProbe:
           httpGet:
             path: /healthz
@@ -3615,7 +3622,7 @@ spec:
             name: nats-credentials-frontend
         - secretRef:
             name: global-application-secrets
-        image: matslo123/frontend:v0.4.0@sha256:476d4e2e2d50a56242c372770798ec63445b7033841b889f34a833462388b174
+        image: matslo123/frontend:v0.4.0@sha256:91926f976936706a21c9aed6bbfbe923b4430a0aa803892088c6e877a9e08b45
         livenessProbe:
           failureThreshold: 6
           httpGet:
@@ -4385,7 +4392,13 @@ spec:
         - name: GOMEMLIMIT
           value: 400MiB
         - name: STOREFRONT_QUERY_CONCURRENCY
-          value: "8"
+          value: "16"
+        - name: STOREFRONT_QUERY_MAX_IN_FLIGHT
+          value: "12"
+        - name: STOREFRONT_QUERY_PENDING_MESSAGES
+          value: "512"
+        - name: STOREFRONT_QUERY_PENDING_BYTES
+          value: "2097152"
         - name: STOREFRONT_CART_CACHE_ENTRIES
           value: "32768"
         - name: STOREFRONT_CONTEXT_CACHE_ENTRIES
@@ -4415,7 +4428,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-storefrontprojectionservice
-        image: matslo123/storefrontprojectionservice:v0.4.0@sha256:ed0852a966f21f106532648920318b617d8d6923ef8062009b7fd78220b63355
+        image: matslo123/storefrontprojectionservice:v0.4.0@sha256:0a51671d6e0502d7bd68ef2034bdb5697d20d020f5edfe2a0110af993e09b382
         livenessProbe:
           failureThreshold: 6
           httpGet:
@@ -4435,7 +4448,7 @@ spec:
           timeoutSeconds: 5
         resources:
           limits:
-            cpu: "2"
+            cpu: "4"
             memory: 2Gi
           requests:
             cpu: 400m

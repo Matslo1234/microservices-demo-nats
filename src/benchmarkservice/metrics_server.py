@@ -21,16 +21,109 @@ class SnapshotCache:
     def __init__(self, collector: ClusterMetricsCollector) -> None:
         self.collector = collector
         self._lock = threading.Lock()
-        self._value: dict[str, Any] | None = None
-        self._created = 0.0
+        self._values: dict[str, dict[str, Any]] = {}
+        self._stop = threading.Event()
+        self._nats_interval = float(
+            os.environ.get("NATS_METRICS_CACHE_INTERVAL_SECONDS", "1")
+        )
+        self._kubernetes_interval = float(
+            os.environ.get("KUBERNETES_METRICS_CACHE_INTERVAL_SECONDS", "5")
+        )
+        sources = [
+            (
+                "kubernetes",
+                self._kubernetes_interval,
+                self.collector._collect_kubernetes,
+            )
+        ]
+        if collector.application_type == "NATS":
+            sources.append(
+                ("nats", self._nats_interval, self.collector._collect_nats)
+            )
+        self._threads = [
+            threading.Thread(
+                target=self._refresh_source,
+                args=(source, interval, collect),
+                name=f"benchmark-{source}-metrics-cache",
+                daemon=True,
+            )
+            for source, interval, collect in sources
+        ]
+        for thread in self._threads:
+            thread.start()
+
+    def _refresh_source(self, source: str, interval: float, collect: Any) -> None:
+        next_refresh = time.monotonic()
+        while not self._stop.is_set():
+            try:
+                value = collect()
+            except Exception as error:
+                value = {
+                    "errors": [f"cache refresh: {error}"],
+                    "sample": {
+                        "requested_at": time.time(),
+                        "collected_at": time.time(),
+                        "duration_seconds": 0,
+                        "partial": True,
+                    },
+                }
+            with self._lock:
+                self._values[source] = value
+            next_refresh += interval
+            now = time.monotonic()
+            if next_refresh <= now:
+                skipped = int((now - next_refresh) // interval) + 1
+                next_refresh += skipped * interval
+            self._stop.wait(max(0.0, next_refresh - time.monotonic()))
 
     def get(self) -> dict[str, Any]:
         with self._lock:
-            now = time.monotonic()
-            if self._value is None or now - self._created >= 1.0:
-                self._value = self.collector.snapshot()
-                self._created = now
-            return self._value
+            values = {
+                source: dict(value) for source, value in self._values.items()
+            }
+        result: dict[str, Any] = {
+            "pods": {},
+            "nats_metrics": [],
+            "nats_micro_endpoints": [],
+            "nats_order_completed_observer": None,
+            "errors": [],
+            "source_samples": {},
+        }
+        expected = {"kubernetes"}
+        if self.collector.application_type == "NATS":
+            expected.add("nats")
+        for source in sorted(expected):
+            value = values.get(source)
+            if value is None:
+                result["errors"].append(f"{source}: metrics cache is warming")
+                continue
+            sample = value.pop("sample", None)
+            if isinstance(sample, dict):
+                result["source_samples"][source] = sample
+            for error in value.pop("errors", []):
+                result["errors"].append(f"{source}: {error}")
+            result.update(value)
+        now = time.time()
+        result["snapshot"] = {
+            "requested_at": now,
+            "completed_at": now,
+            "duration_seconds": 0,
+            "cached": True,
+            "source_ages_seconds": {
+                source: round(
+                    max(0.0, now - float(sample["collected_at"])), 6
+                )
+                for source, sample in result["source_samples"].items()
+                if isinstance(sample.get("collected_at"), (int, float))
+            },
+        }
+        return result
+
+    def close(self) -> None:
+        self._stop.set()
+        for thread in self._threads:
+            thread.join(timeout=2)
+        self.collector.close()
 
 
 class MetricsHandler(BaseHTTPRequestHandler):
@@ -85,7 +178,9 @@ class MetricsHandler(BaseHTTPRequestHandler):
             value = (
                 {
                     "nats_order_completed_observer": (
-                        self.cache.collector.nats_order_completed_sample()
+                        self.cache.get().get(
+                            "nats_order_completed_observer"
+                        )
                     )
                 }
                 if path == "/nats-order-completed-observer"
@@ -110,6 +205,7 @@ def main() -> None:
         server.serve_forever()
     finally:
         server.server_close()
+        MetricsHandler.cache.close()
 
 
 if __name__ == "__main__":

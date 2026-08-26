@@ -58,6 +58,21 @@ func TestProjectionRetryDelayUsesBoundedExponentialBackoff(t *testing.T) {
 	}
 }
 
+func TestQueryRepairBackoffIsBounded(t *testing.T) {
+	for failures, want := range map[int]time.Duration{
+		-1: time.Second,
+		0:  time.Second,
+		1:  2 * time.Second,
+		4:  16 * time.Second,
+		5:  30 * time.Second,
+		20: 30 * time.Second,
+	} {
+		if got := queryRepairBackoff(failures); got != want {
+			t.Fatalf("failures %d: delay = %s, want %s", failures, got, want)
+		}
+	}
+}
+
 func TestCartQuoteRefreshReplacesExpiredQuoteAtSameCartVersion(t *testing.T) {
 	contextBucket := newMemoryKV()
 	worker := &projector{context: contextBucket}

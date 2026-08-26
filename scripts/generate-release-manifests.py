@@ -44,19 +44,19 @@ SERVICES = (
 )
 DEFAULT_IMAGE_DIGESTS = {
     "adservice": "9ea77de953468f3ddb47e31149dc934a04534bc75da892f46b824339b5963109",
-    "benchmarkservice": "9c79b9f4229a715c1b9e5ddd3e1e3d0f0cd9730880b649b67bf3d6addf216a86",
+    "benchmarkservice": "ecc951e4811a7b0b188776c94507d2da871d5b4030c3323c73ff44609caf6a36",
     "cartservice": "a981b8dd94d28910e3003aeb985ade8d1f3e9aa33f204d4a9323cd142870f648",
-    "checkoutservice": "be8734683306bf87782b63caa9438043bc963fd3f94474e89be6dc98133ef080",
+    "checkoutservice": "ee7b5fed8dcf83c447a67dfe46c33c6593983af1953e82492889199c4891550b",
     "currencyservice": "aeccde52544263ceb7169be694250312e267a01104dc3dd3d68611975bd47cb8",
     "emailservice": "92c6ebe1fc527c6e5f46e6cb73cc5dc6db4ff392d05179ddcd29778447be5f59",
-    "frontend": "476d4e2e2d50a56242c372770798ec63445b7033841b889f34a833462388b174",
+    "frontend": "91926f976936706a21c9aed6bbfbe923b4430a0aa803892088c6e877a9e08b45",
     "loadgenerator": "c66a188ecf8bf7507bd3982a5fa50ae3e9497f3239248dd48b275fc2aee0adb3",
     "messageoperationsservice": "2b2334e684a9297e2bf6af8daf0e924b86daecb78f9ff578756e9bc34b8f7a45",
     "paymentservice": "755e13249749163500bdb54898c5f23973e2012dde0b89e2b533bde45522ffaf",
     "productcatalogservice": "26d97784a6e105cf1586b2ff723772c583021491d5fa165ceaae6a3af12fe54d",
-    "recommendationservice": "50a8d612442bd7415d7e247c3acf318af0773cfda704b3146719d3559b8cbac4",
+    "recommendationservice": "9bfef53c8e0ca086f44780a7e6a030885de4932a727f40690f5414d097d78805",
     "shippingservice": "d0dc6554058b3703611b174c65e7cd9b8c653f57b604b561082993896a5ebfd3",
-    "storefrontprojectionservice": "ed0852a966f21f106532648920318b617d8d6923ef8062009b7fd78220b63355",
+    "storefrontprojectionservice": "0a51671d6e0502d7bd68ef2034bdb5697d20d020f5edfe2a0110af993e09b382",
 }
 
 
@@ -126,7 +126,7 @@ def benchmark_header(
     apply_instructions = (
         """# A default dynamic StorageClass is required.
 # Install and wait for NATS before applying this benchmark bundle:
-#   kubectl apply -k kubernetes-manifests/nats/fresh-cluster
+#   kubectl apply -k kubernetes-manifests/nats/benchmark
 #   kubectl -n nats rollout status deployment/nats-setup --timeout=5m
 #   kubectl -n nats rollout status statefulset/nats --timeout=10m
 #   kubectl -n nats wait --for=condition=complete job/nats-global-bootstrap --timeout=10m

@@ -213,7 +213,7 @@ class RemoteMetricsClient:
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
         request = Request(url, headers=headers)
-        with urlopen(request, timeout=5) as response:
+        with urlopen(request, timeout=10) as response:
             value = json.load(response)
         if not isinstance(value, dict):
             raise RuntimeError("metrics endpoint returned non-object JSON")
@@ -296,6 +296,11 @@ class LocalMetricsClient:
             raise RuntimeError("NATS completed-order observer is unavailable")
         return value
 
+    def close(self) -> None:
+        if self.collector is not None:
+            self.collector.close()
+            self.collector = None
+
 
 class ResourceSampler:
     def __init__(self) -> None:
@@ -342,6 +347,10 @@ class ResourceSampler:
             self._target.close()
         self._target = None
         self._greenlet = None
+        if self._metrics is not None:
+            close = getattr(self._metrics, "close", None)
+            if callable(close):
+                close()
         self._metrics = None
         if self._order_completed_observer is not None:
             self._order_completed_observer.close()
@@ -349,7 +358,9 @@ class ResourceSampler:
 
     def _run(self) -> None:
         assert self._metrics is not None
-
+        interval = CONFIG.resource_sample_interval_seconds
+        next_sample = time.monotonic()
+        skipped_ticks = 0
         while True:
             record: dict[str, Any] = {
                 "timestamp": time.time(),
@@ -372,6 +383,19 @@ class ResourceSampler:
                 )
             try:
                 snapshot = self._metrics.sample()
+                record["snapshot"] = snapshot.get("snapshot", {})
+                record["source_samples"] = snapshot.get(
+                    "source_samples", {}
+                )
+                record["source_elapsed_seconds"] = {}
+                for source, sample in record["source_samples"].items():
+                    collected_at = sample.get("collected_at")
+                    if isinstance(collected_at, (int, float)):
+                        record["source_elapsed_seconds"][source] = round(
+                            record["elapsed_seconds"]
+                            - (record["timestamp"] - float(collected_at)),
+                            6,
+                        )
                 if CONFIG.collect_resources:
                     record["pods"] = snapshot["pods"]
                 if CONFIG.collect_nats_metrics:
@@ -396,11 +420,14 @@ class ResourceSampler:
             except Exception as exc:
                 record["errors"].append(f"metrics endpoint: {exc}")
             if self._target is not None:
+                record["sampler_skipped_ticks"] = skipped_ticks
                 self._target.write(json.dumps(record, sort_keys=True) + "\n")
                 self._target.flush()
-            if self._stop.wait(
-                timeout=CONFIG.resource_sample_interval_seconds
-            ):
+            next_sample, skipped = advance_sample_deadline(
+                next_sample, time.monotonic(), interval
+            )
+            skipped_ticks += skipped
+            if self._stop.wait(timeout=max(0.0, next_sample - time.monotonic())):
                 break
 
     def latest_pending(self) -> float | None:
@@ -424,3 +451,14 @@ class ResourceSampler:
 
 
 RESOURCE_SAMPLER = ResourceSampler()
+
+
+def advance_sample_deadline(
+    previous: float, now: float, interval: float
+) -> tuple[float, int]:
+    """Advance a fixed-rate schedule without accumulating collection time."""
+    deadline = previous + interval
+    if deadline > now:
+        return deadline, 0
+    skipped = int((now - deadline) // interval) + 1
+    return deadline + skipped * interval, skipped

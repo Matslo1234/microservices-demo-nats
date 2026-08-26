@@ -52,7 +52,13 @@ spec:
         - name: GOMEMLIMIT
           value: "400MiB"
         - name: STOREFRONT_QUERY_CONCURRENCY
-          value: "8"
+          value: "16"
+        - name: STOREFRONT_QUERY_MAX_IN_FLIGHT
+          value: "12"
+        - name: STOREFRONT_QUERY_PENDING_MESSAGES
+          value: "512"
+        - name: STOREFRONT_QUERY_PENDING_BYTES
+          value: "2097152"
         - name: STOREFRONT_CART_CACHE_ENTRIES
           value: "32768"
         - name: STOREFRONT_CONTEXT_CACHE_ENTRIES
@@ -84,7 +90,7 @@ spec:
             cpu: 400m
             memory: 128Mi
           limits:
-            cpu: "2"
+            cpu: "4"
             memory: 2Gi
       volumes:
       - name: nats-ca

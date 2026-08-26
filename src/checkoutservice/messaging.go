@@ -37,21 +37,27 @@ const (
 	checkoutDeadlineScanInterval     = 5 * time.Second
 )
 
-var checkoutShippingSagaSubjects = []string{
+var checkoutShippingQuoteSagaSubjects = []string{
 	// Cart quote events share the shipping namespace but never advance an
-	// order. Keeping them out of this durable prevents cart activity from
+	// order. Keeping them out of these durables prevents cart activity from
 	// head-of-line blocking checkout sagas.
 	"boutique.evt.shipping.order-quote-calculated.v1",
 	"boutique.evt.shipping.order-quote-failed.v1",
+}
+
+var checkoutShipmentSagaSubjects = []string{
 	"boutique.evt.shipping.shipment-created.v1",
 	"boutique.evt.shipping.shipment-creation-failed.v1",
 	"boutique.evt.shipping.shipment-cancelled.v1",
 	"boutique.evt.shipping.shipment-cancellation-failed.v1",
 }
 
-var checkoutPaymentSagaSubjects = []string{
+var checkoutPaymentAuthorizationSagaSubjects = []string{
 	"boutique.evt.payment.authorized.v1",
 	"boutique.evt.payment.authorization-declined.v1",
+}
+
+var checkoutPaymentLateStageSagaSubjects = []string{
 	"boutique.evt.payment.captured.v1",
 	"boutique.evt.payment.capture-failed.v1",
 	"boutique.evt.payment.authorization-released.v1",
@@ -66,6 +72,9 @@ type checkoutConsumerDefinition struct {
 	fetchSize   int
 	maxPending  int
 	parallelism int
+	// migrationSource seeds a newly split consumer at the acknowledgement
+	// floor of its former combined consumer. It is ignored after creation.
+	migrationSource string
 }
 
 type checkoutMessageHandler func(*nats.Msg, *commonv1.MessageEnvelope) error
@@ -194,19 +203,38 @@ func startCheckoutWorker(store *stateStore) (*checkoutWorker, error) {
 
 	projections := []checkoutConsumerDefinition{
 		{[]string{"boutique.evt.catalog.>"}, "checkout-catalog-v1", "BOUTIQUE_EVENTS",
-			worker.handleProjectionMessage, checkoutProjectionFetchBatchSize, checkoutProjectionMaxPending, checkoutProjectionParallelism},
+			worker.handleProjectionMessage, checkoutProjectionFetchBatchSize, checkoutProjectionMaxPending, checkoutProjectionParallelism, ""},
 		{[]string{"boutique.evt.currency.>"}, "checkout-currency-v1", "BOUTIQUE_EVENTS",
-			worker.handleProjectionMessage, checkoutProjectionFetchBatchSize, checkoutProjectionMaxPending, checkoutProjectionParallelism},
+			worker.handleProjectionMessage, checkoutProjectionFetchBatchSize, checkoutProjectionMaxPending, checkoutProjectionParallelism, ""},
 		{[]string{"boutique.evt.cart.>"}, "checkout-cart-v1", "BOUTIQUE_EVENTS",
-			worker.handleProjectionMessage, checkoutProjectionFetchBatchSize, checkoutProjectionMaxPending, checkoutProjectionParallelism},
+			worker.handleProjectionMessage, checkoutProjectionFetchBatchSize, checkoutProjectionMaxPending, checkoutProjectionParallelism, ""},
 	}
 	workflows := []checkoutConsumerDefinition{
+		// Create the quote consumer before narrowing the legacy shipping consumer.
+		// During a rolling upgrade the overlap is harmless because the inbox is
+		// idempotent, while the ordering prevents any quote response from falling
+		// between the old and new filters.
+		{checkoutShippingQuoteSagaSubjects, "checkout-saga-shipping-quote-v1", "BOUTIQUE_EVENTS",
+			worker.handleShippingQuoteEventMessage, checkoutWorkflowFetchBatchSize, checkoutWorkflowMaxPending, checkoutWorkflowParallelism,
+			"checkout-saga-shipping-v1"},
+		// Preserve the legacy durable and its cursor for the late-stage shipment
+		// responses whose starvation caused completed throughput to collapse.
+		{checkoutShipmentSagaSubjects, "checkout-saga-shipping-v1", "BOUTIQUE_EVENTS",
+			worker.handleShipmentEventMessage, checkoutWorkflowFetchBatchSize, checkoutWorkflowMaxPending, checkoutWorkflowParallelism, ""},
+		// Keep authorization ingress from occupying the processing slots needed by
+		// capture outcomes, which are the transition that completes an order. Seed
+		// the new authorization durable from the legacy payment durable before
+		// narrowing the legacy filter so no retained response falls through a gap.
+		{checkoutPaymentAuthorizationSagaSubjects, "checkout-saga-payment-authorization-v1", "BOUTIQUE_EVENTS",
+			worker.handlePaymentAuthorizationEventMessage, checkoutWorkflowFetchBatchSize, checkoutWorkflowMaxPending, checkoutWorkflowParallelism,
+			"checkout-saga-payment-v1"},
+		// Retain the legacy durable and its cursor for capture and compensation
+		// outcomes that are already waiting to finish an in-flight order.
+		{checkoutPaymentLateStageSagaSubjects, "checkout-saga-payment-v1", "BOUTIQUE_EVENTS",
+			worker.handlePaymentLateStageEventMessage, checkoutWorkflowFetchBatchSize, checkoutWorkflowMaxPending, checkoutWorkflowParallelism, ""},
+		// Start accepting new orders only after every response consumer is active.
 		{[]string{"boutique.cmd.order.submit.v1"}, "checkout-order-commands-v1", "BOUTIQUE_COMMANDS",
-			worker.handleCommandMessage, checkoutWorkflowFetchBatchSize, checkoutWorkflowMaxPending, checkoutWorkflowParallelism},
-		{checkoutShippingSagaSubjects, "checkout-saga-shipping-v1", "BOUTIQUE_EVENTS",
-			worker.handleEventMessage, checkoutWorkflowFetchBatchSize, checkoutWorkflowMaxPending, checkoutWorkflowParallelism},
-		{checkoutPaymentSagaSubjects, "checkout-saga-payment-v1", "BOUTIQUE_EVENTS",
-			worker.handleEventMessage, checkoutWorkflowFetchBatchSize, checkoutWorkflowMaxPending, checkoutWorkflowParallelism},
+			worker.handleCommandMessage, checkoutWorkflowFetchBatchSize, checkoutWorkflowMaxPending, checkoutWorkflowParallelism, ""},
 	}
 	add := func(definition checkoutConsumerDefinition) error {
 		if ensureErr := worker.ensureConsumer(definition); ensureErr != nil {
@@ -295,6 +323,18 @@ func (worker *checkoutWorker) ensureConsumer(definition checkoutConsumerDefiniti
 	for attempt := 0; attempt < 20; attempt++ {
 		info, err := worker.js.ConsumerInfo(definition.stream, definition.durable)
 		if errors.Is(err, nats.ErrConsumerNotFound) {
+			if definition.migrationSource != "" {
+				source, sourceErr := worker.js.ConsumerInfo(definition.stream, definition.migrationSource)
+				if sourceErr == nil {
+					config.DeliverPolicy = nats.DeliverByStartSequencePolicy
+					config.OptStartSeq = source.AckFloor.Stream + 1
+					if config.OptStartSeq == 0 {
+						config.OptStartSeq = 1
+					}
+				} else if !errors.Is(sourceErr, nats.ErrConsumerNotFound) {
+					return fmt.Errorf("inspect migration source %s: %w", definition.migrationSource, sourceErr)
+				}
+			}
 			if _, addErr := worker.js.AddConsumer(definition.stream, config); addErr == nil {
 				return nil
 			} else if checkoutConsumerSetupRace(addErr) {
@@ -307,6 +347,11 @@ func (worker *checkoutWorker) ensureConsumer(definition checkoutConsumerDefiniti
 		if err != nil {
 			return fmt.Errorf("inspect %s: %w", definition.durable, err)
 		}
+		deliveryPolicyMatches := info.Config.DeliverPolicy == nats.DeliverAllPolicy
+		if definition.migrationSource != "" {
+			deliveryPolicyMatches = deliveryPolicyMatches ||
+				info.Config.DeliverPolicy == nats.DeliverByStartSequencePolicy
+		}
 		if checkoutConsumerFiltersMatch(
 			info.Config.FilterSubject,
 			info.Config.FilterSubjects,
@@ -316,7 +361,7 @@ func (worker *checkoutWorker) ensureConsumer(definition checkoutConsumerDefiniti
 			info.Config.AckPolicy == nats.AckExplicitPolicy &&
 			info.Config.AckWait == 30*time.Second &&
 			info.Config.MaxDeliver == 10 &&
-			info.Config.DeliverPolicy == nats.DeliverAllPolicy {
+			deliveryPolicyMatches {
 			return nil
 		}
 		next := info.Config
@@ -538,11 +583,36 @@ func (worker *checkoutWorker) handleCommandMessage(_ *nats.Msg, envelope *common
 	return worker.finishTransition(outcome)
 }
 
-func (worker *checkoutWorker) handleEventMessage(message *nats.Msg, envelope *commonv1.MessageEnvelope) error {
-	if !isCheckoutSagaEvent(message.Subject) {
+func (worker *checkoutWorker) handleShippingQuoteEventMessage(message *nats.Msg, envelope *commonv1.MessageEnvelope) error {
+	if !isCheckoutShippingQuoteEvent(message.Subject) {
 		return nil
 	}
-	outcome, err := worker.processSagaEvent(message.Subject, envelope)
+	return worker.handleSagaEventMessage(message.Subject, envelope)
+}
+
+func (worker *checkoutWorker) handleShipmentEventMessage(message *nats.Msg, envelope *commonv1.MessageEnvelope) error {
+	if !isCheckoutShipmentEvent(message.Subject) {
+		return nil
+	}
+	return worker.handleSagaEventMessage(message.Subject, envelope)
+}
+
+func (worker *checkoutWorker) handlePaymentAuthorizationEventMessage(message *nats.Msg, envelope *commonv1.MessageEnvelope) error {
+	if !isCheckoutPaymentAuthorizationEvent(message.Subject) {
+		return nil
+	}
+	return worker.handleSagaEventMessage(message.Subject, envelope)
+}
+
+func (worker *checkoutWorker) handlePaymentLateStageEventMessage(message *nats.Msg, envelope *commonv1.MessageEnvelope) error {
+	if !isCheckoutPaymentLateStageEvent(message.Subject) {
+		return nil
+	}
+	return worker.handleSagaEventMessage(message.Subject, envelope)
+}
+
+func (worker *checkoutWorker) handleSagaEventMessage(subject string, envelope *commonv1.MessageEnvelope) error {
+	outcome, err := worker.processSagaEvent(subject, envelope)
 	if err != nil {
 		return err
 	}
@@ -622,19 +692,54 @@ func (worker *checkoutWorker) publishResultAsync(result resultMessage) (nats.Pub
 }
 
 func isCheckoutSagaEvent(subject string) bool {
+	return isCheckoutShippingQuoteEvent(subject) ||
+		isCheckoutShipmentEvent(subject) ||
+		isCheckoutPaymentEvent(subject)
+}
+
+func isCheckoutShippingQuoteEvent(subject string) bool {
 	switch subject {
 	case "boutique.evt.shipping.order-quote-calculated.v1",
-		"boutique.evt.shipping.order-quote-failed.v1",
-		"boutique.evt.payment.authorized.v1",
-		"boutique.evt.payment.authorization-declined.v1",
-		"boutique.evt.shipping.shipment-created.v1",
+		"boutique.evt.shipping.order-quote-failed.v1":
+		return true
+	default:
+		return false
+	}
+}
+
+func isCheckoutShipmentEvent(subject string) bool {
+	switch subject {
+	case "boutique.evt.shipping.shipment-created.v1",
 		"boutique.evt.shipping.shipment-creation-failed.v1",
-		"boutique.evt.payment.captured.v1",
+		"boutique.evt.shipping.shipment-cancelled.v1",
+		"boutique.evt.shipping.shipment-cancellation-failed.v1":
+		return true
+	default:
+		return false
+	}
+}
+
+func isCheckoutPaymentEvent(subject string) bool {
+	return isCheckoutPaymentAuthorizationEvent(subject) ||
+		isCheckoutPaymentLateStageEvent(subject)
+}
+
+func isCheckoutPaymentAuthorizationEvent(subject string) bool {
+	switch subject {
+	case "boutique.evt.payment.authorized.v1",
+		"boutique.evt.payment.authorization-declined.v1":
+		return true
+	default:
+		return false
+	}
+}
+
+func isCheckoutPaymentLateStageEvent(subject string) bool {
+	switch subject {
+	case "boutique.evt.payment.captured.v1",
 		"boutique.evt.payment.capture-failed.v1",
 		"boutique.evt.payment.authorization-released.v1",
-		"boutique.evt.shipping.shipment-cancelled.v1",
-		"boutique.evt.payment.authorization-release-failed.v1",
-		"boutique.evt.shipping.shipment-cancellation-failed.v1":
+		"boutique.evt.payment.authorization-release-failed.v1":
 		return true
 	default:
 		return false

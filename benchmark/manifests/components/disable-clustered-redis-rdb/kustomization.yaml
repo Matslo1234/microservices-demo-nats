@@ -1,0 +1,52 @@
+# Copyright 2026 Google LLC
+# Licensed under the Apache License, Version 2.0 (the "License");
+
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+patches:
+- target:
+    group: apps
+    version: v1
+    kind: StatefulSet
+    name: redis-cart-cluster
+  patch: |-
+    - op: replace
+      path: /spec/template/spec/containers/0/args/0
+      value: |-
+        exec redis-server \
+          --bind 0.0.0.0 \
+          --protected-mode no \
+          --port 6379 \
+          --appendonly yes \
+          --appendfsync always \
+          --save "" \
+          --cluster-enabled yes \
+          --cluster-config-file /data/nodes.conf \
+          --cluster-node-timeout 5000 \
+          --cluster-announce-hostname "${POD_NAME}.redis-cart-cluster-headless.${POD_NAMESPACE}.svc.cluster.local" \
+          --cluster-announce-port 6379 \
+          --cluster-announce-bus-port 16379 \
+          --cluster-preferred-endpoint-type hostname
+- target:
+    group: apps
+    version: v1
+    kind: StatefulSet
+    name: redis-checkout-cluster
+  patch: |-
+    - op: replace
+      path: /spec/template/spec/containers/0/args/0
+      value: |-
+        exec redis-server \
+          --bind 0.0.0.0 \
+          --protected-mode no \
+          --port 6379 \
+          --appendonly yes \
+          --appendfsync always \
+          --save "" \
+          --cluster-enabled yes \
+          --cluster-config-file /data/nodes.conf \
+          --cluster-node-timeout 5000 \
+          --cluster-announce-hostname "${POD_NAME}.redis-checkout-cluster-headless.${POD_NAMESPACE}.svc.cluster.local" \
+          --cluster-announce-port 6379 \
+          --cluster-announce-bus-port 16379 \
+          --cluster-preferred-endpoint-type hostname

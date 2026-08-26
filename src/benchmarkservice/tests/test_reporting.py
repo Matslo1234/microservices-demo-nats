@@ -14,10 +14,38 @@ from reporting import (
     nats_summary,
     percentile,
     resource_summary,
+    source_records_for_window,
 )
 
 
 class ReportingTest(unittest.TestCase):
+    def test_source_windows_use_fresh_source_time_and_deduplicate_cache(self) -> None:
+        records = [
+            {
+                "timestamp": 110,
+                "elapsed_seconds": 20,
+                "source_elapsed_seconds": {"nats": 9},
+                "source_samples": {"nats": {"collected_at": 100}},
+            },
+            {
+                "timestamp": 111,
+                "elapsed_seconds": 21,
+                "source_elapsed_seconds": {"nats": 9},
+                "source_samples": {"nats": {"collected_at": 100}},
+            },
+            {
+                "timestamp": 122,
+                "elapsed_seconds": 22,
+                "source_elapsed_seconds": {"nats": 12},
+                "source_samples": {"nats": {"collected_at": 110}},
+            },
+        ]
+
+        selected = source_records_for_window(records, "nats", 5, 10)
+
+        self.assertEqual(1, len(selected))
+        self.assertEqual(9, selected[0]["elapsed_seconds"])
+
     def test_percentile_interpolates_and_handles_empty_input(self) -> None:
         self.assertIsNone(percentile([], 0.95))
         self.assertEqual(2.5, percentile([1, 2, 3, 4], 0.5))
@@ -418,13 +446,20 @@ class ReportingTest(unittest.TestCase):
                 encoding="utf-8",
             )
             resources = [
-                self._resource(1, 1_000_000_000, 100, 10, 20),
-                self._resource(9, 2_000_000_000, 100, 20, 30),
-                self._resource(11, 3_000_000_000, 100, 30, 40),
-                self._resource(19, 4_000_000_000, 100, 40, 50),
+                self._resource(5, 1_000_000_000, 100, 10, 20),
+                self._resource(15, 2_000_000_000, 200, 20, 30),
+                self._resource(25, 3_000_000_000, 300, 30, 40),
             ]
-            for elapsed, record in zip((1, 9, 11, 19), resources):
+            for elapsed, record in zip((5, 15, 25), resources):
                 record["elapsed_seconds"] = elapsed
+                record["nats_metrics"] = [
+                    self._nats_metric(
+                        "jetstream_consumer_num_pending",
+                        elapsed,
+                        "BOUTIQUE_EVENTS",
+                        "payment",
+                    )
+                ]
             (run / "resources.jsonl").write_text(
                 "".join(json.dumps(record) + "\n" for record in resources),
                 encoding="utf-8",
@@ -453,6 +488,24 @@ class ReportingTest(unittest.TestCase):
             )
             self.assertTrue(
                 saturation["rungs"][0]["resources"]["available"]
+            )
+            self.assertTrue(
+                saturation["rungs"][0]["resources"]["partial"]
+            )
+            self.assertEqual(
+                100,
+                saturation["rungs"][0]["resources"][
+                    "average_memory_bytes"
+                ],
+            )
+            self.assertIsNone(
+                saturation["rungs"][0]["resources"]["cpu_seconds"]
+            )
+            self.assertEqual(
+                5,
+                saturation["rungs"][0]["nats"]["consumer_pending"][
+                    "last"
+                ],
             )
 
     @staticmethod

@@ -108,7 +108,7 @@ data:
           namespace: default
           service: cartservice
       - record: boutique_jetstream_consumer_pending
-        expr: sum(max by (consumer_name) (jetstream_consumer_num_pending{account="BOUTIQUE",consumer_name=~"checkout-(cart|catalog|currency|order-commands|saga-payment|saga-shipping)-v1",is_consumer_leader="true"}))
+        expr: sum(max by (consumer_name) (jetstream_consumer_num_pending{account="BOUTIQUE",consumer_name=~"checkout-(cart|catalog|currency|order-commands|saga-payment|saga-payment-authorization|saga-shipping|saga-shipping-quote)-v1",is_consumer_leader="true"}))
         labels:
           namespace: default
           service: checkoutservice

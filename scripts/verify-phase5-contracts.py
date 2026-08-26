@@ -47,7 +47,8 @@ forbid(ROOT / "src/checkoutservice", checkout,
        "relayOutbox", "RemoveOutboxBatch", "TxPipelined", ".Watch(",
        'key("revision")', 'key("outbox")')
 require(ROOT / "src/checkoutservice", checkout,
-        "checkout-order-commands-v1", "CHECKOUT_REDIS_ADDR", "commitOrderScript",
+        "checkout-order-commands-v1", "checkout-saga-payment-authorization-v1",
+        "checkout-saga-payment-v1", "CHECKOUT_REDIS_ADDR", "commitOrderScript",
         "ApplyOrder", "defaultRedisRetention", "NewResultEnvelope",
         "encodeRedisJSON", "decodeRedisJSON", "CHECKOUT_REDIS_RETENTION",
         "PublishMsgAsync", "Nats-Msg-Id", "RedisLeaseStore", "DueDeadlines",
@@ -112,6 +113,7 @@ checkout_manifest_path, checkout_manifest = source(
 require(checkout_manifest_path, checkout_manifest,
         "CHECKOUT_REDIS_ADDR", "redis-checkout-cluster:6379", "CHECKOUT_REDIS_MODE",
         "checkout:v2", "CHECKOUT_REDIS_RETENTION", "792h", "CHECKOUT_DEADLINE_LEASE",
+        "checkout-saga-payment-authorization-v1", "checkout-saga-payment-v1",
         "type: RollingUpdate", "maxUnavailable: 0",
         "nats-client-config", "nats-ca")
 forbid(checkout_manifest_path, checkout_manifest,

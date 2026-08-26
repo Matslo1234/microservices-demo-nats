@@ -9,6 +9,9 @@ func setValidProjectionEnvironment(t *testing.T) {
 	t.Helper()
 	for _, name := range []string{
 		"STOREFRONT_QUERY_CONCURRENCY",
+		"STOREFRONT_QUERY_MAX_IN_FLIGHT",
+		"STOREFRONT_QUERY_PENDING_MESSAGES",
+		"STOREFRONT_QUERY_PENDING_BYTES",
 		"STOREFRONT_CART_CACHE_ENTRIES",
 		"STOREFRONT_CONTEXT_CACHE_ENTRIES",
 	} {
@@ -43,7 +46,9 @@ func TestLoadProjectionConfigAcceptsRegionQualifiedAssets(t *testing.T) {
 		config.productsBucket != "STOREFRONT_PRODUCTS_EU_CENTRAL_1" {
 		t.Fatalf("unexpected projection config: %+v", config)
 	}
-	if config.queryConcurrency != 8 || config.cartCacheEntries != 32768 ||
+	if config.queryConcurrency != 8 || config.queryMaxInFlight != 12 ||
+		config.queryPendingMessages != 512 || config.queryPendingBytes != 2*1024*1024 ||
+		config.cartCacheEntries != 32768 ||
 		config.contextCacheEntries != 65536 {
 		t.Fatalf("unexpected performance defaults: %+v", config)
 	}
@@ -54,6 +59,27 @@ func TestLoadProjectionConfigRejectsInvalidPerformanceBounds(t *testing.T) {
 	t.Setenv("STOREFRONT_QUERY_CONCURRENCY", "0")
 	if _, err := loadProjectionConfig(); err == nil {
 		t.Fatal("zero query concurrency was accepted")
+	}
+}
+
+func TestLoadProjectionConfigRejectsInvalidAdmissionLimit(t *testing.T) {
+	setValidProjectionEnvironment(t)
+	t.Setenv("STOREFRONT_QUERY_MAX_IN_FLIGHT", "0")
+	if _, err := loadProjectionConfig(); err == nil {
+		t.Fatal("zero query admission limit was accepted")
+	}
+}
+
+func TestLoadProjectionConfigRejectsInvalidPendingLimits(t *testing.T) {
+	setValidProjectionEnvironment(t)
+	t.Setenv("STOREFRONT_QUERY_PENDING_MESSAGES", "0")
+	if _, err := loadProjectionConfig(); err == nil {
+		t.Fatal("zero query pending-message limit was accepted")
+	}
+	setValidProjectionEnvironment(t)
+	t.Setenv("STOREFRONT_QUERY_PENDING_BYTES", "1024")
+	if _, err := loadProjectionConfig(); err == nil {
+		t.Fatal("undersized query pending-byte limit was accepted")
 	}
 }
 

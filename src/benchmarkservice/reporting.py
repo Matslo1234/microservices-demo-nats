@@ -221,9 +221,58 @@ def _pod_totals(
     return cpu, memory, received, transmitted
 
 
-def resource_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
+def _single_resource_sample_summary(record: dict[str, Any]) -> dict[str, Any]:
+    """Retain gauges from one sample without inventing counter deltas."""
+    pods = record.get("pods", {})
+    _, memory, _, _ = _pod_totals(pods)
+    memory_by_service: dict[str, int] = defaultdict(int)
+    for pod in pods.values():
+        service = str(pod.get("service", "unknown"))
+        memory_by_service[service] += int(
+            pod.get("memory_working_set_bytes", 0)
+        )
+
+    unavailable_counters = {
+        "cpu_seconds": None,
+        "memory_byte_seconds": None,
+        "network_rx_bytes": None,
+        "network_tx_bytes": None,
+        "cpu_throttled_seconds": None,
+        "cpu_throttled_periods": None,
+        "cpu_periods": None,
+        "cpu_throttling_ratio": None,
+        "disk_io_operations": None,
+        "disk_io_seconds": None,
+        "average_disk_latency_seconds": None,
+    }
+    return {
+        "available": True,
+        "partial": True,
+        "partial_reason": (
+            "only one steady-state sample; cumulative deltas are unavailable"
+        ),
+        "sampled_seconds": 0.0,
+        **unavailable_counters,
+        "average_memory_bytes": memory,
+        "max_sampled_memory_bytes": memory,
+        "disk_latency_available": False,
+        "by_service": {
+            service: {
+                **unavailable_counters,
+                "average_memory_bytes": service_memory,
+            }
+            for service, service_memory in sorted(memory_by_service.items())
+        },
+    }
+
+
+def resource_summary(
+    records: list[dict[str, Any]], *, allow_single_sample: bool = False
+) -> dict[str, Any]:
     steady = [record for record in records if record.get("phase") == "steady"]
     if len(steady) < 2:
+        if len(steady) == 1 and allow_single_sample:
+            return _single_resource_sample_summary(steady[0])
         return {"available": False, "reason": "fewer than two steady-state samples"}
 
     cpu_ns = memory_byte_seconds = rx_bytes = tx_bytes = 0.0
@@ -1187,7 +1236,11 @@ def capacity_assessment(
 def add_per_order_resource_metrics(
     resources: dict[str, Any], completed: int
 ) -> None:
-    if not resources.get("available") or completed <= 0:
+    if (
+        not resources.get("available")
+        or resources.get("sampled_seconds", 0) <= 0
+        or completed <= 0
+    ):
         return
     resources["per_completed_order"] = {
         "cpu_seconds": round(resources["cpu_seconds"] / completed, 9),
@@ -1225,29 +1278,24 @@ def saturation_summary(
             if record.get("context", {}).get("saturation_rung")
             == rung_number
         ]
-        rung_resource_records = [
-            record
-            for record in resource_records
-            if (
-                record.get("saturation_rung") == rung_number
-                or (
-                    record.get("saturation_rung") is None
-                    and started
-                    <= float(record.get("elapsed_seconds", -1))
-                    <= ended
-                )
-            )
-        ]
+        rung_resource_records = source_records_for_window(
+            resource_records, "kubernetes", started, ended
+        )
+        rung_nats_records = source_records_for_window(
+            resource_records, "nats", started, ended
+        )
         rung_outstanding_records = [
             record
             for record in outstanding_records
             if started <= float(record.get("elapsed_seconds", -1)) <= ended
         ]
         business = business_summary(rung_business_records, duration)
-        resources = resource_summary(rung_resource_records)
+        resources = resource_summary(
+            rung_resource_records, allow_single_sample=True
+        )
         add_per_order_resource_metrics(resources, business["completed"])
         nats = (
-            nats_summary(rung_resource_records)
+            nats_summary(rung_nats_records)
             if config.application_type == "NATS"
             else {
                 "available": False,
@@ -1318,6 +1366,50 @@ def saturation_summary(
     }
 
 
+def source_records_for_window(
+    records: list[dict[str, Any]],
+    source: str,
+    started: float,
+    ended: float,
+    *,
+    maximum_age_seconds: float = 10.0,
+) -> list[dict[str, Any]]:
+    """Select fresh source samples by their own collection time.
+
+    Older artifacts have no source timestamps and retain their historical
+    elapsed-time behavior.
+    """
+    selected: list[dict[str, Any]] = []
+    seen: set[float] = set()
+    for record in records:
+        source_samples = record.get("source_samples", {})
+        sample = source_samples.get(source, {})
+        source_elapsed = record.get("source_elapsed_seconds", {}).get(source)
+        if source_elapsed is None:
+            source_elapsed = record.get("elapsed_seconds", -1)
+        try:
+            elapsed = float(source_elapsed)
+        except (TypeError, ValueError):
+            continue
+        collected_at = sample.get("collected_at")
+        record_timestamp = record.get("timestamp")
+        if isinstance(collected_at, (int, float)) and isinstance(
+            record_timestamp, (int, float)
+        ):
+            age = float(record_timestamp) - float(collected_at)
+            if age < 0 or age > maximum_age_seconds:
+                continue
+            identity = float(collected_at)
+            if identity in seen:
+                continue
+            seen.add(identity)
+        if started <= elapsed <= ended:
+            selected_record = dict(record)
+            selected_record["elapsed_seconds"] = elapsed
+            selected.append(selected_record)
+    return selected
+
+
 def build_report(run_directory: Path) -> dict[str, Any]:
     with (run_directory / "config.json").open(encoding="utf-8") as source:
         config = BenchmarkConfig.from_dict(json.load(source))
@@ -1338,7 +1430,10 @@ def build_report(run_directory: Path) -> dict[str, Any]:
         else float(config.duration_seconds)
     )
     business = business_summary(business_records, measured_duration)
-    resources = resource_summary(resource_records)
+    resources = resource_summary(
+        resource_records,
+        allow_single_sample=config.workload == "saturation",
+    )
     nats = (
         nats_summary(resource_records)
         if config.application_type == "NATS"

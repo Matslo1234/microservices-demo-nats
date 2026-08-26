@@ -66,7 +66,9 @@ the failure.
   increases or, for NATS, total application-consumer pending grows by at least
   10 messages/s. These observations do not end the load schedule: it runs for
   the complete steady interval and holds at `saturation_max_rate` if it reaches
-  that cap before the interval ends.
+  that cap before the interval ends. A rung with one metrics snapshot retains
+  its instantaneous gauges; cumulative resource deltas remain unavailable
+  because they require two snapshots.
 - `fault_tolerance` uses the same absolute-rate scheduler as `open`, while the
   dedicated standalone controller scales `paymentservice` and then
   `shippingservice` to zero for configured intervals. It is intentionally not
@@ -144,6 +146,18 @@ Service.
 It reads kubelet summaries and local NATS exporter endpoints in the tested
 cluster. Locust only performs HTTP requests to the supplied frontend and
 metrics URLs.
+
+The gateway refreshes NATS and Kubernetes data independently and serves
+`/snapshot` entirely from cache. NATS refreshes every second; Kubernetes
+summary refreshes every five seconds with bounded parallel node requests;
+cAdvisor counters refresh every 30 seconds. Every response includes per-source
+collection timestamps, ages, durations, partial-result errors, and timeout
+diagnostics. The intervals and bounds can be tuned with
+`NATS_METRICS_CACHE_INTERVAL_SECONDS`,
+`KUBERNETES_METRICS_CACHE_INTERVAL_SECONDS`,
+`KUBERNETES_METRICS_SNAPSHOT_DEADLINE_SECONDS`,
+`KUBERNETES_METRICS_REQUEST_TIMEOUT_SECONDS`, `KUBERNETES_METRICS_WORKERS`,
+`CADVISOR_SAMPLE_INTERVAL_SECONDS`, and `COLLECT_CADVISOR_METRICS`.
 
 After applying a benchmark bundle, obtain both external addresses:
 

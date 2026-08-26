@@ -8,6 +8,7 @@ import json
 import os
 import ssl
 import threading
+import time
 from concurrent.futures import Future
 from dataclasses import dataclass
 from typing import Any, Coroutine
@@ -90,7 +91,7 @@ class NatsSharedStore:
     async def _ensure_connected(self) -> None:
         if (
             self._connection is not None
-            and not self._connection.is_closed
+            and self._connection.is_connected
             and self._kv is not None
             and self._objects is not None
         ):
@@ -100,7 +101,7 @@ class NatsSharedStore:
         async with self._connect_lock:
             if (
                 self._connection is not None
-                and not self._connection.is_closed
+                and self._connection.is_connected
                 and self._kv is not None
                 and self._objects is not None
             ):
@@ -135,8 +136,11 @@ class NatsSharedStore:
                 reconnect_time_wait=float(
                     os.environ.get("NATS_RECONNECT_WAIT", "2s").rstrip("s")
                 ),
+                # The operation-level retry below owns durable recovery.  A
+                # finite nats-py retry prevents one connection object created
+                # during a DNS or node outage from blocking forever.
                 max_reconnect_attempts=int(
-                    os.environ.get("NATS_MAX_RECONNECTS", "-1")
+                    os.environ.get("BENCHMARK_NATS_RECONNECT_ATTEMPTS", "3")
                 ),
                 ping_interval=float(
                     os.environ.get("NATS_PING_INTERVAL", "20s").rstrip("s")
@@ -175,12 +179,59 @@ class NatsSharedStore:
                 "object_not_found": js_errors.ObjectNotFoundError,
             }
 
+    async def _invalidate_connection(self) -> None:
+        connection = self._connection
+        self._connection = None
+        self._kv = None
+        self._objects = None
+        self._errors = {}
+        if connection is not None and not connection.is_closed:
+            try:
+                await asyncio.wait_for(connection.close(), timeout=2)
+            except Exception:
+                pass
+
+    async def _with_recovery(self, operation: Any) -> Any:
+        """Retry transient NATS failures using a newly built JS context.
+
+        KV create/update calls are protected by JetStream CAS.  If a timeout
+        hides a successful write, replay returns a revision conflict and the
+        caller re-reads the committed record.  Object writes use a stable name
+        and identical bytes, so replay is safe as well.
+        """
+        import nats
+        from nats.js import errors as js_errors
+
+        transient = (
+            asyncio.TimeoutError,
+            nats.errors.TimeoutError,
+            nats.errors.ConnectionClosedError,
+            nats.errors.NoServersError,
+            nats.errors.UnexpectedEOF,
+            js_errors.ServiceUnavailableError,
+        )
+        deadline = time.monotonic() + self.operation_timeout
+        delay = 0.25
+        while True:
+            try:
+                await self._ensure_connected()
+                return await operation()
+            except transient:
+                await self._invalidate_connection()
+                remaining = deadline - time.monotonic()
+                if remaining <= delay:
+                    raise
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, 2.0)
+
     async def _get(self, key: str) -> StoredRecord:
-        await self._ensure_connected()
-        try:
-            entry = await self._kv.get(key)
-        except self._errors["not_found"] as error:
-            raise RecordNotFound(key) from error
+        async def get() -> Any:
+            try:
+                return await self._kv.get(key)
+            except self._errors["not_found"] as error:
+                raise RecordNotFound(key) from error
+
+        entry = await self._with_recovery(get)
         return StoredRecord(
             decode_json(entry.value),
             int(entry.revision),
@@ -190,11 +241,13 @@ class NatsSharedStore:
         return self._call(self._get(key))
 
     async def _create(self, key: str, value: dict[str, Any]) -> int:
-        await self._ensure_connected()
-        try:
-            return int(await self._kv.create(key, encode_json(value)))
-        except self._errors["conflict"] as error:
-            raise RevisionConflict(key) from error
+        async def create() -> int:
+            try:
+                return int(await self._kv.create(key, encode_json(value)))
+            except self._errors["conflict"] as error:
+                raise RevisionConflict(key) from error
+
+        return await self._with_recovery(create)
 
     def create(self, key: str, value: dict[str, Any]) -> int:
         return self._call(self._create(key, value))
@@ -202,15 +255,17 @@ class NatsSharedStore:
     async def _update(
         self, key: str, value: dict[str, Any], revision: int
     ) -> int:
-        await self._ensure_connected()
-        try:
-            return int(
-                await self._kv.update(
-                    key, encode_json(value), last=revision
+        async def update() -> int:
+            try:
+                return int(
+                    await self._kv.update(
+                        key, encode_json(value), last=revision
+                    )
                 )
-            )
-        except self._errors["conflict"] as error:
-            raise RevisionConflict(key) from error
+            except self._errors["conflict"] as error:
+                raise RevisionConflict(key) from error
+
+        return await self._with_recovery(update)
 
     def update(
         self, key: str, value: dict[str, Any], revision: int
@@ -218,48 +273,55 @@ class NatsSharedStore:
         return self._call(self._update(key, value, revision))
 
     async def _keys(self, prefix: str) -> list[str]:
-        await self._ensure_connected()
-        try:
-            keys = await self._kv.keys(filters=[prefix])
-        except self._errors["no_keys"]:
-            return []
+        async def get_keys() -> list[str]:
+            try:
+                return await self._kv.keys(filters=[prefix])
+            except self._errors["no_keys"]:
+                return []
+
+        keys = await self._with_recovery(get_keys)
         return sorted(key for key in keys if key.startswith(prefix))
 
     def keys(self, prefix: str) -> list[str]:
         return self._call(self._keys(prefix))
 
     async def _put_object(self, name: str, data: bytes) -> None:
-        await self._ensure_connected()
-        await self._objects.put(name, data)
+        await self._with_recovery(lambda: self._objects.put(name, data))
 
     def put_object(self, name: str, data: bytes) -> None:
         self._call(self._put_object(name, data))
 
     async def _get_object(self, name: str) -> bytes:
-        await self._ensure_connected()
-        try:
-            result = await self._objects.get(name)
-        except self._errors["object_not_found"] as error:
-            raise RecordNotFound(name) from error
+        async def get() -> Any:
+            try:
+                return await self._objects.get(name)
+            except self._errors["object_not_found"] as error:
+                raise RecordNotFound(name) from error
+
+        result = await self._with_recovery(get)
         return bytes(result.data or b"")
 
     def get_object(self, name: str) -> bytes:
         return self._call(self._get_object(name))
 
     async def _delete_object(self, name: str) -> None:
-        await self._ensure_connected()
-        try:
-            await self._objects.delete(name)
-        except self._errors["object_not_found"]:
-            return
+        async def delete() -> None:
+            try:
+                await self._objects.delete(name)
+            except self._errors["object_not_found"]:
+                return
+
+        await self._with_recovery(delete)
 
     def delete_object(self, name: str) -> None:
         self._call(self._delete_object(name))
 
     async def _ready(self) -> None:
-        await self._ensure_connected()
-        await self._kv.status()
-        await self._objects.status()
+        async def ready() -> None:
+            await self._kv.status()
+            await self._objects.status()
+
+        await self._with_recovery(ready)
 
     def ready(self) -> bool:
         try:
@@ -270,13 +332,21 @@ class NatsSharedStore:
 
     async def _close(self) -> None:
         if self._connection is not None and not self._connection.is_closed:
-            await self._connection.drain()
+            # All store operations are synchronously acknowledged before
+            # returning to callers.  Closing avoids turning a successful Job
+            # into a failure when a damaged connection cannot drain.
+            await self._connection.close()
 
     def close(self) -> None:
         if self._closed:
             return
         try:
-            self._call(self._close())
+            try:
+                self._call(self._close())
+            except Exception:
+                # Shutdown is best effort; every mutation and upload awaited
+                # its own JetStream acknowledgement before returning.
+                pass
         finally:
             self._closed = True
             self._loop.call_soon_threadsafe(self._loop.stop)

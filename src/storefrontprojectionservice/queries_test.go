@@ -13,6 +13,25 @@ import (
 	"github.com/GoogleCloudPlatform/microservices-demo/src/storefrontprojectionservice/internal/storefront"
 )
 
+func TestQueryAdmissionRejectsAboveLimitAndRecovers(t *testing.T) {
+	admission := &queryAdmission{limit: 2}
+	if !admission.acquire() || !admission.acquire() {
+		t.Fatal("admission rejected capacity below its limit")
+	}
+	if admission.acquire() {
+		t.Fatal("admission accepted capacity above its limit")
+	}
+	admission.release()
+	if !admission.acquire() {
+		t.Fatal("admission did not recover released capacity")
+	}
+	admission.release()
+	admission.release()
+	if active := admission.active.Load(); active != 0 {
+		t.Fatalf("active queries = %d, want 0", active)
+	}
+}
+
 func TestQueryServicesIsolateBrowseFromTracking(t *testing.T) {
 	projector := &projector{}
 	browse, err := projector.queryHandlers(browseQueryRole)
@@ -38,9 +57,6 @@ func TestQueryServicesIsolateBrowseFromTracking(t *testing.T) {
 	}
 	if !slices.Equal(trackingNames, []string{"operation", "order"}) {
 		t.Fatalf("unexpected tracking handlers: %v", trackingNames)
-	}
-	if queryEndpointPendingMessages != 128 {
-		t.Fatalf("got endpoint pending limit %d, want 128", queryEndpointPendingMessages)
 	}
 }
 

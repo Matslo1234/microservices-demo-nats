@@ -187,31 +187,37 @@ func (fe *frontendServer) orderEventsHandler(response http.ResponseWriter, reque
 	view, err := fe.storefrontQuery(request.Context(), "order", storefrontQueryRequest{
 		OrderID: orderID, UserID: sessionID(request), CorrelationID: orderID,
 	})
-	if err != nil {
-		if errors.Is(err, errProjectionNotFound) {
-			writeRetryableOrderError(response, "order not found", http.StatusNotFound)
-			return
-		}
+	if err != nil && !errors.Is(err, errProjectionNotFound) && !errors.Is(err, errProjectionUnavailable) {
 		writeRetryableOrderError(response, "order status unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	if view.Order == nil {
-		writeRetryableOrderError(response, "order status unavailable", http.StatusServiceUnavailable)
-		return
+	// Live events are the primary outcome transport. If the projection query is
+	// overloaded or has not caught up yet, keep the already-active subscription
+	// and send a harmless queued snapshot instead of forcing the client to
+	// reconnect and amplify query load.
+	initialOrder := (*orderStatus)(nil)
+	if view != nil {
+		initialOrder = view.Order
+	}
+	if initialOrder == nil {
+		initialOrder = &orderStatus{
+			OrderID: orderID, UserID: sessionID(request), Status: "QUEUED",
+			Stage: "QUEUED",
+		}
 	}
 
 	response.Header().Set("Content-Type", "text/event-stream")
 	response.Header().Set("Cache-Control", "no-cache")
 	response.Header().Set("X-Accel-Buffering", "no")
 	controller := http.NewResponseController(response)
-	if err := writeOrderSSE(response, view.Order); err != nil {
+	if err := writeOrderSSE(response, initialOrder); err != nil {
 		return
 	}
-	if err := controller.Flush(); err != nil || !orderNeedsPolling(view.Order) {
+	if err := controller.Flush(); err != nil || !orderNeedsPolling(initialOrder) {
 		return
 	}
 
-	lastUpdatedAt := view.Order.UpdatedAt
+	lastUpdatedAt := initialOrder.UpdatedAt
 	heartbeat := time.NewTicker(orderSSEHeartbeat)
 	defer heartbeat.Stop()
 	for {
