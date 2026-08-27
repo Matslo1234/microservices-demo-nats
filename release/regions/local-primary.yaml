@@ -2799,6 +2799,8 @@ spec:
           value: "32"
         - name: NATS_CONSUMER_CONCURRENCY
           value: "8"
+        - name: AD_PAGE_VIEW_MAX_AGE
+          value: 5s
         - name: ENABLE_TRACING
           value: "1"
         - name: OTEL_RESOURCE_ATTRIBUTES
@@ -2808,7 +2810,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-adservice
-        image: matslo123/adservice:v0.4.0@sha256:9ea77de953468f3ddb47e31149dc934a04534bc75da892f46b824339b5963109
+        image: matslo123/adservice:v0.4.0@sha256:5f54fe06f3bfa41a788cc943ed4afe5ab527c97aca5a89b0ab3ba4a7d6c86f80
         livenessProbe:
           httpGet:
             path: /healthz
@@ -2827,10 +2829,10 @@ spec:
           periodSeconds: 15
         resources:
           limits:
-            cpu: 500m
+            cpu: 1000m
             memory: 2Gi
           requests:
-            cpu: 200m
+            cpu: 400m
             memory: 180Mi
         securityContext:
           allowPrivilegeEscalation: false
@@ -2917,7 +2919,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-benchmarkservice
-        image: matslo123/benchmarkservice:v0.4.0@sha256:20cc7b4686c1ed068aecf65cb765486c10b97105cbad27bd23033eaadc169bfa
+        image: matslo123/benchmarkservice:v0.4.0@sha256:2ef9f1ffc6ebe9c3390197c290565ce12993ac62358cdebbd5d38a6ce12566f4
         livenessProbe:
           httpGet:
             path: /healthz
@@ -4075,7 +4077,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-recommendationservice
-        image: matslo123/recommendationservice:v0.4.0@sha256:898d526a7999c64d6ee1b06504e9aedea64e5f03d18fdb34eb1e9a4dd4e8ee26
+        image: matslo123/recommendationservice:v0.4.0@sha256:d8cccf9a19c5d62bf3e38d94728366c7933c1daeb138b6f6713c42277a5f760a
         livenessProbe:
           failureThreshold: 6
           httpGet:
@@ -4291,12 +4293,24 @@ spec:
               - app
               topologyKey: kubernetes.io/hostname
             weight: 100
+          - podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - storefrontprojectionservice
+                  - storefrontqueryservice
+              topologyKey: kubernetes.io/hostname
+            weight: 100
       containers:
       - env:
+        - name: STOREFRONT_RUNTIME_ROLE
+          value: projection
         - name: NATS_REQUIRED
           value: "true"
         - name: NATS_REQUIRED_SUBSCRIPTIONS
-          value: storefront-projection-local-v1,boutique.qry.storefront.home.v1,boutique.qry.storefront.product.v1,boutique.qry.storefront.cart.v1,boutique.qry.storefront.currencies.v1,boutique.qry.storefront.product-meta.v1,boutique.qry.storefront.operation.v1,boutique.qry.storefront.order.v1
+          value: storefront-projection-local-v1
         - name: GOMEMLIMIT
           value: 400MiB
         - name: STOREFRONT_QUERY_CONCURRENCY
@@ -4320,7 +4334,140 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-storefrontprojectionservice
-        image: matslo123/storefrontprojectionservice:v0.4.0@sha256:0a51671d6e0502d7bd68ef2034bdb5697d20d020f5edfe2a0110af993e09b382
+        image: matslo123/storefrontprojectionservice:v0.4.0@sha256:cf6fdfe30ede8ecf44102322e973380579fe02676fcf74fcfb849983f91a7234
+        livenessProbe:
+          failureThreshold: 6
+          httpGet:
+            path: /healthz
+            port: 8080
+          periodSeconds: 10
+          timeoutSeconds: 3
+        name: server
+        ports:
+        - containerPort: 8080
+          name: http
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: 8080
+          periodSeconds: 5
+          timeoutSeconds: 5
+        resources:
+          limits:
+            cpu: "4"
+            memory: 2Gi
+          requests:
+            cpu: 400m
+            memory: 128Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+        volumeMounts:
+        - mountPath: /etc/nats-ca
+          name: nats-ca
+          readOnly: true
+      securityContext:
+        fsGroup: 1000
+        runAsGroup: 1000
+        runAsNonRoot: true
+        runAsUser: 1000
+      serviceAccountName: storefrontprojectionservice
+      terminationGracePeriodSeconds: 35
+      topologySpreadConstraints:
+      - labelSelector: {}
+        matchLabelKeys:
+        - app
+        maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: ScheduleAnyway
+      volumes:
+      - configMap:
+          name: nats-ca
+        name: nats-ca
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: storefrontqueryservice
+    boutique.online.io/k8s-cluster: local
+    boutique.online.io/region: local
+  name: storefrontqueryservice
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: storefrontqueryservice
+  strategy:
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+    type: RollingUpdate
+  template:
+    metadata:
+      annotations:
+        prometheus.io/path: /metrics
+        prometheus.io/port: "8080"
+        prometheus.io/scrape: "true"
+      labels:
+        app: storefrontqueryservice
+        boutique.online.io/k8s-cluster: local
+        boutique.online.io/region: local
+    spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - podAffinityTerm:
+              labelSelector: {}
+              matchLabelKeys:
+              - app
+              topologyKey: kubernetes.io/hostname
+            weight: 100
+          - podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - storefrontprojectionservice
+                  - storefrontqueryservice
+              topologyKey: kubernetes.io/hostname
+            weight: 100
+      containers:
+      - env:
+        - name: STOREFRONT_RUNTIME_ROLE
+          value: query
+        - name: NATS_REQUIRED
+          value: "true"
+        - name: NATS_REQUIRED_SUBSCRIPTIONS
+          value: boutique.qry.storefront.home.v1,boutique.qry.storefront.product.v1,boutique.qry.storefront.cart.v1,boutique.qry.storefront.currencies.v1,boutique.qry.storefront.product-meta.v1,boutique.qry.storefront.operation.v1,boutique.qry.storefront.order.v1
+        - name: GOMEMLIMIT
+          value: 400MiB
+        - name: STOREFRONT_QUERY_CONCURRENCY
+          value: "16"
+        - name: STOREFRONT_QUERY_MAX_IN_FLIGHT
+          value: "12"
+        - name: STOREFRONT_QUERY_PENDING_MESSAGES
+          value: "512"
+        - name: STOREFRONT_QUERY_PENDING_BYTES
+          value: "2097152"
+        - name: STOREFRONT_CART_CACHE_ENTRIES
+          value: "32768"
+        - name: STOREFRONT_CONTEXT_CACHE_ENTRIES
+          value: "65536"
+        - name: ENABLE_TRACING
+          value: "1"
+        - name: OTEL_RESOURCE_ATTRIBUTES
+          value: cloud.region=local,k8s.cluster.name=local,nats.cluster.name=BOUTIQUE
+        envFrom:
+        - configMapRef:
+            name: nats-client-config
+        - secretRef:
+            name: nats-credentials-storefrontprojectionservice
+        image: matslo123/storefrontprojectionservice:v0.4.0@sha256:cf6fdfe30ede8ecf44102322e973380579fe02676fcf74fcfb849983f91a7234
         livenessProbe:
           failureThreshold: 6
           httpGet:
@@ -4938,6 +5085,19 @@ spec:
   selector:
     matchLabels:
       app: storefrontprojectionservice
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  labels:
+    boutique.online.io/k8s-cluster: local
+    boutique.online.io/region: local
+  name: storefrontqueryservice
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: storefrontqueryservice
 ---
 apiVersion: batch/v1
 kind: Job

@@ -73,18 +73,24 @@ func main() {
 		kvReady := 0
 		if current := activeProjector.Load(); current != nil {
 			kvReady = 1
+			runtime := activeRuntime.Load()
+			projectionEnabled := runtime != nil && runtime.projectionEnabled
 			labels := fmt.Sprintf(
 				"region=\"%s\",k8s_cluster=\"%s\",nats_cluster=\"%s\",stream_owner_region=\"%s\",stream=\"%s\",consumer=\"%s\"",
 				current.config.regionID, current.config.k8sClusterName, current.config.natsClusterName, current.config.streamOwnerRegion,
 				current.config.eventStream, current.config.durable,
 			)
-			_, _ = fmt.Fprintf(response, "boutique_projection_kv_conflict_retries_total %d\n", current.kvConflictRetries.Load())
-			_, _ = fmt.Fprintf(response, "boutique_projection_stale_events_total %d\n", current.staleEventSkips.Load())
+			if projectionEnabled {
+				_, _ = fmt.Fprintf(response, "boutique_projection_kv_conflict_retries_total %d\n", current.kvConflictRetries.Load())
+				_, _ = fmt.Fprintf(response, "boutique_projection_stale_events_total %d\n", current.staleEventSkips.Load())
+			}
 			_, _ = fmt.Fprintf(response, "boutique_storefront_query_revision %d\n", current.queryRevision.Load())
-			_, _ = fmt.Fprintf(response, "boutique_projection_age_seconds{%s} %.6f\n", labels, current.projectionAgeSeconds(time.Now()))
-			_, _ = fmt.Fprintf(response, "boutique_projection_consumer_pending{%s} %d\n", labels, current.consumerPending.Load())
-			_, _ = fmt.Fprintf(response, "boutique_projection_consumer_ack_pending{%s} %d\n", labels, current.consumerAckPending.Load())
-			_, _ = fmt.Fprintf(response, "boutique_projection_last_event_unixtime{%s} %.9f\n", labels, float64(current.lastProjectedUnix.Load())/1e9)
+			if projectionEnabled {
+				_, _ = fmt.Fprintf(response, "boutique_projection_age_seconds{%s} %.6f\n", labels, current.projectionAgeSeconds(time.Now()))
+				_, _ = fmt.Fprintf(response, "boutique_projection_consumer_pending{%s} %d\n", labels, current.consumerPending.Load())
+				_, _ = fmt.Fprintf(response, "boutique_projection_consumer_ack_pending{%s} %d\n", labels, current.consumerAckPending.Load())
+				_, _ = fmt.Fprintf(response, "boutique_projection_last_event_unixtime{%s} %.9f\n", labels, float64(current.lastProjectedUnix.Load())/1e9)
+			}
 			_, _ = fmt.Fprintf(response,
 				"boutique_projection_identity_info{region=\"%s\",consumer=\"%s\",products_bucket=\"%s\",carts_bucket=\"%s\",context_bucket=\"%s\",orders_bucket=\"%s\",operations_bucket=\"%s\"} 1\n",
 				current.config.regionID, current.config.durable, current.config.productsBucket,
@@ -130,12 +136,14 @@ func main() {
 	activeProjector.Store(runtime.projector)
 	activeRuntime.Store(runtime)
 	log.Printf(
-		"storefront projection consumer established (region=%s k8s_cluster=%s nats_cluster=%s stream=%s durable=%s rebuilding=%t query_subscriptions=%d)",
+		"storefront runtime established (region=%s k8s_cluster=%s nats_cluster=%s stream=%s durable=%s projection=%t queries=%t rebuilding=%t query_subscriptions=%d)",
 		runtime.projector.config.regionID,
 		runtime.projector.config.k8sClusterName,
 		runtime.projector.config.natsClusterName,
 		runtime.projector.config.eventStream,
 		runtime.projector.config.durable,
+		runtime.projectionEnabled,
+		runtime.queryEnabled,
 		runtime.rebuilding,
 		runtime.queryEndpointCount(),
 	)
@@ -198,21 +206,32 @@ type queryServiceRuntime struct {
 }
 
 type projectionRuntime struct {
-	nc              *nats.Conn
-	projector       *projector
-	subscription    *nats.Subscription
-	subscriptionMu  sync.RWMutex
-	projectionReady atomic.Bool
-	consumerHealthy atomic.Bool
-	queryMu         sync.RWMutex
-	queryServices   map[string]*queryServiceRuntime
-	queryStopped    chan string
-	rebuilding      bool
-	stop            chan struct{}
-	closeOnce       sync.Once
+	nc                *nats.Conn
+	projector         *projector
+	projectionEnabled bool
+	queryEnabled      bool
+	subscription      *nats.Subscription
+	subscriptionMu    sync.RWMutex
+	projectionReady   atomic.Bool
+	consumerHealthy   atomic.Bool
+	queryMu           sync.RWMutex
+	queryServices     map[string]*queryServiceRuntime
+	queryStopped      chan string
+	rebuilding        bool
+	stop              chan struct{}
+	closeOnce         sync.Once
 }
 
 func initializeProjectionRuntime() (*projectionRuntime, error) {
+	runtimeRole := strings.ToLower(strings.TrimSpace(os.Getenv("STOREFRONT_RUNTIME_ROLE")))
+	if runtimeRole == "" {
+		runtimeRole = "combined"
+	}
+	if runtimeRole != "combined" && runtimeRole != "projection" && runtimeRole != "query" {
+		return nil, fmt.Errorf("STOREFRONT_RUNTIME_ROLE must be combined, projection, or query")
+	}
+	projectionEnabled := runtimeRole != "query"
+	queryEnabled := runtimeRole != "projection"
 	config, err := loadProjectionConfig()
 	if err != nil {
 		return nil, err
@@ -227,14 +246,19 @@ func initializeProjectionRuntime() (*projectionRuntime, error) {
 		return nil, err
 	}
 	projector.publishLive = nc.Publish
-	subscription, rebuilding, err := projector.subscribe()
-	if err != nil {
-		projector.close()
-		nc.Close()
-		return nil, err
+	var subscription *nats.Subscription
+	rebuilding := false
+	if projectionEnabled {
+		subscription, rebuilding, err = projector.subscribe()
+		if err != nil {
+			projector.close()
+			nc.Close()
+			return nil, err
+		}
 	}
 	runtime := &projectionRuntime{
 		nc: nc, projector: projector, subscription: subscription,
+		projectionEnabled: projectionEnabled, queryEnabled: queryEnabled,
 		queryServices: make(map[string]*queryServiceRuntime),
 		queryStopped:  make(chan string, 8), rebuilding: rebuilding,
 		stop: make(chan struct{}),
@@ -245,6 +269,10 @@ func initializeProjectionRuntime() (*projectionRuntime, error) {
 	})
 	nc.SetReconnectHandler(func(_ *nats.Conn) {
 		runtime.projectionReady.Store(false)
+		if !runtime.projectionEnabled {
+			runtime.projectionReady.Store(true)
+			return
+		}
 		go func() {
 			if err := projector.waitForInitialReplay(config.catchupTimeout); err != nil {
 				log.Printf("NATS reconnected but projection catch-up is incomplete: %v", err)
@@ -253,28 +281,32 @@ func initializeProjectionRuntime() (*projectionRuntime, error) {
 			runtime.projectionReady.Store(true)
 		}()
 	})
-	for _, role := range []string{browseQueryRole, trackingQueryRole} {
-		queryConnection, err := connectNATSConnection(config, "queries-"+role)
-		if err != nil {
-			runtime.close()
-			return nil, err
-		}
-		configureQueryConnection(queryConnection, role)
-		service, endpointCount, err := projector.registerQueries(queryConnection, role, runtime.queryStopped)
-		if err != nil {
-			queryConnection.Close()
-			runtime.close()
-			return nil, err
-		}
-		runtime.queryServices[role] = &queryServiceRuntime{
-			role: role, nc: queryConnection, service: service, endpointCount: endpointCount,
+	if queryEnabled {
+		for _, role := range []string{browseQueryRole, trackingQueryRole} {
+			queryConnection, err := connectNATSConnection(config, "queries-"+role)
+			if err != nil {
+				runtime.close()
+				return nil, err
+			}
+			configureQueryConnection(queryConnection, role)
+			service, endpointCount, err := projector.registerQueries(queryConnection, role, runtime.queryStopped)
+			if err != nil {
+				queryConnection.Close()
+				runtime.close()
+				return nil, err
+			}
+			runtime.queryServices[role] = &queryServiceRuntime{
+				role: role, nc: queryConnection, service: service, endpointCount: endpointCount,
+			}
 		}
 	}
 	runtime.consumerHealthy.Store(true)
-	go runtime.superviseProjectionConsumer(subscription)
-	if err := projector.waitForInitialReplay(config.catchupTimeout); err != nil {
-		runtime.close()
-		return nil, err
+	if projectionEnabled {
+		go runtime.superviseProjectionConsumer(subscription)
+		if err := projector.waitForInitialReplay(config.catchupTimeout); err != nil {
+			runtime.close()
+			return nil, err
+		}
 	}
 	runtime.projectionReady.Store(true)
 	return runtime, nil
@@ -296,7 +328,11 @@ func (runtime *projectionRuntime) ready() bool {
 	}
 	runtime.queryMu.RLock()
 	defer runtime.queryMu.RUnlock()
-	if len(runtime.queryServices) != len(queryNamesByRole) {
+	wantedQueries := 0
+	if runtime.queryEnabled {
+		wantedQueries = len(queryNamesByRole)
+	}
+	if len(runtime.queryServices) != wantedQueries {
 		return false
 	}
 	for _, queryRuntime := range runtime.queryServices {

@@ -117,6 +117,50 @@ class ParseResultsTest(unittest.TestCase):
                 series,
             )
 
+    def test_rebases_waiting_series_to_end_of_warmup(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            folder = Path(temporary)
+            path = folder / "summary.json"
+            self._write_result(
+                path,
+                "closed",
+                10,
+                10,
+                10,
+                100,
+                application_type="NATS",
+                waiting_events=[(30, 1_683), (35, 1_197), (45, 1)],
+            )
+            summary = json.loads(path.read_text(encoding="utf-8"))
+            summary["warmup_seconds"] = 30
+            path.write_text(json.dumps(summary), encoding="utf-8")
+
+            series = collect_closed_nats_waiting_series(find_results(folder))
+
+            self.assertEqual(
+                {
+                    10: [
+                        (0.0, 1_683.0),
+                        (1.0, 1_683.0),
+                        (2.0, 1_683.0),
+                        (3.0, 1_683.0),
+                        (4.0, 1_683.0),
+                        (5.0, 1_197.0),
+                        (6.0, 1_197.0),
+                        (7.0, 1_197.0),
+                        (8.0, 1_197.0),
+                        (9.0, 1_197.0),
+                        (10.0, 1_197.0),
+                        (11.0, 1_197.0),
+                        (12.0, 1_197.0),
+                        (13.0, 1_197.0),
+                        (14.0, 1_197.0),
+                        (15.0, 1.0),
+                    ]
+                },
+                series,
+            )
+
     def test_uses_outstanding_order_maxima_without_pending_series(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             folder = Path(temporary)

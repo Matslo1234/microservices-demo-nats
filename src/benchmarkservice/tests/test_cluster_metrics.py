@@ -211,6 +211,12 @@ class ClusterMetricsTest(unittest.TestCase):
             )
         )
         self.assertEqual(
+            "storefrontqueryservice",
+            service_for_pod(
+                "shop", "storefrontqueryservice-abc", "NATS", "shop"
+            ),
+        )
+        self.assertEqual(
             "redis-checkout",
             service_for_pod(
                 "shop", "redis-checkout-cluster-2", "NATS", "shop"

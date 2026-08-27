@@ -200,10 +200,10 @@ spec:
           value: "9555"
         resources:
           requests:
-            cpu: 125m
+            cpu: 500m
             memory: 180Mi
           limits:
-            cpu: 300m
+            cpu: 1000m
             memory: 2Gi
         readinessProbe:
           initialDelaySeconds: 20
@@ -1015,7 +1015,7 @@ spec:
             app: benchmarkservice
       containers:
       - name: server
-        image: matslo123/benchmarkservice:v0.5.0@sha256:20cc7b4686c1ed068aecf65cb765486c10b97105cbad27bd23033eaadc169bfa
+        image: matslo123/benchmarkservice:v0.5.0@sha256:58ea489d8d2db6094d5e60d75d7fc03cc1de1484d5107ba6caef2fea5e654222
         env:
         - name: PORT
           value: "8080"
@@ -1168,7 +1168,7 @@ spec:
           type: RuntimeDefault
       containers:
       - name: server
-        image: matslo123/benchmarkservice:v0.5.0@sha256:20cc7b4686c1ed068aecf65cb765486c10b97105cbad27bd23033eaadc169bfa
+        image: matslo123/benchmarkservice:v0.5.0@sha256:58ea489d8d2db6094d5e60d75d7fc03cc1de1484d5107ba6caef2fea5e654222
         imagePullPolicy: IfNotPresent
         command: ["python", "metrics_server.py"]
         env:

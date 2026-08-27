@@ -84,8 +84,12 @@ described below.
 
 ### Frontend reads and writes
 
-The frontend reads views from `storefrontprojectionservice`; it does not query
-domain owners directly.
+The frontend reads views through the logical `storefrontprojectionservice`; it
+does not query domain owners directly. Query subscriptions run in the
+`storefrontqueryservice` deployment, while the
+`storefrontprojectionservice` deployment owns the single durable event
+consumer and materialized-view writes. Both roles use the same image and KV
+buckets.
 
 | HTTP action | NATS interaction |
 | --- | --- |
@@ -127,7 +131,8 @@ they operate on the complete cart state.
 | `shippingservice` | Shipping commands and cart facts | Deterministic fake-provider outcomes and shipping facts; no pod-owned provider state |
 | `paymentservice` | Tokenization query and payment commands | Key-ID-addressed short-lived tokens, deterministic signed provider references, and payment facts |
 | `emailservice` | Completed-order facts | Order/notification-keyed deterministic provider result and notification facts |
-| `storefrontprojectionservice` | `boutique.evt.>` | Query endpoints, best-effort live order notifications, and five JetStream KV materialized views |
+| `storefrontprojectionservice` | Exact view-relevant event subjects | Persistent projection workers, best-effort live order notifications, and five JetStream KV materialized views |
+| `storefrontqueryservice` | `boutique.qry.storefront.*` | Query-only replicas reading the storefront materialized views |
 | `messageoperationsservice` | JetStream max-delivery advisories | Restricted DLQ records, case lifecycle metadata, operational events, alert metrics, and authenticated replay |
 
 The storefront projection stores products, carts, recent page context, orders,

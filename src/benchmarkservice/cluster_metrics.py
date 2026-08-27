@@ -21,6 +21,7 @@ from urllib.request import Request, urlopen
 
 DEFAULT_SERVICES = (
     "storefrontprojectionservice",
+    "storefrontqueryservice",
     "productcatalogservice",
     "recommendationservice",
     "checkoutservice",
@@ -90,7 +91,7 @@ def service_for_pod(
     for service in DEFAULT_SERVICES:
         if pod_name == service or pod_name.startswith(service + "-"):
             if (
-                service == "storefrontprojectionservice"
+                service in {"storefrontprojectionservice", "storefrontqueryservice"}
                 and application_type == "GRPC"
             ):
                 return None

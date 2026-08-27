@@ -397,13 +397,22 @@ spec:
       target:
         type: AverageValue
         averageValue: "25"
-  - type: External
-    external:
-      metric:
-        name: boutique_http_in_flight
-        selector:
-          matchLabels:
-            service: storefrontprojectionservice
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: storefrontqueryservice
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: storefrontqueryservice
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
       target:
-        type: AverageValue
-        averageValue: "20"
+        type: Utilization
+        averageUtilization: 70

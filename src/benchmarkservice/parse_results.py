@@ -816,11 +816,25 @@ def collect_closed_nats_waiting_series(
                 "per-second waiting-event samples"
             )
 
+        # Closed-loop summaries exclude warm-up samples, but their timestamps
+        # are measured from the beginning of the complete run. Plot steady
+        # state relative to the end of warm-up so the graph starts at zero.
+        warmup_seconds = _number(
+            result.summary.get("warmup_seconds", 0),
+            "warmup_seconds",
+            result.path,
+        )
+        if warmup_seconds < 0:
+            raise ResultError(
+                f"{result.path}: warmup_seconds must not be negative"
+            )
+
         # Keep the last observation in a second, then average matching seconds
         # across repeated runs with the same closed-loop user count.
         observed_by_second: dict[int, float] = {}
         for elapsed, waiting in samples:
-            observed_by_second[math.floor(elapsed)] = waiting
+            steady_elapsed = max(0.0, elapsed - warmup_seconds)
+            observed_by_second[math.floor(steady_elapsed)] = waiting
         run_by_second: dict[int, float] = {}
         latest: float | None = None
         for second in range(

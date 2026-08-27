@@ -37,7 +37,7 @@ patches:
     group: apps
     version: v1
     kind: Deployment
-    name: adservice|benchmarkservice|cartservice|checkoutservice|currencyservice|emailservice|frontend|messageoperationsservice|paymentservice|productcatalogservice|recommendationservice|shippingservice|storefrontprojectionservice
+    name: adservice|benchmarkservice|cartservice|checkoutservice|currencyservice|emailservice|frontend|messageoperationsservice|paymentservice|productcatalogservice|recommendationservice|shippingservice|storefrontprojectionservice|storefrontqueryservice
   patch: |-
     - op: add
       path: /spec/replicas
@@ -73,7 +73,7 @@ patches:
     group: apps
     version: v1
     kind: Deployment
-    name: adservice|cartservice|checkoutservice|currencyservice|emailservice|frontend|paymentservice|productcatalogservice|recommendationservice|shippingservice|storefrontprojectionservice
+    name: adservice|cartservice|checkoutservice|currencyservice|emailservice|frontend|paymentservice|productcatalogservice|recommendationservice|shippingservice|storefrontprojectionservice|storefrontqueryservice
   patch: |-
     - op: add
       path: /spec/template/spec/containers/0/env/-
@@ -100,6 +100,27 @@ patches:
               operator: In
               values:
               - checkoutservice
+- target:
+    group: apps
+    version: v1
+    kind: Deployment
+    name: storefrontprojectionservice|storefrontqueryservice
+  patch: |-
+    # Keep query traffic away from durable projection work when capacity
+    # permits, while retaining schedulability on smaller clusters.
+    - op: add
+      path: /spec/template/spec/affinity/podAntiAffinity/preferredDuringSchedulingIgnoredDuringExecution/-
+      value:
+        weight: 100
+        podAffinityTerm:
+          topologyKey: kubernetes.io/hostname
+          labelSelector:
+            matchExpressions:
+            - key: app
+              operator: In
+              values:
+              - storefrontprojectionservice
+              - storefrontqueryservice
 - target:
     group: apps
     version: v1

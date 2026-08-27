@@ -31,7 +31,7 @@ APPLICATIONS = (
     "storefrontprojectionservice",
 )
 COMPARABLE_CPU = {
-    "adservice": ("125m", "300m"),
+    "adservice": ("500m", "1000m"),
     "cartservice": ("300m", '"2"'),
     "checkoutservice": ("275m", '"2"'),
     "currencyservice": ("100m", "500m"),
