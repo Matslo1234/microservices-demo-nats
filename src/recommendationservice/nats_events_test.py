@@ -4,11 +4,25 @@
 
 import asyncio
 import unittest
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from google.protobuf.any_pb2 import Any
+from google.protobuf.timestamp_pb2 import Timestamp
+from nats.js.api import DeliverPolicy
 from nats.js.errors import NoKeysError, ServiceUnavailableError
 
-from nats_events import _NATSCatalogStore, _consume, _ready, _run, _stop
+from nats_events import (
+    _NATSCatalogStore,
+    _consume,
+    _fresh_page_views,
+    _latest_cart_triggers,
+    _ready,
+    _run,
+    _stop,
+)
+from protos.common.v1 import message_pb2
+from protos.events.v1 import events_pb2
 
 
 class Message:
@@ -25,6 +39,52 @@ class Message:
   async def nak(self, delay):
     del delay
     self.naks += 1
+
+
+def page_view(session_id, occurred_at, version):
+  payload = events_pb2.StorefrontPageViewedEvent(session_id=session_id)
+  wrapped = Any()
+  wrapped.Pack(payload)
+  timestamp = Timestamp()
+  timestamp.FromDatetime(occurred_at)
+  envelope = message_pb2.MessageEnvelope(
+      message_id=f"{session_id}-{version}",
+      aggregate_type="storefront-session",
+      aggregate_version=version,
+      occurred_at=timestamp,
+      data=wrapped,
+  )
+  message = Message()
+  message.subject = "boutique.evt.storefront.page-viewed.v1"
+  message.data = envelope.SerializeToString()
+  return message
+
+
+def cart_event(user_id, occurred_at, version, cleared=False):
+  cart = message_pb2.CartSnapshot(user_id=user_id)
+  payload = (
+      events_pb2.CartClearedEvent(cart=cart)
+      if cleared
+      else events_pb2.CartItemAddedEvent(cart=cart)
+  )
+  wrapped = Any()
+  wrapped.Pack(payload)
+  timestamp = Timestamp()
+  timestamp.FromDatetime(occurred_at)
+  envelope = message_pb2.MessageEnvelope(
+      message_id=f"{user_id}-{version}",
+      aggregate_version=version,
+      occurred_at=timestamp,
+      data=wrapped,
+  )
+  message = Message()
+  message.subject = (
+      "boutique.evt.cart.cleared.v1"
+      if cleared
+      else "boutique.evt.cart.item-added.v1"
+  )
+  message.data = envelope.SerializeToString()
+  return message
 
 
 class Subscription:
@@ -103,6 +163,49 @@ class StreamingConsumerTests(unittest.IsolatedAsyncioTestCase):
     self.assertEqual([{"batch": 3, "timeout": 1}], subscription.requests)
     self.assertTrue(all(message.acks == 1 for message in messages))
 
+  async def test_page_views_discard_stale_and_superseded_messages(self):
+    now = datetime.now(timezone.utc)
+    old = page_view("old", now - timedelta(seconds=30), 1)
+    superseded = page_view("active", now, 1)
+    newest = page_view("active", now, 2)
+    other = page_view("other", now, 1)
+
+    retained = await _fresh_page_views(
+        [old, superseded, newest, other], max_age=5)
+
+    self.assertEqual({newest, other}, set(retained))
+    self.assertEqual(1, old.acks)
+    self.assertEqual(1, superseded.acks)
+    self.assertEqual(0, newest.acks)
+    self.assertEqual(0, other.acks)
+
+  async def test_page_view_filter_keeps_malformed_message_for_redelivery(self):
+    malformed = Message()
+
+    self.assertEqual(
+        [malformed], await _fresh_page_views([malformed], max_age=5))
+    self.assertEqual(0, malformed.acks)
+
+  async def test_cart_triggers_keep_newest_complete_snapshot_per_user(self):
+    now = datetime.now(timezone.utc)
+    item_added = cart_event("active", now, 1)
+    cleared = cart_event("active", now + timedelta(milliseconds=1), 2, True)
+    other = cart_event("other", now, 1)
+
+    retained = await _latest_cart_triggers([item_added, cleared, other])
+
+    self.assertEqual({cleared, other}, set(retained))
+    self.assertEqual(1, item_added.acks)
+    self.assertEqual(0, cleared.acks)
+    self.assertEqual(0, other.acks)
+
+  async def test_cart_filter_keeps_unhandled_event_for_normal_ack(self):
+    rejected = Message()
+    rejected.subject = "boutique.evt.cart.command-rejected.v1"
+
+    self.assertEqual([rejected], await _latest_cart_triggers([rejected]))
+    self.assertEqual(0, rejected.acks)
+
   async def test_empty_catalog_bucket_has_no_keys(self):
     store = _NATSCatalogStore(EmptyBucket())
 
@@ -147,7 +250,9 @@ class StreamingConsumerTests(unittest.IsolatedAsyncioTestCase):
             AsyncMock(return_value=connection),
         ) as connect,
         patch("nats_events.ensure_catalog_index", AsyncMock()),
-        patch("nats_events._durable", AsyncMock(return_value=MagicMock())),
+        patch(
+            "nats_events._durable", AsyncMock(return_value=MagicMock())
+        ) as durable,
         patch(
             "nats_events._consume",
             AsyncMock(side_effect=RuntimeError("interrupted")),
@@ -157,6 +262,14 @@ class StreamingConsumerTests(unittest.IsolatedAsyncioTestCase):
         await _run()
 
     self.assertEqual(3, connect.await_args.kwargs["max_reconnect_attempts"])
+    self.assertEqual(DeliverPolicy.ALL, durable.await_args_list[0].kwargs.get(
+        "deliver_policy", DeliverPolicy.ALL))
+    self.assertEqual(DeliverPolicy.ALL, durable.await_args_list[1].kwargs.get(
+        "deliver_policy", DeliverPolicy.ALL))
+    self.assertEqual(
+        DeliverPolicy.NEW,
+        durable.await_args_list[2].kwargs["deliver_policy"],
+    )
     connection.close.assert_awaited_once()
 
 

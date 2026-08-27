@@ -287,7 +287,98 @@ async def _process_message(message, handler):
         await message.nak(delay=1)
 
 
-async def _consume(subscription, handler, batch_size=None, concurrency=None):
+async def _fresh_page_views(messages, max_age=None):
+    """Ack stale/redundant page views and retain the newest per session."""
+    max_age = (
+        _duration("RECOMMENDATION_PAGE_VIEW_MAX_AGE", 5)
+        if max_age is None else max_age
+    )
+    if max_age < 0:
+        raise ValueError(
+            "RECOMMENDATION_PAGE_VIEW_MAX_AGE must not be negative"
+        )
+    now = datetime.now(timezone.utc)
+    newest = {}
+    retained = []
+    discarded = []
+    for message in messages:
+        try:
+            envelope = message_pb2.MessageEnvelope.FromString(message.data)
+            payload = events_pb2.StorefrontPageViewedEvent()
+            if not envelope.data.Unpack(payload) or not payload.session_id:
+                raise ValueError("page-view payload is invalid")
+        except Exception:
+            # Preserve normal processing so malformed events follow the
+            # existing logging and redelivery policy instead of disappearing.
+            retained.append(message)
+            continue
+        occurred_at = _trigger_time(envelope)
+        if occurred_at > datetime.fromtimestamp(0, timezone.utc) and (
+            now - occurred_at
+        ).total_seconds() > max_age:
+            discarded.append(message)
+            continue
+        version = _context_version(envelope)
+        previous = newest.get(payload.session_id)
+        if previous is None or version >= previous[0]:
+            if previous is not None:
+                discarded.append(previous[1])
+            newest[payload.session_id] = (version, message)
+        else:
+            discarded.append(message)
+    retained.extend(value[1] for value in newest.values())
+    if discarded:
+        await asyncio.gather(*(message.ack() for message in discarded))
+        logger.debug(
+            "Discarded stale or superseded page views",
+            extra={"discarded_count": len(discarded)},
+        )
+    return retained
+
+
+async def _latest_cart_triggers(messages):
+    """Ack superseded cart snapshots and retain the newest one per user."""
+    newest = {}
+    retained = []
+    discarded = []
+    for message in messages:
+        try:
+            envelope = message_pb2.MessageEnvelope.FromString(message.data)
+            if message.subject == "boutique.evt.cart.item-added.v1":
+                payload = events_pb2.CartItemAddedEvent()
+            elif message.subject == "boutique.evt.cart.cleared.v1":
+                payload = events_pb2.CartClearedEvent()
+            else:
+                retained.append(message)
+                continue
+            if not envelope.data.Unpack(payload) or not payload.cart.user_id:
+                raise ValueError("cart payload is invalid")
+        except Exception:
+            # Preserve normal processing and redelivery for malformed events.
+            retained.append(message)
+            continue
+        version = _context_version(envelope)
+        previous = newest.get(payload.cart.user_id)
+        if previous is None or version >= previous[0]:
+            if previous is not None:
+                discarded.append(previous[1])
+            newest[payload.cart.user_id] = (version, message)
+        else:
+            discarded.append(message)
+    retained.extend(value[1] for value in newest.values())
+    if discarded:
+        await asyncio.gather(*(message.ack() for message in discarded))
+        logger.debug(
+            "Discarded superseded recommendation cart triggers",
+            extra={"discarded_count": len(discarded)},
+        )
+    return retained
+
+
+async def _consume(
+    subscription, handler, batch_size=None, concurrency=None,
+    batch_filter=None,
+):
     batch_size = (
         _integer("NATS_CONSUMER_BATCH_SIZE", 32)
         if batch_size is None else batch_size
@@ -318,6 +409,8 @@ async def _consume(subscription, handler, batch_size=None, concurrency=None):
             _ready.clear()
             raise RuntimeError("NATS durable subscription fetch failed") from error
         if messages:
+            if batch_filter is not None:
+                messages = await batch_filter(messages)
             logger.debug(
                 "NATS event received",
                 extra={"message_kind": "event"},
@@ -325,10 +418,10 @@ async def _consume(subscription, handler, batch_size=None, concurrency=None):
             await asyncio.gather(*(process(message) for message in messages))
 
 
-async def _durable(js, subject, durable):
+async def _durable(js, subject, durable, deliver_policy=DeliverPolicy.ALL):
     config = ConsumerConfig(
         durable_name=durable,
-        deliver_policy=DeliverPolicy.ALL,
+        deliver_policy=deliver_policy,
         ack_policy=AckPolicy.EXPLICIT,
         ack_wait=30,
         max_deliver=10,
@@ -395,7 +488,12 @@ async def _run():
     await ensure_catalog_index(catalog_store)
     catalog = await _durable(js, CATALOG_SUBJECT, "recommendation-catalog-v1")
     cart = await _durable(js, CART_SUBJECT, "recommendation-cart-v1")
-    page = await _durable(js, PAGE_VIEW_SUBJECT, "recommendation-page-views-v1")
+    page = await _durable(
+        js,
+        PAGE_VIEW_SUBJECT,
+        "recommendation-page-views-v1",
+        deliver_policy=DeliverPolicy.NEW,
+    )
     _ready.set()
     logger.info(
         "NATS event consumers and shared catalog KV are ready",
@@ -409,9 +507,19 @@ async def _run():
             concurrency=1,
         )),
         asyncio.create_task(_consume(
-            cart, lambda message: _handle_trigger(js, catalog_store, message))),
+            cart,
+            lambda message: _handle_trigger(js, catalog_store, message),
+            batch_size=_integer("RECOMMENDATION_CART_BATCH_SIZE", 256),
+            concurrency=_integer("RECOMMENDATION_CART_CONCURRENCY", 32),
+            batch_filter=_latest_cart_triggers,
+        )),
         asyncio.create_task(_consume(
-            page, lambda message: _handle_trigger(js, catalog_store, message))),
+            page,
+            lambda message: _handle_trigger(js, catalog_store, message),
+            batch_size=_integer("RECOMMENDATION_PAGE_VIEW_BATCH_SIZE", 256),
+            concurrency=_integer("RECOMMENDATION_PAGE_VIEW_CONCURRENCY", 32),
+            batch_filter=_fresh_page_views,
+        )),
     ]
     try:
         await asyncio.gather(*consumers)

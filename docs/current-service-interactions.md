@@ -77,7 +77,10 @@ Durable consumers acknowledge only after their owning state/input decision is
 committed and every required result publication is acknowledged. A stable
 `Nats-Msg-Id` makes publish retries safe, while consumer inboxes, exact result
 journals, and deterministic provider outcomes make delivery retries
-idempotent.
+idempotent. Recommendation page-view and superseded cart triggers are the
+deliberate exception: they are advisory inputs rather than domain state, and
+the recommendation worker may acknowledge them without publishing a result as
+described below.
 
 ### Frontend reads and writes
 
@@ -135,6 +138,45 @@ and operation status in `STOREFRONT_PRODUCTS_<REGION_KEY>`,
 These buckets are derived state and can be deleted and rebuilt by replaying
 `BOUTIQUE_EVENTS`. Domain owner snapshots provide the current catalog and
 currency baselines before consumers become ready.
+
+### Recommendation freshness and coalescing
+
+Recommendation generation is intentionally eventually consistent and does
+not participate in checkout correctness. Catalog inputs remain lossless and
+ordered, but high-rate page-view and cart triggers use bounded, freshness-first
+processing:
+
+- `recommendation-page-views-v1` is created with `DeliverPolicy.NEW`, so a new
+  consumer does not replay historical browsing activity. Each fetched batch
+  retains only the newest page view per session. Views older than
+  `RECOMMENDATION_PAGE_VIEW_MAX_AGE` (default `5s`) and views superseded in the
+  same batch are acknowledged without generating a recommendation. Malformed
+  messages retain the normal negative-acknowledgement and redelivery behavior.
+- `recommendation-cart-v1` consumes the full cart snapshots carried by
+  `cart.item-added` and `cart.cleared`. Each fetched batch retains only the
+  newest snapshot per user and acknowledges older snapshots without generating
+  intermediate results. There is no age-based cart drop: the newest snapshot,
+  including an empty `cart.cleared` snapshot, is always processed. Other or
+  malformed cart facts retain their normal handling.
+- Page-view and cart consumers default to batches of `256` and generation
+  concurrency of `32`, independently configurable with
+  `RECOMMENDATION_PAGE_VIEW_BATCH_SIZE`,
+  `RECOMMENDATION_PAGE_VIEW_CONCURRENCY`,
+  `RECOMMENDATION_CART_BATCH_SIZE`, and
+  `RECOMMENDATION_CART_CONCURRENCY`.
+
+Recommendation selection excludes products in the newest cart snapshot seen
+by the worker. A result can briefly overlap a more recent cart because the cart
+and recommendation projections advance asynchronously; the next retained cart
+trigger converges the result. This temporary overlap is accepted for this
+non-critical feature. Published results contain at most five product IDs: four
+display slots plus one bounded spare so the storefront can remove the product
+currently being viewed without normally reducing the displayed count. If fewer
+eligible catalog products exist, the storefront displays the available count.
+
+Coalescing is local to a fetched batch and does not require cross-pod session
+state. Result context versions and the storefront projection's monotonic update
+rules prevent an older generated result from replacing a newer one.
 
 Checkout replicas compete on the same set of durable consumers and use
 optimistic Redis transactions. Every transition reloads committed shared state

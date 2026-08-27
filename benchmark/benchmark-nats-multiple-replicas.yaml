@@ -606,7 +606,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-benchmarkservice
-        image: matslo123/benchmarkservice:v0.4.0@sha256:ecc951e4811a7b0b188776c94507d2da871d5b4030c3323c73ff44609caf6a36
+        image: matslo123/benchmarkservice:v0.4.0@sha256:20cc7b4686c1ed068aecf65cb765486c10b97105cbad27bd23033eaadc169bfa
         livenessProbe:
           httpGet:
             path: /healthz
@@ -1770,6 +1770,16 @@ spec:
           value: "32"
         - name: NATS_CONSUMER_CONCURRENCY
           value: "8"
+        - name: RECOMMENDATION_PAGE_VIEW_MAX_AGE
+          value: 5s
+        - name: RECOMMENDATION_PAGE_VIEW_BATCH_SIZE
+          value: "256"
+        - name: RECOMMENDATION_PAGE_VIEW_CONCURRENCY
+          value: "32"
+        - name: RECOMMENDATION_CART_BATCH_SIZE
+          value: "256"
+        - name: RECOMMENDATION_CART_CONCURRENCY
+          value: "32"
         - name: COLLECTOR_SERVICE_ADDR
           value: alloy.observability.svc.cluster.local:4317
         - name: OTEL_EXPORTER_OTLP_ENDPOINT
@@ -1791,7 +1801,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-recommendationservice
-        image: matslo123/recommendationservice:v0.4.0@sha256:9bfef53c8e0ca086f44780a7e6a030885de4932a727f40690f5414d097d78805
+        image: matslo123/recommendationservice:v0.4.0@sha256:91abb18f17a8fbbe7e39352eab4f42a8264a316e74b69009c4d3a8be90e8a84d
         livenessProbe:
           failureThreshold: 6
           httpGet:
@@ -3304,7 +3314,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-benchmarkservice
-        image: matslo123/benchmarkservice:v0.4.0@sha256:ecc951e4811a7b0b188776c94507d2da871d5b4030c3323c73ff44609caf6a36
+        image: matslo123/benchmarkservice:v0.4.0@sha256:20cc7b4686c1ed068aecf65cb765486c10b97105cbad27bd23033eaadc169bfa
         imagePullPolicy: IfNotPresent
         livenessProbe:
           httpGet:

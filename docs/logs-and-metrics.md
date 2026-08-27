@@ -221,6 +221,17 @@ Growth in either late-stage durable can directly delay completed-order events.
 The benchmark HPA recording rule sums all four queues for checkout scaling,
 while keeping the `consumer_name` series available for stage-level diagnosis.
 
+Recommendation pending counts have different semantics. A non-zero
+`recommendation-page-views-v1` value can represent approximately the configured
+freshness window while new page views arrive; stale and same-batch-superseded
+views are acknowledged without result publication. The value may therefore
+plateau above zero under steady load without indicating checkout pressure.
+`recommendation-cart-v1` also coalesces full cart snapshots within each fetched
+batch, so pending cart triggers count inputs rather than required recommendation
+outputs. Diagnose order throughput with the checkout consumers above and the
+independent completed-order observer instead of the aggregate application
+consumer-pending sum.
+
 ### Prometheus discovery, storage, and rules
 
 [`prometheus.yaml`](../kubernetes-manifests/observability/prometheus.yaml) runs

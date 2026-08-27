@@ -1589,14 +1589,21 @@ spec:
         app.kubernetes.io/part-of: online-boutique
     spec:
       affinity:
-        podAntiAffinity:
+        nodeAffinity:
           preferredDuringSchedulingIgnoredDuringExecution:
-          - podAffinityTerm:
-              labelSelector:
-                matchLabels:
-                  app.kubernetes.io/name: nats
-              topologyKey: kubernetes.io/hostname
+          - preference:
+              matchExpressions:
+              - key: eks.amazonaws.com/nodegroup
+                operator: In
+                values:
+                - nats-group
             weight: 100
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchLabels:
+                app.kubernetes.io/name: nats
+            topologyKey: kubernetes.io/hostname
       containers:
       - args:
         - |
@@ -1761,6 +1768,11 @@ spec:
           type: RuntimeDefault
       serviceAccountName: nats
       terminationGracePeriodSeconds: 60
+      tolerations:
+      - effect: NoSchedule
+        key: dedicated
+        operator: Equal
+        value: nats
       topologySpreadConstraints:
       - labelSelector:
           matchLabels:
@@ -2921,7 +2933,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-benchmarkservice
-        image: matslo123/benchmarkservice:v0.4.0@sha256:1bd79362f9d71a97b90d1608bca1adbaedf5b4b54546c1f890327a58200d5d27
+        image: matslo123/benchmarkservice:v0.4.0@sha256:20cc7b4686c1ed068aecf65cb765486c10b97105cbad27bd23033eaadc169bfa
         livenessProbe:
           httpGet:
             path: /healthz
@@ -4135,6 +4147,16 @@ spec:
           value: "32"
         - name: NATS_CONSUMER_CONCURRENCY
           value: "8"
+        - name: RECOMMENDATION_PAGE_VIEW_MAX_AGE
+          value: 5s
+        - name: RECOMMENDATION_PAGE_VIEW_BATCH_SIZE
+          value: "256"
+        - name: RECOMMENDATION_PAGE_VIEW_CONCURRENCY
+          value: "32"
+        - name: RECOMMENDATION_CART_BATCH_SIZE
+          value: "256"
+        - name: RECOMMENDATION_CART_CONCURRENCY
+          value: "32"
         - name: ENABLE_TRACING
           value: "1"
         - name: COLLECTOR_SERVICE_ADDR
@@ -4160,7 +4182,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-recommendationservice
-        image: matslo123/recommendationservice:v0.4.0@sha256:50a8d612442bd7415d7e247c3acf318af0773cfda704b3146719d3559b8cbac4
+        image: matslo123/recommendationservice:v0.4.0@sha256:4ff97257b5ddba614427f108e967e0e2d68db621bbcdd7a28409e073a449e5a1
         livenessProbe:
           failureThreshold: 6
           httpGet:

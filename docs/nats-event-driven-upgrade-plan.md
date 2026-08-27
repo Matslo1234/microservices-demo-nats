@@ -218,8 +218,16 @@ calculate from their local rate projection.
 Recommendation and ad generation become reactive. A page view or cart event
 triggers fresh content, which appears through the projection when ready. A page
 may initially render the previous recommendation/ad or omit non-critical
-content; SSE can update it later. Shipping can precompute the current cart quote
-because the existing quote calculation depends only on the cart items.
+content; SSE can update it later. In the implemented recommendation path,
+catalog facts remain lossless while advisory triggers are freshness-oriented:
+page views are bounded by age and coalesced to the newest view per session, and
+full cart snapshots are coalesced to the newest snapshot per user in each pull
+batch. Superseded triggers can be acknowledged without publishing intermediate
+results. The latest processed cart snapshot excludes its products from the
+bounded recommendation result, while temporary overlap with a newer,
+as-yet-unprocessed cart is an accepted eventual-consistency tradeoff. Shipping
+can precompute the current cart quote because the existing quote calculation
+depends only on the cart items.
 
 ### Order, shipping, and payment workflow
 

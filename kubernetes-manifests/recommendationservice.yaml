@@ -77,6 +77,16 @@ spec:
           value: "32"
         - name: NATS_CONSUMER_CONCURRENCY
           value: "8"
+        - name: RECOMMENDATION_PAGE_VIEW_MAX_AGE
+          value: "5s"
+        - name: RECOMMENDATION_PAGE_VIEW_BATCH_SIZE
+          value: "256"
+        - name: RECOMMENDATION_PAGE_VIEW_CONCURRENCY
+          value: "32"
+        - name: RECOMMENDATION_CART_BATCH_SIZE
+          value: "256"
+        - name: RECOMMENDATION_CART_CONCURRENCY
+          value: "32"
         envFrom:
         - configMapRef:
             name: nats-client-config
