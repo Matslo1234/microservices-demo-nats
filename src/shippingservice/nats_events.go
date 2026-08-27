@@ -29,6 +29,8 @@ import (
 const (
 	shippingCartConsumer      = "shipping-cart-quotes-v1"
 	shippingQuoteSubject      = "boutique.evt.shipping.cart-quote-updated.v1"
+	shippingCartBatchSize     = 32
+	shippingCartWorkers       = 32
 	shippingCommandConsumer   = "shipping-commands-v1"
 	shippingCartMaxPending    = 1000
 	shippingCommandBatchSize  = 256
@@ -317,6 +319,18 @@ func processShippingStream(
 	parallelism int,
 	process func(*nats.Msg),
 ) {
+	processShippingStreamByLane(
+		messages, fetchSize, parallelism, shippingMessageLane, process,
+	)
+}
+
+func processShippingStreamByLane(
+	messages <-chan *nats.Msg,
+	fetchSize int,
+	parallelism int,
+	laneFor func([]byte, int) int,
+	process func(*nats.Msg),
+) {
 	if parallelism <= 1 {
 		for message := range messages {
 			process(message)
@@ -337,7 +351,7 @@ func processShippingStream(
 		}(lane)
 	}
 	for message := range messages {
-		lane := shippingMessageLane(message.Data, len(lanes))
+		lane := laneFor(message.Data, len(lanes))
 		lanes[lane] <- message
 	}
 	for _, lane := range lanes {
@@ -348,9 +362,13 @@ func processShippingStream(
 
 func shippingMessageLane(data []byte, lanes int) int {
 	correlationID, _ := shippingEnvelopeContext(data)
+	return shippingLane(correlationID, lanes)
+}
+
+func shippingLane(identity string, lanes int) int {
 	hash := uint32(2166136261)
-	for index := 0; index < len(correlationID); index++ {
-		hash ^= uint32(correlationID[index])
+	for index := 0; index < len(identity); index++ {
+		hash ^= uint32(identity[index])
 		hash *= 16777619
 	}
 	return int(hash % uint32(lanes))
@@ -363,39 +381,41 @@ func (worker *shippingEventWorker) run() error {
 			return nil
 		default:
 		}
-		batch, err := worker.subscription.FetchBatch(32, nats.MaxWait(time.Second))
+		batch, err := worker.subscription.FetchBatch(shippingCartBatchSize, nats.MaxWait(time.Second))
 		if err != nil {
 			if shippingConsumerTerminal(err) {
 				return err
 			}
 			continue
 		}
-		for message := range batch.Messages() {
-			entry := shippingMessageLog(message, "event")
-			entry.Debug("NATS event received")
-			correlationID, messageID, traceparent, tracestate := shippingEnvelopeTelemetry(message.Data)
-			ctx, span := telemetry.StartConsumerSpan(context.Background(), message.Subject, "event",
-				messageID, correlationID, traceparent, tracestate)
-			if err := worker.handle(ctx, message); err != nil {
-				telemetry.RecordError(span, err)
-				entry.WithError(err).Error("shipping cart event processing failed")
-				_ = message.NakWithDelay(time.Second)
-				span.End()
-				continue
-			}
-			if err := message.Ack(); err != nil {
-				telemetry.RecordError(span, err)
-				entry.WithError(err).Error("shipping cart event acknowledgement failed")
-				span.End()
-				continue
-			}
-			span.End()
-		}
+		processShippingStreamByLane(
+			batch.Messages(), shippingCartBatchSize, shippingCartWorkers,
+			shippingCartMessageLane, worker.processCartMessage,
+		)
 		if err := batch.Error(); err != nil {
 			if shippingConsumerTerminal(err) {
 				return err
 			}
 		}
+	}
+}
+
+func (worker *shippingEventWorker) processCartMessage(message *nats.Msg) {
+	entry := shippingMessageLog(message, "event")
+	entry.Debug("NATS event received")
+	correlationID, messageID, traceparent, tracestate := shippingEnvelopeTelemetry(message.Data)
+	ctx, span := telemetry.StartConsumerSpan(context.Background(), message.Subject, "event",
+		messageID, correlationID, traceparent, tracestate)
+	defer span.End()
+	if err := worker.handle(ctx, message); err != nil {
+		telemetry.RecordError(span, err)
+		entry.WithError(err).Error("shipping cart event processing failed")
+		_ = message.NakWithDelay(time.Second)
+		return
+	}
+	if err := message.Ack(); err != nil {
+		telemetry.RecordError(span, err)
+		entry.WithError(err).Error("shipping cart event acknowledgement failed")
 	}
 }
 
@@ -424,6 +444,14 @@ func shippingMessageLog(message *nats.Msg, kind string) *logrus.Entry {
 func shippingEnvelopeContext(data []byte) (string, string) {
 	correlationID, messageID, _, _ := shippingEnvelopeTelemetry(data)
 	return correlationID, messageID
+}
+
+func shippingCartMessageLane(data []byte, lanes int) int {
+	envelope := &commonv1.MessageEnvelope{}
+	if err := proto.Unmarshal(data, envelope); err == nil && envelope.AggregateId != "" {
+		return shippingLane(envelope.AggregateId, lanes)
+	}
+	return shippingMessageLane(data, lanes)
 }
 
 func shippingEnvelopeTelemetry(data []byte) (string, string, string, string) {

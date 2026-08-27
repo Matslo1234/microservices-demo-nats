@@ -8,6 +8,7 @@ import json
 import os
 import ssl
 import threading
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -23,8 +24,9 @@ from catalog_kv import (
     CatalogNotFound,
     apply_product,
     apply_snapshot,
-    catalog_candidates,
+    catalog_snapshot,
     ensure_catalog_index,
+    select_candidates,
 )
 from logger import getJSONLogger
 from protos.common.v1 import message_pb2
@@ -45,6 +47,48 @@ _stop = threading.Event()
 _loop = None
 _connection = None
 _thread = None
+
+
+class _CatalogCache:
+
+    def __init__(self, store, refresh_seconds=None):
+        self._store = store
+        self._refresh_seconds = (
+            _duration("RECOMMENDATION_CATALOG_CACHE_REFRESH", 1)
+            if refresh_seconds is None else refresh_seconds
+        )
+        if self._refresh_seconds < 0:
+            raise ValueError(
+                "RECOMMENDATION_CATALOG_CACHE_REFRESH must not be negative"
+            )
+        self._value = None
+        self._refreshed_at = 0.0
+        self._lock = asyncio.Lock()
+
+    async def candidates(self, excluded, seed, model_revision, limit=5):
+        now = time.monotonic()
+        if (
+            self._value is None
+            or now - self._refreshed_at >= self._refresh_seconds
+        ):
+            async with self._lock:
+                now = time.monotonic()
+                if (
+                    self._value is None
+                    or now - self._refreshed_at >= self._refresh_seconds
+                ):
+                    # Publish only a complete immutable snapshot to concurrent
+                    # handlers.
+                    self._value = await catalog_snapshot(self._store)
+                    self._refreshed_at = time.monotonic()
+        product_ids, catalog_revision = self._value
+        return select_candidates(
+            product_ids, catalog_revision, excluded, seed,
+            model_revision, limit,
+        )
+
+    def invalidate(self):
+        self._refreshed_at = 0.0
 
 
 def _duration(name, fallback):
@@ -96,12 +140,11 @@ def _trigger_time(envelope):
     return datetime.fromtimestamp(0, timezone.utc)
 
 
-async def _publish_result(js, catalog_store, envelope, session_id, excluded):
+async def _publish_result(js, catalog_cache, envelope, session_id, excluded):
     if not envelope.message_id or not session_id:
         raise ValueError("recommendation trigger identity is incomplete")
     context_version = _context_version(envelope)
-    product_ids, catalog_revision = await catalog_candidates(
-        catalog_store,
+    product_ids, catalog_revision = await catalog_cache.candidates(
         set(excluded),
         envelope.message_id,
         MODEL_REVISION,
@@ -248,25 +291,32 @@ async def _apply_catalog(catalog_store, message):
     return "ignored"
 
 
-async def _handle_trigger(js, catalog_store, message):
+async def _apply_catalog_and_invalidate(catalog_store, catalog_cache, message):
+    outcome = await _apply_catalog(catalog_store, message)
+    if outcome != "ignored":
+        catalog_cache.invalidate()
+    return outcome
+
+
+async def _handle_trigger(js, catalog_cache, message):
     envelope = message_pb2.MessageEnvelope.FromString(message.data)
     if message.subject == PAGE_VIEW_SUBJECT:
         payload = events_pb2.StorefrontPageViewedEvent()
         if not envelope.data.Unpack(payload):
             raise ValueError("page-view payload is invalid")
         excluded = [payload.product_id] if payload.product_id else []
-        await _publish_result(js, catalog_store, envelope, payload.session_id, excluded)
+        await _publish_result(js, catalog_cache, envelope, payload.session_id, excluded)
         return
     if message.subject == "boutique.evt.cart.item-added.v1":
         payload = events_pb2.CartItemAddedEvent()
         if not envelope.data.Unpack(payload) or not payload.cart.user_id:
             raise ValueError("cart item payload is invalid")
-        await _publish_result(js, catalog_store, envelope, payload.cart.user_id, [line.product_id for line in payload.cart.items])
+        await _publish_result(js, catalog_cache, envelope, payload.cart.user_id, [line.product_id for line in payload.cart.items])
     elif message.subject == "boutique.evt.cart.cleared.v1":
         payload = events_pb2.CartClearedEvent()
         if not envelope.data.Unpack(payload) or not payload.cart.user_id:
             raise ValueError("cart clear payload is invalid")
-        await _publish_result(js, catalog_store, envelope, payload.cart.user_id, [])
+        await _publish_result(js, catalog_cache, envelope, payload.cart.user_id, [])
 
 
 async def _process_message(message, handler):
@@ -392,30 +442,57 @@ async def _consume(
     if concurrency < 1 or concurrency > 64:
         raise ValueError("NATS_CONSUMER_CONCURRENCY must be between 1 and 64")
     slots = asyncio.Semaphore(concurrency)
+    pending = set()
+    failures = []
+    max_buffered = batch_size * 2
 
     async def process(message):
         async with slots:
             await _process_message(message, handler)
 
-    while not _stop.is_set():
-        try:
-            messages = await subscription.fetch(batch=batch_size, timeout=1)
-        except (NatsTimeoutError, asyncio.TimeoutError):
-            continue
-        except (nats.errors.Error, ServiceUnavailableError) as error:
-            # A failed pull subscription is not made healthy by an otherwise
-            # connected socket. Let the outer supervisor rebuild the
-            # connection and all three durable subscriptions.
-            _ready.clear()
-            raise RuntimeError("NATS durable subscription fetch failed") from error
-        if messages:
-            if batch_filter is not None:
-                messages = await batch_filter(messages)
-            logger.debug(
-                "NATS event received",
-                extra={"message_kind": "event"},
-            )
-            await asyncio.gather(*(process(message) for message in messages))
+    def completed(task):
+        pending.discard(task)
+        if not task.cancelled() and task.exception() is not None:
+            failures.append(task.exception())
+
+    try:
+        while not _stop.is_set():
+            if failures:
+                raise failures[0]
+            while len(pending) + batch_size > max_buffered:
+                await asyncio.wait(
+                    pending, return_when=asyncio.FIRST_COMPLETED)
+                if failures:
+                    raise failures[0]
+            try:
+                messages = await subscription.fetch(
+                    batch=batch_size, timeout=1)
+            except (NatsTimeoutError, asyncio.TimeoutError):
+                continue
+            except (nats.errors.Error, ServiceUnavailableError) as error:
+                # A failed pull subscription is not made healthy by an
+                # otherwise connected socket. Let the outer supervisor rebuild
+                # the connection and all three durable subscriptions.
+                _ready.clear()
+                raise RuntimeError(
+                    "NATS durable subscription fetch failed") from error
+            if messages:
+                if batch_filter is not None:
+                    messages = await batch_filter(messages)
+                logger.debug(
+                    "NATS event received",
+                    extra={"message_kind": "event"},
+                )
+                for message in messages:
+                    task = asyncio.create_task(process(message))
+                    pending.add(task)
+                    task.add_done_callback(completed)
+                # Give ready handlers a chance to run before another fetch.
+                # The next fetch can then overlap with outstanding handlers.
+                await asyncio.sleep(0)
+    finally:
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
 
 
 async def _durable(js, subject, durable, deliver_policy=DeliverPolicy.ALL):
@@ -486,6 +563,8 @@ async def _run():
         await js.key_value(CATALOG_BUCKET)
     )
     await ensure_catalog_index(catalog_store)
+    catalog_cache = _CatalogCache(catalog_store)
+    await catalog_cache.candidates(set(), "startup", MODEL_REVISION)
     catalog = await _durable(js, CATALOG_SUBJECT, "recommendation-catalog-v1")
     cart = await _durable(js, CART_SUBJECT, "recommendation-cart-v1")
     page = await _durable(
@@ -502,20 +581,21 @@ async def _run():
     consumers = [
         asyncio.create_task(_consume(
             catalog,
-            lambda message: _apply_catalog(catalog_store, message),
+            lambda message: _apply_catalog_and_invalidate(
+                catalog_store, catalog_cache, message),
             batch_size=1,
             concurrency=1,
         )),
         asyncio.create_task(_consume(
             cart,
-            lambda message: _handle_trigger(js, catalog_store, message),
+            lambda message: _handle_trigger(js, catalog_cache, message),
             batch_size=_integer("RECOMMENDATION_CART_BATCH_SIZE", 256),
             concurrency=_integer("RECOMMENDATION_CART_CONCURRENCY", 32),
             batch_filter=_latest_cart_triggers,
         )),
         asyncio.create_task(_consume(
             page,
-            lambda message: _handle_trigger(js, catalog_store, message),
+            lambda message: _handle_trigger(js, catalog_cache, message),
             batch_size=_integer("RECOMMENDATION_PAGE_VIEW_BATCH_SIZE", 256),
             concurrency=_integer("RECOMMENDATION_PAGE_VIEW_CONCURRENCY", 32),
             batch_filter=_fresh_page_views,

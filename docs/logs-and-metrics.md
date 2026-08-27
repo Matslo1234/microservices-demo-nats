@@ -226,11 +226,21 @@ Recommendation pending counts have different semantics. A non-zero
 freshness window while new page views arrive; stale and same-batch-superseded
 views are acknowledged without result publication. The value may therefore
 plateau above zero under steady load without indicating checkout pressure.
+Recommendation fetches are pipelined with a bounded two-batch buffer, and
+catalog reads use a short-lived immutable cache, so `num_ack_pending` can cover
+both actively executing handlers and prefetched work. Cache refresh is bounded
+by `RECOMMENDATION_CATALOG_CACHE_REFRESH` (default `1s`).
+
 `recommendation-cart-v1` also coalesces full cart snapshots within each fetched
 batch, so pending cart triggers count inputs rather than required recommendation
 outputs. Diagnose order throughput with the checkout consumers above and the
 independent completed-order observer instead of the aggregate application
 consumer-pending sum.
+
+`shipping-cart-quotes-v1` preserves every cart-version output but processes an
+existing fetch through per-user worker lanes. A sustained pending count there
+represents quote input arriving faster than the keyed parallel
+publisher can confirm results; it is not caused by intentional coalescing.
 
 ### Prometheus discovery, storage, and rules
 

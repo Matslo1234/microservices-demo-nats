@@ -13,6 +13,7 @@ from nats.js.api import DeliverPolicy
 from nats.js.errors import NoKeysError, ServiceUnavailableError
 
 from nats_events import (
+    _CatalogCache,
     _NATSCatalogStore,
     _consume,
     _fresh_page_views,
@@ -142,7 +143,10 @@ class StreamingConsumerTests(unittest.IsolatedAsyncioTestCase):
 
     async def fetch(**request):
       subscription.requests.append(request)
-      return messages
+      if len(subscription.requests) == 1:
+        return messages
+      await asyncio.sleep(0)
+      raise asyncio.TimeoutError
 
     async def handler(received):
       nonlocal active, maximum_active
@@ -160,7 +164,8 @@ class StreamingConsumerTests(unittest.IsolatedAsyncioTestCase):
 
     self.assertEqual(3, len(processed))
     self.assertEqual(2, maximum_active)
-    self.assertEqual([{"batch": 3, "timeout": 1}], subscription.requests)
+    self.assertEqual(
+        {"batch": 3, "timeout": 1}, subscription.requests[0])
     self.assertTrue(all(message.acks == 1 for message in messages))
 
   async def test_page_views_discard_stale_and_superseded_messages(self):
@@ -211,6 +216,37 @@ class StreamingConsumerTests(unittest.IsolatedAsyncioTestCase):
 
     self.assertEqual([], await store.keys())
 
+  async def test_catalog_cache_reuses_immutable_snapshot(self):
+    store = MagicMock()
+    cache = _CatalogCache(store, refresh_seconds=60)
+
+    with patch(
+        "nats_events.catalog_snapshot",
+        AsyncMock(return_value=(("one", "two"), 7)),
+    ) as snapshot:
+      first = await cache.candidates(set(), "seed", "model")
+      second = await cache.candidates(set(), "seed", "model")
+
+    self.assertEqual(first, second)
+    snapshot.assert_awaited_once_with(store)
+
+  async def test_catalog_cache_refreshes_after_invalidation(self):
+    store = MagicMock()
+    cache = _CatalogCache(store, refresh_seconds=60)
+
+    with patch(
+        "nats_events.catalog_snapshot",
+        AsyncMock(side_effect=[(("one",), 1), (("two",), 2)]),
+    ) as snapshot:
+      await cache.candidates(set(), "seed", "model")
+      cache.invalidate()
+      selected, revision = await cache.candidates(
+          set(), "seed", "model")
+
+    self.assertEqual(2, revision)
+    self.assertEqual(["two"], selected)
+    self.assertEqual(2, snapshot.await_count)
+
   async def test_failed_subscription_is_returned_to_outer_supervisor(self):
     class FailedSubscription:
       async def fetch(self, **_request):
@@ -250,6 +286,10 @@ class StreamingConsumerTests(unittest.IsolatedAsyncioTestCase):
             AsyncMock(return_value=connection),
         ) as connect,
         patch("nats_events.ensure_catalog_index", AsyncMock()),
+        patch(
+            "nats_events.catalog_snapshot",
+            AsyncMock(return_value=(("one",), 1)),
+        ),
         patch(
             "nats_events._durable", AsyncMock(return_value=MagicMock())
         ) as durable,

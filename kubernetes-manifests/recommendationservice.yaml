@@ -79,6 +79,8 @@ spec:
           value: "8"
         - name: RECOMMENDATION_PAGE_VIEW_MAX_AGE
           value: "5s"
+        - name: RECOMMENDATION_CATALOG_CACHE_REFRESH
+          value: "1s"
         - name: RECOMMENDATION_PAGE_VIEW_BATCH_SIZE
           value: "256"
         - name: RECOMMENDATION_PAGE_VIEW_CONCURRENCY

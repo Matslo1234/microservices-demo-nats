@@ -80,6 +80,47 @@ patches:
       value:
         name: ENABLE_TRACING
         value: "1"
+- target:
+    group: apps
+    version: v1
+    kind: Deployment
+    name: recommendationservice|shippingservice
+  patch: |-
+    # Keep high-volume asynchronous consumers from competing with checkout's
+    # cart projection and order workflow when cluster capacity permits.
+    - op: add
+      path: /spec/template/spec/affinity/podAntiAffinity/preferredDuringSchedulingIgnoredDuringExecution/-
+      value:
+        weight: 100
+        podAffinityTerm:
+          topologyKey: kubernetes.io/hostname
+          labelSelector:
+            matchExpressions:
+            - key: app
+              operator: In
+              values:
+              - checkoutservice
+- target:
+    group: apps
+    version: v1
+    kind: Deployment
+    name: checkoutservice
+  patch: |-
+    # Make checkout separation reciprocal so rollout order does not determine
+    # whether asynchronous consumers are already present on a candidate node.
+    - op: add
+      path: /spec/template/spec/affinity/podAntiAffinity/preferredDuringSchedulingIgnoredDuringExecution/-
+      value:
+        weight: 100
+        podAffinityTerm:
+          topologyKey: kubernetes.io/hostname
+          labelSelector:
+            matchExpressions:
+            - key: app
+              operator: In
+              values:
+              - recommendationservice
+              - shippingservice
     - op: add
       path: /spec/template/spec/containers/0/env/-
       value:

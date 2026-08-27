@@ -185,7 +185,7 @@ async def apply_snapshot(store, record, max_attempts=20):
   raise CatalogConflict("catalog snapshot CAS retry limit reached")
 
 
-async def catalog_candidates(store, excluded, seed, model_revision, limit=5):
+async def catalog_snapshot(store):
   try:
     snapshot, _ = await store.get("catalog")
   except CatalogNotFound as error:
@@ -209,6 +209,12 @@ async def catalog_candidates(store, excluded, seed, model_revision, limit=5):
   # The CAS-maintained index is the authoritative active-product set. Reading
   # every product record again made the request cost grow linearly with the
   # catalog even though recommendation selection only needs product IDs.
+  return tuple(product_ids), catalog_revision
+
+
+def select_candidates(
+    product_ids, catalog_revision, excluded, seed, model_revision, limit=5,
+):
   available = [
       product_id
       for product_id in product_ids
@@ -218,6 +224,13 @@ async def catalog_candidates(store, excluded, seed, model_revision, limit=5):
   deterministic_seed = "\0".join((seed, model_revision, str(catalog_revision)))
   selected = random.Random(deterministic_seed).sample(available, count)
   return selected, catalog_revision
+
+
+async def catalog_candidates(store, excluded, seed, model_revision, limit=5):
+  product_ids, catalog_revision = await catalog_snapshot(store)
+  return select_candidates(
+      product_ids, catalog_revision, excluded, seed, model_revision, limit,
+  )
 
 
 async def _backoff(attempt):

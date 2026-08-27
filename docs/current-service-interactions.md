@@ -164,6 +164,20 @@ processing:
   `RECOMMENDATION_PAGE_VIEW_CONCURRENCY`,
   `RECOMMENDATION_CART_BATCH_SIZE`, and
   `RECOMMENDATION_CART_CONCURRENCY`.
+- Fetching is pipelined with recommendation generation. Each consumer keeps at
+  most two fetched batches in memory while the configured concurrency semaphore
+  bounds active handlers. This overlaps the next JetStream fetch with KV/result
+  I/O without changing the configured fetch batch size.
+
+Recommendation selection reads an immutable in-process catalog snapshot rather
+than loading the catalog metadata and product index for every trigger. The
+snapshot is refreshed from the authoritative recommendation catalog KV at most
+once per `RECOMMENDATION_CATALOG_CACHE_REFRESH` interval (default `1s`) and is
+invalidated immediately by catalog events handled on the same replica. Because
+replicas compete on the catalog durable, another replica can retain the prior
+catalog revision for at most one refresh interval. Selection remains
+deterministic for the catalog revision recorded in the generated event's
+message identity.
 
 Recommendation selection excludes products in the newest cart snapshot seen
 by the worker. A result can briefly overlap a more recent cart because the cart
@@ -177,6 +191,25 @@ eligible catalog products exist, the storefront displays the available count.
 Coalescing is local to a fetched batch and does not require cross-pod session
 state. Result context versions and the storefront projection's monotonic update
 rules prevent an older generated result from replacing a newer one.
+
+Shipping cart quotes retain every accepted cart-version input. Each existing
+32-message fetch is dispatched across 32 in-process lanes keyed by cart user ID.
+Messages assigned to one lane remain sequential, while unrelated users can wait
+for independent JetStream publish acknowledgements concurrently. The input is
+still acknowledged only after its deterministic quote event is confirmed, and
+the consumer's fetch batch and `MaxAckPending` settings are unchanged. Shared
+durable delivery can distribute one user's events across replicas, so the
+storefront projection continues to use cart versions—not arrival order—to
+reject stale quote results.
+
+The default deployment scheduling uses reciprocal preferences: recommendation
+and shipping avoid nodes with `checkoutservice`, while checkout avoids nodes
+with recommendation or shipping. Applying the preference in both directions
+makes separation independent of rollout order and protects checkout's
+latency-critical cart projection and order workflow from CPU contention when
+capacity permits. The preference is intentionally non-blocking, so constrained
+clusters can still co-locate the services. Existing preferred anti-affinity
+also spreads replicas of each service across hostnames.
 
 Checkout replicas compete on the same set of durable consumers and use
 optimistic Redis transactions. Every transition reloads committed shared state

@@ -411,6 +411,30 @@ func TestShippingProcessesStreamBeforeFetchBatchCloses(t *testing.T) {
 	}
 }
 
+func TestShippingCartLaneUsesAggregateIdentity(t *testing.T) {
+	first := &commonv1.MessageEnvelope{AggregateId: "user-1", CorrelationId: "request-1"}
+	second := &commonv1.MessageEnvelope{AggregateId: "user-1", CorrelationId: "request-2"}
+	other := &commonv1.MessageEnvelope{AggregateId: "user-2", CorrelationId: "request-1"}
+	firstData, err := proto.Marshal(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondData, err := proto.Marshal(second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherData, err := proto.Marshal(other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if shippingCartMessageLane(firstData, 32) != shippingCartMessageLane(secondData, 32) {
+		t.Fatal("cart events for one user were assigned to different lanes")
+	}
+	if shippingCartMessageLane(firstData, 32) == shippingCartMessageLane(otherData, 32) {
+		t.Fatal("test identities unexpectedly hashed to the same lane")
+	}
+}
+
 func TestShippingFailureInjectionIsDeterministic(t *testing.T) {
 	inputTime := time.Date(2026, 7, 27, 13, 0, 0, 0, time.UTC)
 	provider := shippingTestProvider(t, testShippingSecret)

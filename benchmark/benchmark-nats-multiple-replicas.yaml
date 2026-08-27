@@ -482,22 +482,6 @@ spec:
           value: "32"
         - name: NATS_CONSUMER_CONCURRENCY
           value: "8"
-        - name: COLLECTOR_SERVICE_ADDR
-          value: alloy.observability.svc.cluster.local:4317
-        - name: OTEL_EXPORTER_OTLP_ENDPOINT
-          value: http://alloy.observability.svc.cluster.local:4317
-        - name: OTEL_EXPORTER_OTLP_PROTOCOL
-          value: grpc
-        - name: OTEL_TRACES_EXPORTER
-          value: otlp
-        - name: OTEL_METRICS_EXPORTER
-          value: none
-        - name: OTEL_LOGS_EXPORTER
-          value: none
-        - name: OTEL_SERVICE_NAME
-          valueFrom:
-            fieldRef:
-              fieldPath: metadata.labels['app']
         envFrom:
         - configMapRef:
             name: nats-client-config
@@ -709,22 +693,6 @@ spec:
           value: cart-catalog-v1,cart-commands-v1
         - name: CART_COMMAND_CONCURRENCY
           value: "32"
-        - name: COLLECTOR_SERVICE_ADDR
-          value: alloy.observability.svc.cluster.local:4317
-        - name: OTEL_EXPORTER_OTLP_ENDPOINT
-          value: http://alloy.observability.svc.cluster.local:4317
-        - name: OTEL_EXPORTER_OTLP_PROTOCOL
-          value: grpc
-        - name: OTEL_TRACES_EXPORTER
-          value: otlp
-        - name: OTEL_METRICS_EXPORTER
-          value: none
-        - name: OTEL_LOGS_EXPORTER
-          value: none
-        - name: OTEL_SERVICE_NAME
-          valueFrom:
-            fieldRef:
-              fieldPath: metadata.labels['app']
         envFrom:
         - configMapRef:
             name: nats-client-config
@@ -820,6 +788,16 @@ spec:
               labelSelector: {}
               matchLabelKeys:
               - app
+              topologyKey: kubernetes.io/hostname
+            weight: 100
+          - podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - recommendationservice
+                  - shippingservice
               topologyKey: kubernetes.io/hostname
             weight: 100
       containers:
@@ -969,22 +947,6 @@ spec:
           value: "1"
         - name: NATS_REQUIRED
           value: "true"
-        - name: COLLECTOR_SERVICE_ADDR
-          value: alloy.observability.svc.cluster.local:4317
-        - name: OTEL_EXPORTER_OTLP_ENDPOINT
-          value: http://alloy.observability.svc.cluster.local:4317
-        - name: OTEL_EXPORTER_OTLP_PROTOCOL
-          value: grpc
-        - name: OTEL_TRACES_EXPORTER
-          value: otlp
-        - name: OTEL_METRICS_EXPORTER
-          value: none
-        - name: OTEL_LOGS_EXPORTER
-          value: none
-        - name: OTEL_SERVICE_NAME
-          valueFrom:
-            fieldRef:
-              fieldPath: metadata.labels['app']
         envFrom:
         - configMapRef:
             name: nats-client-config
@@ -1088,22 +1050,6 @@ spec:
           value: "32"
         - name: NATS_CONSUMER_CONCURRENCY
           value: "8"
-        - name: COLLECTOR_SERVICE_ADDR
-          value: alloy.observability.svc.cluster.local:4317
-        - name: OTEL_EXPORTER_OTLP_ENDPOINT
-          value: http://alloy.observability.svc.cluster.local:4317
-        - name: OTEL_EXPORTER_OTLP_PROTOCOL
-          value: grpc
-        - name: OTEL_TRACES_EXPORTER
-          value: otlp
-        - name: OTEL_METRICS_EXPORTER
-          value: none
-        - name: OTEL_LOGS_EXPORTER
-          value: none
-        - name: OTEL_SERVICE_NAME
-          valueFrom:
-            fieldRef:
-              fieldPath: metadata.labels['app']
         envFrom:
         - configMapRef:
             name: nats-client-config
@@ -1254,22 +1200,6 @@ spec:
           value: "512"
         - name: ENABLE_PROFILER
           value: "0"
-        - name: COLLECTOR_SERVICE_ADDR
-          value: alloy.observability.svc.cluster.local:4317
-        - name: OTEL_EXPORTER_OTLP_ENDPOINT
-          value: http://alloy.observability.svc.cluster.local:4317
-        - name: OTEL_EXPORTER_OTLP_PROTOCOL
-          value: grpc
-        - name: OTEL_TRACES_EXPORTER
-          value: otlp
-        - name: OTEL_METRICS_EXPORTER
-          value: none
-        - name: OTEL_LOGS_EXPORTER
-          value: none
-        - name: OTEL_SERVICE_NAME
-          valueFrom:
-            fieldRef:
-              fieldPath: metadata.labels['app']
         envFrom:
         - configMapRef:
             name: nats-client-config
@@ -1530,22 +1460,6 @@ spec:
           value: boutique.qry.payment.tokenize.v1,payment-commands-v1
         - name: PAYMENT_SIGNING_KEY_ID
           value: primary-v1
-        - name: COLLECTOR_SERVICE_ADDR
-          value: alloy.observability.svc.cluster.local:4317
-        - name: OTEL_EXPORTER_OTLP_ENDPOINT
-          value: http://alloy.observability.svc.cluster.local:4317
-        - name: OTEL_EXPORTER_OTLP_PROTOCOL
-          value: grpc
-        - name: OTEL_TRACES_EXPORTER
-          value: otlp
-        - name: OTEL_METRICS_EXPORTER
-          value: none
-        - name: OTEL_LOGS_EXPORTER
-          value: none
-        - name: OTEL_SERVICE_NAME
-          valueFrom:
-            fieldRef:
-              fieldPath: metadata.labels['app']
         envFrom:
         - configMapRef:
             name: nats-client-config
@@ -1649,22 +1563,6 @@ spec:
           value: "1"
         - name: NATS_REQUIRED
           value: "true"
-        - name: COLLECTOR_SERVICE_ADDR
-          value: alloy.observability.svc.cluster.local:4317
-        - name: OTEL_EXPORTER_OTLP_ENDPOINT
-          value: http://alloy.observability.svc.cluster.local:4317
-        - name: OTEL_EXPORTER_OTLP_PROTOCOL
-          value: grpc
-        - name: OTEL_TRACES_EXPORTER
-          value: otlp
-        - name: OTEL_METRICS_EXPORTER
-          value: none
-        - name: OTEL_LOGS_EXPORTER
-          value: none
-        - name: OTEL_SERVICE_NAME
-          valueFrom:
-            fieldRef:
-              fieldPath: metadata.labels['app']
         envFrom:
         - configMapRef:
             name: nats-client-config
@@ -1754,6 +1652,15 @@ spec:
               - app
               topologyKey: kubernetes.io/hostname
             weight: 100
+          - podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - checkoutservice
+              topologyKey: kubernetes.io/hostname
+            weight: 100
       containers:
       - env:
         - name: ENABLE_TRACING
@@ -1772,6 +1679,8 @@ spec:
           value: "8"
         - name: RECOMMENDATION_PAGE_VIEW_MAX_AGE
           value: 5s
+        - name: RECOMMENDATION_CATALOG_CACHE_REFRESH
+          value: 1s
         - name: RECOMMENDATION_PAGE_VIEW_BATCH_SIZE
           value: "256"
         - name: RECOMMENDATION_PAGE_VIEW_CONCURRENCY
@@ -1780,28 +1689,12 @@ spec:
           value: "256"
         - name: RECOMMENDATION_CART_CONCURRENCY
           value: "32"
-        - name: COLLECTOR_SERVICE_ADDR
-          value: alloy.observability.svc.cluster.local:4317
-        - name: OTEL_EXPORTER_OTLP_ENDPOINT
-          value: http://alloy.observability.svc.cluster.local:4317
-        - name: OTEL_EXPORTER_OTLP_PROTOCOL
-          value: grpc
-        - name: OTEL_TRACES_EXPORTER
-          value: otlp
-        - name: OTEL_METRICS_EXPORTER
-          value: none
-        - name: OTEL_LOGS_EXPORTER
-          value: none
-        - name: OTEL_SERVICE_NAME
-          valueFrom:
-            fieldRef:
-              fieldPath: metadata.labels['app']
         envFrom:
         - configMapRef:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-recommendationservice
-        image: matslo123/recommendationservice:v0.4.0@sha256:91abb18f17a8fbbe7e39352eab4f42a8264a316e74b69009c4d3a8be90e8a84d
+        image: matslo123/recommendationservice:v0.4.0@sha256:898d526a7999c64d6ee1b06504e9aedea64e5f03d18fdb34eb1e9a4dd4e8ee26
         livenessProbe:
           failureThreshold: 6
           httpGet:
@@ -1890,6 +1783,15 @@ spec:
               - app
               topologyKey: kubernetes.io/hostname
             weight: 100
+          - podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - checkoutservice
+              topologyKey: kubernetes.io/hostname
+            weight: 100
       containers:
       - env:
         - name: ENABLE_TRACING
@@ -1904,22 +1806,6 @@ spec:
           value: "true"
         - name: NATS_REQUIRED_SUBSCRIPTIONS
           value: shipping-cart-quotes-v1,shipping-commands-v1
-        - name: COLLECTOR_SERVICE_ADDR
-          value: alloy.observability.svc.cluster.local:4317
-        - name: OTEL_EXPORTER_OTLP_ENDPOINT
-          value: http://alloy.observability.svc.cluster.local:4317
-        - name: OTEL_EXPORTER_OTLP_PROTOCOL
-          value: grpc
-        - name: OTEL_TRACES_EXPORTER
-          value: otlp
-        - name: OTEL_METRICS_EXPORTER
-          value: none
-        - name: OTEL_LOGS_EXPORTER
-          value: none
-        - name: OTEL_SERVICE_NAME
-          valueFrom:
-            fieldRef:
-              fieldPath: metadata.labels['app']
         envFrom:
         - configMapRef:
             name: nats-client-config
@@ -1927,7 +1813,7 @@ spec:
             name: nats-credentials-shippingservice
         - secretRef:
             name: global-application-secrets
-        image: matslo123/shippingservice:v0.4.0@sha256:d0dc6554058b3703611b174c65e7cd9b8c653f57b604b561082993896a5ebfd3
+        image: matslo123/shippingservice:v0.4.0@sha256:320e4406169b36efd8c8dc4668753d1f082545ff6591abb0e329388de7ff22ef
         livenessProbe:
           failureThreshold: 6
           httpGet:
@@ -2036,22 +1922,6 @@ spec:
           value: "32768"
         - name: STOREFRONT_CONTEXT_CACHE_ENTRIES
           value: "65536"
-        - name: COLLECTOR_SERVICE_ADDR
-          value: alloy.observability.svc.cluster.local:4317
-        - name: OTEL_EXPORTER_OTLP_ENDPOINT
-          value: http://alloy.observability.svc.cluster.local:4317
-        - name: OTEL_EXPORTER_OTLP_PROTOCOL
-          value: grpc
-        - name: OTEL_TRACES_EXPORTER
-          value: otlp
-        - name: OTEL_METRICS_EXPORTER
-          value: none
-        - name: OTEL_LOGS_EXPORTER
-          value: none
-        - name: OTEL_SERVICE_NAME
-          valueFrom:
-            fieldRef:
-              fieldPath: metadata.labels['app']
         envFrom:
         - configMapRef:
             name: nats-client-config
