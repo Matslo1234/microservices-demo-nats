@@ -39,6 +39,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -57,6 +58,24 @@ final class NatsEventWorker implements AutoCloseable {
   private static final String RESULT_SUBJECT = "boutique.evt.ad.selection-generated.v1";
   private static final String DURABLE = "ad-page-views-v1";
   private static final String CONFIG_REVISION = "static-ads-v1";
+  private static final ThreadLocal<MessageDigest> SHA_256 =
+      ThreadLocal.withInitial(
+          () -> {
+            try {
+              return MessageDigest.getInstance("SHA-256");
+            } catch (Exception exception) {
+              throw new IllegalStateException("SHA-256 is unavailable", exception);
+            }
+          });
+  private static final ThreadLocal<MessageDigest> MD5 =
+      ThreadLocal.withInitial(
+          () -> {
+            try {
+              return MessageDigest.getInstance("MD5");
+            } catch (Exception exception) {
+              throw new IllegalStateException("MD5 is unavailable", exception);
+            }
+          });
 
   private final AdService service;
   private final boolean required;
@@ -204,7 +223,7 @@ final class NatsEventWorker implements AutoCloseable {
         Iterator<Message> messages = subscription.iterate(batchSize, Duration.ofSeconds(1));
         List<PageViewInput> fetched = new ArrayList<>();
         while (running.get() && messages.hasNext()) {
-          fetched.add(decode(messages.next()));
+          fetched.add(decodeEnvelope(messages.next()));
         }
         FilteredPageViews filtered = freshestPageViews(fetched, Instant.now(), pageViewMaxAge);
         for (PageViewInput discarded : filtered.discarded()) {
@@ -214,13 +233,15 @@ final class NatsEventWorker implements AutoCloseable {
           logger.debug(
               "discarded stale or superseded page views count={}", filtered.discarded().size());
         }
-        List<Future<?>> processing = new ArrayList<>();
+        List<Future<CompletableFuture<Void>>> dispatches = new ArrayList<>();
         for (PageViewInput input : filtered.retained()) {
-          processing.add(eventExecutor.submit(() -> processMessage(jetStream, input)));
+          dispatches.add(eventExecutor.submit(() -> processMessage(jetStream, input)));
         }
-        for (Future<?> task : processing) {
-          task.get();
+        List<CompletableFuture<Void>> confirmations = new ArrayList<>(dispatches.size());
+        for (Future<CompletableFuture<Void>> dispatch : dispatches) {
+          confirmations.add(dispatch.get());
         }
+        CompletableFuture.allOf(confirmations.toArray(CompletableFuture[]::new)).get();
       } catch (Exception exception) {
         if (running.get()) {
           logger.warn("failed to fetch page-view events", exception);
@@ -231,7 +252,7 @@ final class NatsEventWorker implements AutoCloseable {
     }
   }
 
-  private void processMessage(JetStream jetStream, PageViewInput input) {
+  private CompletableFuture<Void> processMessage(JetStream jetStream, PageViewInput input) {
     Message message = input.message();
     ThreadContext.put("correlation_id", "unknown");
     ThreadContext.put("message_id", "unknown");
@@ -254,8 +275,22 @@ final class NatsEventWorker implements AutoCloseable {
       if (input.decodeException() != null) {
         throw input.decodeException();
       }
-      handle(jetStream, input);
-      message.ack();
+      CompletableFuture<?> confirmation = handle(jetStream, input);
+      return confirmation.handle(
+          (ignored, error) -> {
+            if (error == null) {
+              message.ack();
+            } else {
+              logger.warn(
+                  "page-view result publish failed topic={} message_id={} correlation_id={}",
+                  message.getSubject(),
+                  source.getMessageId(),
+                  source.getCorrelationId(),
+                  error);
+              message.nakWithDelay(Duration.ofSeconds(1));
+            }
+            return null;
+          });
     } catch (Exception exception) {
       telemetry.recordError(exception);
       logger.warn(
@@ -265,6 +300,7 @@ final class NatsEventWorker implements AutoCloseable {
           ThreadContext.get("correlation_id"),
           exception);
       message.nakWithDelay(Duration.ofSeconds(1));
+      return CompletableFuture.completedFuture(null);
     } finally {
       telemetry.close();
       ThreadContext.remove("correlation_id");
@@ -272,9 +308,12 @@ final class NatsEventWorker implements AutoCloseable {
     }
   }
 
-  private void handle(JetStream jetStream, PageViewInput input) throws Exception {
+  private CompletableFuture<?> handle(JetStream jetStream, PageViewInput input) throws Exception {
     MessageEnvelope source = input.source();
     StorefrontPageViewedEvent pageView = input.pageView();
+    if (pageView == null) {
+      pageView = source.getData().unpack(StorefrontPageViewedEvent.class);
+    }
     long version = input.version();
     Instant eventTime = input.eventTime();
     List<Ad> selected =
@@ -293,7 +332,7 @@ final class NatsEventWorker implements AutoCloseable {
               .build());
     }
     String messageId =
-        UUID.nameUUIDFromBytes(
+        nameUuid(
                 (RESULT_SUBJECT + "\0" + source.getMessageId() + "\0" + CONFIG_REVISION)
                     .getBytes(StandardCharsets.UTF_8))
             .toString();
@@ -313,7 +352,7 @@ final class NatsEventWorker implements AutoCloseable {
             .setTracestate(source.getTracestate())
             .setData(Any.pack(payload.build()));
     Telemetry.inject(result);
-    jetStream.publish(
+    CompletableFuture<?> published = jetStream.publishAsync(
         RESULT_SUBJECT,
         result.build().toByteArray(),
         PublishOptions.builder().messageId(messageId).build());
@@ -322,20 +361,20 @@ final class NatsEventWorker implements AutoCloseable {
         RESULT_SUBJECT,
         messageId,
         source.getCorrelationId().isBlank() ? "unknown" : source.getCorrelationId());
+    return published;
   }
 
-  static PageViewInput decode(Message message) {
+  static PageViewInput decodeEnvelope(Message message) {
     MessageEnvelope source = null;
     try {
       source = MessageEnvelope.parseFrom(message.getData());
-      StorefrontPageViewedEvent pageView = source.getData().unpack(StorefrontPageViewedEvent.class);
       long version = contextVersion(source);
       Instant eventTime =
           source.hasOccurredAt()
               ? Instant.ofEpochSecond(
                   source.getOccurredAt().getSeconds(), source.getOccurredAt().getNanos())
               : Instant.EPOCH;
-      return new PageViewInput(message, source, pageView, null, version, eventTime);
+      return new PageViewInput(message, source, null, null, version, eventTime);
     } catch (Exception exception) {
       return new PageViewInput(message, source, null, exception, 0, Instant.EPOCH);
     }
@@ -351,8 +390,8 @@ final class NatsEventWorker implements AutoCloseable {
     Map<String, PageViewInput> newest = new LinkedHashMap<>();
     for (PageViewInput input : inputs) {
       if (input.decodeException() != null
-          || input.pageView() == null
-          || input.pageView().getSessionId().isBlank()) {
+          || input.source() == null
+          || input.source().getAggregateId().isBlank()) {
         retained.add(input);
         continue;
       }
@@ -361,7 +400,7 @@ final class NatsEventWorker implements AutoCloseable {
         discarded.add(input);
         continue;
       }
-      String sessionId = input.pageView().getSessionId();
+      String sessionId = input.source().getAggregateId();
       PageViewInput previous = newest.get(sessionId);
       if (previous == null || input.version() >= previous.version()) {
         if (previous != null) {
@@ -398,9 +437,22 @@ final class NatsEventWorker implements AutoCloseable {
   record FilteredPageViews(List<PageViewInput> retained, List<PageViewInput> discarded) {}
 
   private static long seed(String messageId) throws Exception {
-    byte[] digest =
-        MessageDigest.getInstance("SHA-256").digest(messageId.getBytes(StandardCharsets.UTF_8));
+    MessageDigest digestFunction = SHA_256.get();
+    digestFunction.reset();
+    byte[] digest = digestFunction.digest(messageId.getBytes(StandardCharsets.UTF_8));
     return ByteBuffer.wrap(digest).getLong();
+  }
+
+  private static UUID nameUuid(byte[] name) {
+    MessageDigest digestFunction = MD5.get();
+    digestFunction.reset();
+    byte[] digest = digestFunction.digest(name);
+    digest[6] &= 0x0f;
+    digest[6] |= 0x30;
+    digest[8] &= 0x3f;
+    digest[8] |= 0x80;
+    ByteBuffer bytes = ByteBuffer.wrap(digest);
+    return new UUID(bytes.getLong(), bytes.getLong());
   }
 
   private static Timestamp timestamp(Instant instant) {

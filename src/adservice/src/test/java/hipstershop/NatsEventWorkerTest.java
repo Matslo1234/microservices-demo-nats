@@ -68,6 +68,7 @@ final class NatsEventWorkerTest {
     MessageEnvelope source =
         MessageEnvelope.newBuilder()
             .setMessageId(sessionId + "-" + version)
+            .setAggregateId(sessionId)
             .setAggregateVersion(version)
             .setOccurredAt(
                 Timestamp.newBuilder()
@@ -75,6 +76,6 @@ final class NatsEventWorkerTest {
                     .setNanos(occurredAt.getNano()))
             .setData(Any.pack(pageView))
             .build();
-    return new NatsEventWorker.PageViewInput(null, source, pageView, null, version, occurredAt);
+    return new NatsEventWorker.PageViewInput(null, source, null, null, version, occurredAt);
   }
 }

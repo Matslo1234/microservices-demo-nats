@@ -24,6 +24,7 @@ public final class AdService {
   private static final Logger logger = LogManager.getLogger(AdService.class);
   private static final int MAX_ADS_TO_SERVE = 2;
   private static final AdService service = new AdService();
+  private static final ThreadLocal<Random> SELECTION_RANDOM = ThreadLocal.withInitial(Random::new);
 
   private HttpServer healthServer;
   private ExecutorService healthExecutor;
@@ -90,7 +91,9 @@ public final class AdService {
     if (selected.isEmpty()) {
       adsMap.values().forEach(selected::addAll);
     }
-    Collections.shuffle(selected, new Random(seed));
+    Random random = SELECTION_RANDOM.get();
+    random.setSeed(seed);
+    Collections.shuffle(selected, random);
     return selected.subList(0, Math.min(MAX_ADS_TO_SERVE, selected.size()));
   }
 

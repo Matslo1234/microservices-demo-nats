@@ -18,6 +18,7 @@ import java.util.List;
 import org.apache.logging.log4j.ThreadContext;
 
 final class Telemetry {
+  private static boolean enabled;
   private static final TextMapGetter<MessageEnvelope> GETTER =
       new TextMapGetter<>() {
         @Override
@@ -58,11 +59,15 @@ final class Telemetry {
     if (!"1".equals(System.getenv("ENABLE_TRACING"))) {
       return;
     }
+    enabled = true;
     openTelemetry = AutoConfiguredOpenTelemetrySdk.initialize().getOpenTelemetrySdk();
     tracer = openTelemetry.getTracer("online-boutique/messaging");
   }
 
   static MessageSpan consumer(MessageEnvelope envelope, String subject, String kind) {
+    if (!enabled) {
+      return MessageSpan.noop();
+    }
     Context parent =
         openTelemetry.getPropagators().getTextMapPropagator().extract(Context.root(), envelope, GETTER);
     String correlationId = normalized(envelope == null ? "" : envelope.getCorrelationId());
@@ -82,6 +87,9 @@ final class Telemetry {
   }
 
   static void inject(MessageEnvelope.Builder envelope) {
+    if (!enabled) {
+      return;
+    }
     openTelemetry
         .getPropagators()
         .getTextMapPropagator()
@@ -93,8 +101,18 @@ final class Telemetry {
   }
 
   static final class MessageSpan implements AutoCloseable {
+    private static final MessageSpan NOOP = new MessageSpan();
     private final Span span;
     private final Scope scope;
+
+    private MessageSpan() {
+      this.span = null;
+      this.scope = null;
+    }
+
+    static MessageSpan noop() {
+      return NOOP;
+    }
 
     private MessageSpan(Span span) {
       this.span = span;
@@ -107,12 +125,18 @@ final class Telemetry {
     }
 
     void recordError(Throwable error) {
+      if (span == null) {
+        return;
+      }
       span.recordException(error);
       span.setStatus(StatusCode.ERROR, "operation failed");
     }
 
     @Override
     public void close() {
+      if (span == null) {
+        return;
+      }
       scope.close();
       span.end();
       ThreadContext.remove("traceId");

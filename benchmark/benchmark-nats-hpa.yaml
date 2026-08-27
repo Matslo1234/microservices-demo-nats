@@ -488,7 +488,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-adservice
-        image: matslo123/adservice:v0.4.0@sha256:e200e2dc4e009caa0c3728ab0bc63dadc5ab1ac0d161870366c8e1dd5c9fa0f9
+        image: matslo123/adservice:v0.4.0@sha256:5f54fe06f3bfa41a788cc943ed4afe5ab527c97aca5a89b0ab3ba4a7d6c86f80
         livenessProbe:
           httpGet:
             path: /healthz

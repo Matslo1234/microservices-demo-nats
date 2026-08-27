@@ -10,11 +10,18 @@ view per session. Views older than `AD_PAGE_VIEW_MAX_AGE` (default `5s`) and
 superseded views are acknowledged without generating obsolete ad selections.
 Malformed events retain the normal retry behavior.
 
-Retained inputs are decoded once, and their deterministic ad-selection event is
-confirmed by JetStream before the input is acknowledged. Configure batch and
-worker counts with `NATS_CONSUMER_BATCH_SIZE` and
-`NATS_CONSUMER_CONCURRENCY`. CPU requests and limits are independent of these
-settings.
+Only the envelope is decoded before stale and superseded views are removed; the
+embedded page-view payload is unpacked only for retained inputs. Retained
+events are published asynchronously across the batch, and each input is
+acknowledged only after its own ad-selection publish is confirmed by
+JetStream. Explicit acknowledgements remain per-message so one replica cannot
+acknowledge work that another replica has not completed.
+
+When tracing is disabled, the event path skips span/context construction.
+Digest and pseudo-random-generator instances used for deterministic selection
+are reused per worker. Configure batch and worker counts with
+`NATS_CONSUMER_BATCH_SIZE` and `NATS_CONSUMER_CONCURRENCY`; CPU requests and
+limits are independent of these settings.
 
 ## Building locally
 

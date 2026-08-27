@@ -43,7 +43,7 @@ SERVICES = (
     "storefrontprojectionservice",
 )
 DEFAULT_IMAGE_DIGESTS = {
-    "adservice": "e200e2dc4e009caa0c3728ab0bc63dadc5ab1ac0d161870366c8e1dd5c9fa0f9",
+    "adservice": "5f54fe06f3bfa41a788cc943ed4afe5ab527c97aca5a89b0ab3ba4a7d6c86f80",
     "benchmarkservice": "20cc7b4686c1ed068aecf65cb765486c10b97105cbad27bd23033eaadc169bfa",
     "cartservice": "a981b8dd94d28910e3003aeb985ade8d1f3e9aa33f204d4a9323cd142870f648",
     "checkoutservice": "ee7b5fed8dcf83c447a67dfe46c33c6593983af1953e82492889199c4891550b",
