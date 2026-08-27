@@ -45,7 +45,12 @@ dependencies {
 
         runtimeOnly "com.fasterxml.jackson.core:jackson-core:${jacksonCoreVersion}",
                 "com.fasterxml.jackson.core:jackson-databind:${jacksonDatabindVersion}"
+        testImplementation "org.junit.jupiter:junit-jupiter:5.11.4"
     }
+}
+
+tasks.named('test') {
+    useJUnitPlatform()
 }
 
 protobuf {

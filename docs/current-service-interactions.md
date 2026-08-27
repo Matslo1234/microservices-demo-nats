@@ -192,6 +192,21 @@ Coalescing is local to a fetched batch and does not require cross-pod session
 state. Result context versions and the storefront projection's monotonic update
 rules prevent an older generated result from replacing a newer one.
 
+### Ad freshness and coalescing
+
+Advertisement generation is also freshness-first and does not participate in
+checkout correctness. Each existing `32`-message fetch retains only the newest
+page view per session. Views older than `AD_PAGE_VIEW_MAX_AGE` (default `5s`)
+and same-batch-superseded views are acknowledged without ad selection or result
+publication. Malformed inputs retain the normal negative-acknowledgement and
+redelivery behavior. Retained inputs are decoded once and shared by filtering,
+telemetry, selection, and result construction; the configured concurrency and
+CPU limits are unchanged.
+
+As with recommendations, coalescing is local to one fetched batch. Result
+context versions and the storefront projection's monotonic updates prevent an
+older ad selection from replacing a newer session result.
+
 Shipping cart quotes retain every accepted cart-version input. Each existing
 32-message fetch is dispatched across 32 in-process lanes keyed by cart user ID.
 Messages assigned to one lane remain sequential, while unrelated users can wait

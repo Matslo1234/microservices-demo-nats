@@ -43,7 +43,7 @@ SERVICES = (
     "storefrontprojectionservice",
 )
 DEFAULT_IMAGE_DIGESTS = {
-    "adservice": "9ea77de953468f3ddb47e31149dc934a04534bc75da892f46b824339b5963109",
+    "adservice": "e200e2dc4e009caa0c3728ab0bc63dadc5ab1ac0d161870366c8e1dd5c9fa0f9",
     "benchmarkservice": "20cc7b4686c1ed068aecf65cb765486c10b97105cbad27bd23033eaadc169bfa",
     "cartservice": "a981b8dd94d28910e3003aeb985ade8d1f3e9aa33f204d4a9323cd142870f648",
     "checkoutservice": "ee7b5fed8dcf83c447a67dfe46c33c6593983af1953e82492889199c4891550b",
@@ -54,7 +54,7 @@ DEFAULT_IMAGE_DIGESTS = {
     "messageoperationsservice": "2b2334e684a9297e2bf6af8daf0e924b86daecb78f9ff578756e9bc34b8f7a45",
     "paymentservice": "755e13249749163500bdb54898c5f23973e2012dde0b89e2b533bde45522ffaf",
     "productcatalogservice": "26d97784a6e105cf1586b2ff723772c583021491d5fa165ceaae6a3af12fe54d",
-    "recommendationservice": "898d526a7999c64d6ee1b06504e9aedea64e5f03d18fdb34eb1e9a4dd4e8ee26",
+    "recommendationservice": "5879f506efff4387e253a6ae082377ebf7f18d55fdbf6fbae1b2712aff994c83",
     "shippingservice": "320e4406169b36efd8c8dc4668753d1f082545ff6591abb0e329388de7ff22ef",
     "storefrontprojectionservice": "0a51671d6e0502d7bd68ef2034bdb5697d20d020f5edfe2a0110af993e09b382",
 }

@@ -35,7 +35,9 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -62,6 +64,7 @@ final class NatsEventWorker implements AutoCloseable {
   private final AtomicBoolean consumerReady = new AtomicBoolean();
   private int batchSize;
   private int concurrency;
+  private Duration pageViewMaxAge;
   private Connection connection;
   private ExecutorService eventExecutor;
   private Thread thread;
@@ -89,6 +92,10 @@ final class NatsEventWorker implements AutoCloseable {
     }
     batchSize = boundedInteger("NATS_CONSUMER_BATCH_SIZE", 32, 1, 256);
     concurrency = boundedInteger("NATS_CONSUMER_CONCURRENCY", 8, 1, 64);
+    pageViewMaxAge = duration("AD_PAGE_VIEW_MAX_AGE", Duration.ofSeconds(5));
+    if (pageViewMaxAge.isNegative()) {
+      throw new IllegalArgumentException("AD_PAGE_VIEW_MAX_AGE must not be negative");
+    }
     AtomicInteger workerNumber = new AtomicInteger();
     eventExecutor =
         Executors.newFixedThreadPool(
@@ -144,9 +151,10 @@ final class NatsEventWorker implements AutoCloseable {
         JetStreamSubscription subscription = jetStream.subscribe(PAGE_SUBJECT, subscribeOptions);
         consumerReady.set(true);
         logger.info(
-            "NATS page-view consumer is ready batch_size={} concurrency={}",
+            "NATS page-view consumer is ready batch_size={} concurrency={} max_age={}",
             batchSize,
-            concurrency);
+            concurrency,
+            pageViewMaxAge);
         consume(jetStream, subscription);
         consumerReady.set(false);
       } catch (InterruptedException exception) {
@@ -194,10 +202,21 @@ final class NatsEventWorker implements AutoCloseable {
     while (running.get()) {
       try {
         Iterator<Message> messages = subscription.iterate(batchSize, Duration.ofSeconds(1));
-        List<Future<?>> processing = new ArrayList<>();
+        List<PageViewInput> fetched = new ArrayList<>();
         while (running.get() && messages.hasNext()) {
-          Message message = messages.next();
-          processing.add(eventExecutor.submit(() -> processMessage(jetStream, message)));
+          fetched.add(decode(messages.next()));
+        }
+        FilteredPageViews filtered = freshestPageViews(fetched, Instant.now(), pageViewMaxAge);
+        for (PageViewInput discarded : filtered.discarded()) {
+          discarded.message().ack();
+        }
+        if (!filtered.discarded().isEmpty()) {
+          logger.debug(
+              "discarded stale or superseded page views count={}", filtered.discarded().size());
+        }
+        List<Future<?>> processing = new ArrayList<>();
+        for (PageViewInput input : filtered.retained()) {
+          processing.add(eventExecutor.submit(() -> processMessage(jetStream, input)));
         }
         for (Future<?> task : processing) {
           task.get();
@@ -212,21 +231,18 @@ final class NatsEventWorker implements AutoCloseable {
     }
   }
 
-  private void processMessage(JetStream jetStream, Message message) {
+  private void processMessage(JetStream jetStream, PageViewInput input) {
+    Message message = input.message();
     ThreadContext.put("correlation_id", "unknown");
     ThreadContext.put("message_id", "unknown");
-    MessageEnvelope source = null;
-    Exception decodeException = null;
-    try {
-      source = MessageEnvelope.parseFrom(message.getData());
+    MessageEnvelope source = input.source();
+    if (source != null) {
       if (!source.getCorrelationId().isBlank()) {
         ThreadContext.put("correlation_id", source.getCorrelationId());
       }
       if (!source.getMessageId().isBlank()) {
         ThreadContext.put("message_id", source.getMessageId());
       }
-    } catch (Exception exception) {
-      decodeException = exception;
     }
     logger.debug(
         "NATS event received topic={} message_id={} correlation_id={}",
@@ -235,10 +251,10 @@ final class NatsEventWorker implements AutoCloseable {
         ThreadContext.get("correlation_id"));
     Telemetry.MessageSpan telemetry = Telemetry.consumer(source, message.getSubject(), "event");
     try {
-      if (decodeException != null) {
-        throw decodeException;
+      if (input.decodeException() != null) {
+        throw input.decodeException();
       }
-      handle(jetStream, source);
+      handle(jetStream, input);
       message.ack();
     } catch (Exception exception) {
       telemetry.recordError(exception);
@@ -256,20 +272,11 @@ final class NatsEventWorker implements AutoCloseable {
     }
   }
 
-  private void handle(JetStream jetStream, MessageEnvelope source) throws Exception {
-    StorefrontPageViewedEvent pageView = source.getData().unpack(StorefrontPageViewedEvent.class);
-    long version = source.getAggregateVersion();
-    if (version == 0) {
-      version = seed(source.getMessageId()) & Long.MAX_VALUE;
-      if (version == 0) {
-        version = 1;
-      }
-    }
-    Instant eventTime =
-        source.hasOccurredAt()
-            ? Instant.ofEpochSecond(
-                source.getOccurredAt().getSeconds(), source.getOccurredAt().getNanos())
-            : Instant.EPOCH;
+  private void handle(JetStream jetStream, PageViewInput input) throws Exception {
+    MessageEnvelope source = input.source();
+    StorefrontPageViewedEvent pageView = input.pageView();
+    long version = input.version();
+    Instant eventTime = input.eventTime();
     List<Ad> selected =
         service.selectAds(
             pageView.getCategoryIdsList(), seed(source.getMessageId() + "\0" + CONFIG_REVISION));
@@ -316,6 +323,79 @@ final class NatsEventWorker implements AutoCloseable {
         messageId,
         source.getCorrelationId().isBlank() ? "unknown" : source.getCorrelationId());
   }
+
+  static PageViewInput decode(Message message) {
+    MessageEnvelope source = null;
+    try {
+      source = MessageEnvelope.parseFrom(message.getData());
+      StorefrontPageViewedEvent pageView = source.getData().unpack(StorefrontPageViewedEvent.class);
+      long version = contextVersion(source);
+      Instant eventTime =
+          source.hasOccurredAt()
+              ? Instant.ofEpochSecond(
+                  source.getOccurredAt().getSeconds(), source.getOccurredAt().getNanos())
+              : Instant.EPOCH;
+      return new PageViewInput(message, source, pageView, null, version, eventTime);
+    } catch (Exception exception) {
+      return new PageViewInput(message, source, null, exception, 0, Instant.EPOCH);
+    }
+  }
+
+  static FilteredPageViews freshestPageViews(
+      List<PageViewInput> inputs, Instant now, Duration maxAge) {
+    if (maxAge.isNegative()) {
+      throw new IllegalArgumentException("page-view max age must not be negative");
+    }
+    List<PageViewInput> retained = new ArrayList<>();
+    List<PageViewInput> discarded = new ArrayList<>();
+    Map<String, PageViewInput> newest = new LinkedHashMap<>();
+    for (PageViewInput input : inputs) {
+      if (input.decodeException() != null
+          || input.pageView() == null
+          || input.pageView().getSessionId().isBlank()) {
+        retained.add(input);
+        continue;
+      }
+      if (!input.eventTime().equals(Instant.EPOCH)
+          && Duration.between(input.eventTime(), now).compareTo(maxAge) > 0) {
+        discarded.add(input);
+        continue;
+      }
+      String sessionId = input.pageView().getSessionId();
+      PageViewInput previous = newest.get(sessionId);
+      if (previous == null || input.version() >= previous.version()) {
+        if (previous != null) {
+          discarded.add(previous);
+        }
+        newest.put(sessionId, input);
+      } else {
+        discarded.add(input);
+      }
+    }
+    retained.addAll(newest.values());
+    return new FilteredPageViews(List.copyOf(retained), List.copyOf(discarded));
+  }
+
+  private static long contextVersion(MessageEnvelope source) throws Exception {
+    long version = source.getAggregateVersion();
+    if (version == 0) {
+      version = seed(source.getMessageId()) & Long.MAX_VALUE;
+      if (version == 0) {
+        version = 1;
+      }
+    }
+    return version;
+  }
+
+  record PageViewInput(
+      Message message,
+      MessageEnvelope source,
+      StorefrontPageViewedEvent pageView,
+      Exception decodeException,
+      long version,
+      Instant eventTime) {}
+
+  record FilteredPageViews(List<PageViewInput> retained, List<PageViewInput> discarded) {}
 
   private static long seed(String messageId) throws Exception {
     byte[] digest =

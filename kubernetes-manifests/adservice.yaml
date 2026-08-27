@@ -62,6 +62,8 @@ spec:
           value: "32"
         - name: NATS_CONSUMER_CONCURRENCY
           value: "8"
+        - name: AD_PAGE_VIEW_MAX_AGE
+          value: "5s"
         envFrom:
         - configMapRef:
             name: nats-client-config

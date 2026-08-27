@@ -351,7 +351,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-adservice
-        image: matslo123/adservice:v0.4.0@sha256:9ea77de953468f3ddb47e31149dc934a04534bc75da892f46b824339b5963109
+        image: matslo123/adservice:v0.4.0@sha256:e200e2dc4e009caa0c3728ab0bc63dadc5ab1ac0d161870366c8e1dd5c9fa0f9
         livenessProbe:
           httpGet:
             path: /healthz
@@ -1558,7 +1558,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-recommendationservice
-        image: matslo123/recommendationservice:v0.4.0@sha256:898d526a7999c64d6ee1b06504e9aedea64e5f03d18fdb34eb1e9a4dd4e8ee26
+        image: matslo123/recommendationservice:v0.4.0@sha256:5879f506efff4387e253a6ae082377ebf7f18d55fdbf6fbae1b2712aff994c83
         livenessProbe:
           failureThreshold: 6
           httpGet:

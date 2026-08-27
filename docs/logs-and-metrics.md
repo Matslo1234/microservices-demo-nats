@@ -237,6 +237,13 @@ outputs. Diagnose order throughput with the checkout consumers above and the
 independent completed-order observer instead of the aggregate application
 consumer-pending sum.
 
+`ad-page-views-v1` likewise acknowledges page views older than
+`AD_PAGE_VIEW_MAX_AGE` (default `5s`) and same-batch-superseded views without
+publishing obsolete ad selections. Under sustained load its pending count can
+temporarily represent the freshness window rather than required outputs. A
+queue that drains quickly after arrival stops, without redeliveries, indicates
+capacity pressure rather than processing failures.
+
 `shipping-cart-quotes-v1` preserves every cart-version output but processes an
 existing fetch through per-user worker lanes. A sustained pending count there
 represents quote input arriving faster than the keyed parallel
