@@ -22,6 +22,7 @@ from nats.js.errors import NoKeysError, ServiceUnavailableError
 from catalog_kv import (
     CatalogConflict,
     CatalogNotFound,
+    CatalogNotReady,
     apply_product,
     apply_snapshot,
     catalog_snapshot,
@@ -564,44 +565,57 @@ async def _run():
     )
     await ensure_catalog_index(catalog_store)
     catalog_cache = _CatalogCache(catalog_store)
-    await catalog_cache.candidates(set(), "startup", MODEL_REVISION)
     catalog = await _durable(js, CATALOG_SUBJECT, "recommendation-catalog-v1")
-    cart = await _durable(js, CART_SUBJECT, "recommendation-cart-v1")
-    page = await _durable(
-        js,
-        PAGE_VIEW_SUBJECT,
-        "recommendation-page-views-v1",
-        deliver_policy=DeliverPolicy.NEW,
-    )
-    _ready.set()
-    logger.info(
-        "NATS event consumers and shared catalog KV are ready",
-        extra={"catalog_bucket": CATALOG_BUCKET},
-    )
-    consumers = [
-        asyncio.create_task(_consume(
-            catalog,
-            lambda message: _apply_catalog_and_invalidate(
-                catalog_store, catalog_cache, message),
-            batch_size=1,
-            concurrency=1,
-        )),
-        asyncio.create_task(_consume(
-            cart,
-            lambda message: _handle_trigger(js, catalog_cache, message),
-            batch_size=_integer("RECOMMENDATION_CART_BATCH_SIZE", 256),
-            concurrency=_integer("RECOMMENDATION_CART_CONCURRENCY", 32),
-            batch_filter=_latest_cart_triggers,
-        )),
-        asyncio.create_task(_consume(
-            page,
-            lambda message: _handle_trigger(js, catalog_cache, message),
-            batch_size=_integer("RECOMMENDATION_PAGE_VIEW_BATCH_SIZE", 256),
-            concurrency=_integer("RECOMMENDATION_PAGE_VIEW_CONCURRENCY", 32),
-            batch_filter=_fresh_page_views,
-        )),
-    ]
+    consumers = [asyncio.create_task(_consume(
+        catalog,
+        lambda message: _apply_catalog_and_invalidate(
+            catalog_store, catalog_cache, message),
+        batch_size=1,
+        concurrency=1,
+    ))]
     try:
+        # A new KV bucket is populated by the retained catalog bootstrap
+        # events. Start that consumer before requiring the snapshot, otherwise
+        # a cold start can never create the key it is waiting for.
+        while True:
+            try:
+                await catalog_cache.candidates(
+                    set(), "startup", MODEL_REVISION)
+                break
+            except CatalogNotReady:
+                if consumers[0].done():
+                    await consumers[0]
+                await asyncio.sleep(0.1)
+
+        cart = await _durable(js, CART_SUBJECT, "recommendation-cart-v1")
+        page = await _durable(
+            js,
+            PAGE_VIEW_SUBJECT,
+            "recommendation-page-views-v1",
+            deliver_policy=DeliverPolicy.NEW,
+        )
+        consumers.extend([
+            asyncio.create_task(_consume(
+                cart,
+                lambda message: _handle_trigger(js, catalog_cache, message),
+                batch_size=_integer("RECOMMENDATION_CART_BATCH_SIZE", 256),
+                concurrency=_integer("RECOMMENDATION_CART_CONCURRENCY", 32),
+                batch_filter=_latest_cart_triggers,
+            )),
+            asyncio.create_task(_consume(
+                page,
+                lambda message: _handle_trigger(js, catalog_cache, message),
+                batch_size=_integer("RECOMMENDATION_PAGE_VIEW_BATCH_SIZE", 256),
+                concurrency=_integer(
+                    "RECOMMENDATION_PAGE_VIEW_CONCURRENCY", 32),
+                batch_filter=_fresh_page_views,
+            )),
+        ])
+        _ready.set()
+        logger.info(
+            "NATS event consumers and shared catalog KV are ready",
+            extra={"catalog_bucket": CATALOG_BUCKET},
+        )
         await asyncio.gather(*consumers)
     finally:
         for consumer in consumers:

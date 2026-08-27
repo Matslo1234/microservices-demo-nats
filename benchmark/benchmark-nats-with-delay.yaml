@@ -1696,7 +1696,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-recommendationservice
-        image: matslo123/recommendationservice:v0.4.0@sha256:5879f506efff4387e253a6ae082377ebf7f18d55fdbf6fbae1b2712aff994c83
+        image: matslo123/recommendationservice:v0.4.0@sha256:d8cccf9a19c5d62bf3e38d94728366c7933c1daeb138b6f6713c42277a5f760a
         livenessProbe:
           failureThreshold: 6
           httpGet:

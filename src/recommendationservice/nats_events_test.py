@@ -12,6 +12,7 @@ from google.protobuf.timestamp_pb2 import Timestamp
 from nats.js.api import DeliverPolicy
 from nats.js.errors import NoKeysError, ServiceUnavailableError
 
+from catalog_kv import CatalogNotReady
 from nats_events import (
     _CatalogCache,
     _NATSCatalogStore,
@@ -310,6 +311,53 @@ class StreamingConsumerTests(unittest.IsolatedAsyncioTestCase):
         DeliverPolicy.NEW,
         durable.await_args_list[2].kwargs["deliver_policy"],
     )
+    connection.close.assert_awaited_once()
+
+  async def test_worker_consumes_catalog_before_requiring_snapshot(self):
+    connection = MagicMock()
+    connection.is_closed = False
+    connection.close = AsyncMock()
+    jetstream = connection.jetstream.return_value
+    jetstream.key_value = AsyncMock(return_value=AsyncMock())
+    catalog_consuming = asyncio.Event()
+
+    async def consume(_subscription, _handler, **_options):
+      catalog_consuming.set()
+      await asyncio.Event().wait()
+
+    async def snapshot(_store):
+      if not catalog_consuming.is_set():
+        raise CatalogNotReady("catalog snapshot has not completed")
+      return (("one",), 1)
+
+    with (
+        patch.dict(
+            "os.environ",
+            {
+                "NATS_REQUIRED": "true",
+                "NATS_URL": "tls://nats:4222",
+                "NATS_USER": "user",
+                "NATS_PASSWORD": "password",
+                "NATS_CA_FILE": "/ca.crt",
+                "REGION_ID": "local",
+                "K8S_CLUSTER_NAME": "test",
+            },
+            clear=True,
+        ),
+        patch("nats_events.ssl.create_default_context"),
+        patch("nats_events.nats.connect", AsyncMock(return_value=connection)),
+        patch("nats_events.ensure_catalog_index", AsyncMock()),
+        patch("nats_events.catalog_snapshot", AsyncMock(side_effect=snapshot)),
+        patch("nats_events._durable", AsyncMock(return_value=MagicMock())),
+        patch("nats_events._consume", side_effect=consume),
+    ):
+      worker = asyncio.create_task(_run())
+      await asyncio.wait_for(catalog_consuming.wait(), timeout=1)
+      await asyncio.sleep(0)
+      worker.cancel()
+      with self.assertRaises(asyncio.CancelledError):
+        await worker
+
     connection.close.assert_awaited_once()
 
 

@@ -54,7 +54,7 @@ DEFAULT_IMAGE_DIGESTS = {
     "messageoperationsservice": "2b2334e684a9297e2bf6af8daf0e924b86daecb78f9ff578756e9bc34b8f7a45",
     "paymentservice": "755e13249749163500bdb54898c5f23973e2012dde0b89e2b533bde45522ffaf",
     "productcatalogservice": "26d97784a6e105cf1586b2ff723772c583021491d5fa165ceaae6a3af12fe54d",
-    "recommendationservice": "5879f506efff4387e253a6ae082377ebf7f18d55fdbf6fbae1b2712aff994c83",
+    "recommendationservice": "d8cccf9a19c5d62bf3e38d94728366c7933c1daeb138b6f6713c42277a5f760a",
     "shippingservice": "320e4406169b36efd8c8dc4668753d1f082545ff6591abb0e329388de7ff22ef",
     "storefrontprojectionservice": "0a51671d6e0502d7bd68ef2034bdb5697d20d020f5edfe2a0110af993e09b382",
 }
