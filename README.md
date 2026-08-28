@@ -86,7 +86,7 @@ flowchart LR
 | [checkoutservice](src/checkoutservice) | Go | Stateless checkout orchestration backed by shared transactional Redis state. |
 | [recommendationservice](src/recommendationservice) | Python | Product recommendations. |
 | [adservice](src/adservice) | Java | Contextual advertisements. |
-| [storefrontprojectionservice](src/storefrontprojectionservice) | Go | NATS-backed storefront read model. |
+| [storefrontprojectionservice](src/storefrontprojectionservice) | Go | NATS-backed storefront read model that projects events and serves queries. |
 | [messageoperationsservice](src/messageoperationsservice) | Go | Restricted dead-letter transfer, alert metrics, administrator review, and replay. |
 
 ## Quickstart

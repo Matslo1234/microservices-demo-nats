@@ -182,7 +182,7 @@ data:
       "max_msg_size": 65536,
       "storage": "file",
       "discard": "old",
-      "num_replicas": 3,
+      "num_replicas": __NATS_JETSTREAM_REPLICAS__,
       "duplicate_window": 120000000000,
       "allow_direct": false,
       "placement": {"cluster": "__GLOBAL_ASSET_CLUSTER__"}
@@ -201,7 +201,7 @@ data:
       "max_msg_size": 262144,
       "storage": "file",
       "discard": "new",
-      "num_replicas": 3,
+      "num_replicas": __NATS_JETSTREAM_REPLICAS__,
       "duplicate_window": 120000000000,
       "allow_direct": false,
       "placement": {"cluster": "__GLOBAL_ASSET_CLUSTER__"}
@@ -220,7 +220,7 @@ data:
       "max_msg_size": 524288,
       "storage": "file",
       "discard": "old",
-      "num_replicas": 3,
+      "num_replicas": __NATS_JETSTREAM_REPLICAS__,
       "duplicate_window": 120000000000,
       "allow_direct": false,
       "placement": {"cluster": "__GLOBAL_ASSET_CLUSTER__"}
@@ -239,7 +239,7 @@ data:
       "max_msg_size": 262144,
       "storage": "file",
       "discard": "old",
-      "num_replicas": 3,
+      "num_replicas": __NATS_JETSTREAM_REPLICAS__,
       "duplicate_window": 120000000000,
       "allow_direct": true,
       "placement": {"cluster": "__GLOBAL_ASSET_CLUSTER__"}
@@ -252,12 +252,16 @@ data:
       echo "global bootstrap refuses NATS_CLUSTER_ROLE=${NATS_CLUSTER_ROLE}" >&2
       exit 1
     fi
-    if [ "${GLOBAL_ASSET_CLUSTER}" != "${NATS_CLUSTER_NAME}" ]; then
+    if [ "${NATS_CLUSTERED}" = true ] && [ "${GLOBAL_ASSET_CLUSTER}" != "${NATS_CLUSTER_NAME}" ]; then
       echo "global assets must be bootstrapped from their owner cluster" >&2
       exit 1
     fi
 
     nats_args="--server=${NATS_URL} --user=${NATS_USER} --password=${NATS_PASSWORD} --tlsca=/etc/nats-ca/ca.crt"
+    placement_args=""
+    if [ "${NATS_CLUSTERED}" = true ]; then
+      placement_args="--cluster=${GLOBAL_ASSET_CLUSTER}"
+    fi
     until nats ${nats_args} account info >/dev/null 2>&1; do
       echo "waiting for the NATS JetStream account"
       sleep 2
@@ -265,7 +269,13 @@ data:
 
     for source in /config/streams/*.json; do
       target="/work/$(basename "${source}")"
-      sed "s/__GLOBAL_ASSET_CLUSTER__/${GLOBAL_ASSET_CLUSTER}/g" "${source}" > "${target}"
+      sed \
+        -e "s/__GLOBAL_ASSET_CLUSTER__/${GLOBAL_ASSET_CLUSTER}/g" \
+        -e "s/__NATS_JETSTREAM_REPLICAS__/${NATS_JETSTREAM_REPLICAS}/g" \
+        "${source}" > "${target}"
+      if [ "${NATS_CLUSTERED}" != true ]; then
+        sed -i -e '/"placement": {"cluster":/d' -e '/"allow_direct":/s/,$//' "${target}"
+      fi
       stream_name="$(basename "${source}" .json)"
       if nats ${nats_args} stream info "${stream_name}" >/dev/null 2>&1; then
         nats ${nats_args} stream update "${stream_name}" --config "${target}" --force
@@ -273,10 +283,12 @@ data:
         nats ${nats_args} stream add --config "${target}"
       fi
       compact="$(nats ${nats_args} stream info "${stream_name}" --json | tr -d '[:space:]')"
-      printf '%s' "${compact}" | grep -F "\"cluster\":\"${GLOBAL_ASSET_CLUSTER}\"" >/dev/null || {
+      if [ "${NATS_CLUSTERED}" = true ]; then
+        printf '%s' "${compact}" | grep -F "\"cluster\":\"${GLOBAL_ASSET_CLUSTER}\"" >/dev/null || {
         echo "stream ${stream_name} is not placed in ${GLOBAL_ASSET_CLUSTER}" >&2
         exit 1
-      }
+        }
+      fi
     done
 
     assert_backing_stream() {
@@ -287,17 +299,19 @@ data:
       cluster=$5
       compact="$(nats ${nats_args} stream info "${stream}" --json | tr -d '[:space:]')"
       for expected in \
-        "\"num_replicas\":3" \
+        "\"num_replicas\":${NATS_JETSTREAM_REPLICAS}" \
         "\"storage\":\"file\"" \
         "\"max_msgs_per_subject\":${history}" \
         "\"max_age\":${max_age}" \
-        "\"max_bytes\":${max_bytes}" \
-        "\"cluster\":\"${cluster}\""; do
+        "\"max_bytes\":${max_bytes}"; do
         printf '%s' "${compact}" | grep -F "${expected}" >/dev/null || {
           echo "${stream} does not match ${expected}" >&2
           exit 1
         }
       done
+      if [ "${NATS_CLUSTERED}" = true ]; then
+        printf '%s' "${compact}" | grep -F "\"cluster\":\"${cluster}\"" >/dev/null || exit 1
+      fi
     }
 
     ensure_kv() {
@@ -308,11 +322,11 @@ data:
       max_bytes=$5
       cluster=$6
       if nats ${nats_args} kv info "${bucket}" >/dev/null 2>&1; then
-        nats ${nats_args} kv edit "${bucket}" --history="${history}" --replicas=3 \
-          --ttl="${ttl}" --max-bucket-size="${max_bytes}" --cluster="${cluster}"
+        nats ${nats_args} kv edit "${bucket}" --history="${history}" --replicas="${NATS_JETSTREAM_REPLICAS}" \
+          --ttl="${ttl}" --max-bucket-size="${max_bytes}" ${placement_args}
       else
-        nats ${nats_args} kv add "${bucket}" --history="${history}" --replicas=3 \
-          --storage=file --ttl="${ttl}" --max-bucket-size="${max_bytes}" --cluster="${cluster}"
+        nats ${nats_args} kv add "${bucket}" --history="${history}" --replicas="${NATS_JETSTREAM_REPLICAS}" \
+          --storage=file --ttl="${ttl}" --max-bucket-size="${max_bytes}" ${placement_args}
       fi
       assert_backing_stream "KV_${bucket}" "${history}" "${max_age}" "${max_bytes}" "${cluster}"
     }
@@ -526,10 +540,13 @@ data:
   NATS_BENCHMARK_RUNS_SUBJECT: $KV.BENCHMARK_RUNS_LOCAL.>
   NATS_CLUSTER_NAME: BOUTIQUE
   NATS_CLUSTER_ROLE: primary
+  NATS_CLUSTER_ROUTES: nats://nats-0.nats-headless.nats.svc.cluster.local:6222,nats://nats-1.nats-headless.nats.svc.cluster.local:6222,nats://nats-2.nats-headless.nats.svc.cluster.local:6222
   NATS_CLUSTER_TAG: cluster:BOUTIQUE
+  NATS_CLUSTERED: "true"
   NATS_FRONTEND_LIVE_SUBJECT: boutique.live.operation.local.>
   NATS_GATEWAY_DNS_NAMES: nats-0.nats-headless.nats.svc.cluster.local,nats-1.nats-headless.nats.svc.cluster.local,nats-2.nats-headless.nats.svc.cluster.local
   NATS_GATEWAY_DOMAIN: nats-headless.nats.svc.cluster.local
+  NATS_JETSTREAM_REPLICAS: "3"
   NATS_PROJECTION_CARTS_SUBJECT: $KV.STOREFRONT_CARTS_LOCAL.>
   NATS_PROJECTION_CONTEXT_SUBJECT: $KV.STOREFRONT_CONTEXT_LOCAL.>
   NATS_PROJECTION_OPERATIONS_SUBJECT: $KV.STOREFRONT_OPERATIONS_LOCAL.>
@@ -562,6 +579,10 @@ data:
     set -eu
 
     nats_args="--server=${NATS_URL} --user=${NATS_USER} --password=${NATS_PASSWORD} --tlsca=/etc/nats-ca/ca.crt"
+    placement_args=""
+    if [ "${NATS_CLUSTERED}" = true ]; then
+      placement_args="--cluster=${NATS_CLUSTER_NAME}"
+    fi
     until nats ${nats_args} account info >/dev/null 2>&1; do
       echo "waiting for the local NATS JetStream account"
       sleep 2
@@ -581,16 +602,18 @@ data:
       max_bytes=$4
       compact="$(nats ${nats_args} stream info "${stream}" --json | tr -d '[:space:]')"
       for expected in \
-        "\"num_replicas\":3" \
+        "\"num_replicas\":${NATS_JETSTREAM_REPLICAS}" \
         "\"storage\":\"file\"" \
         "\"max_age\":${max_age}" \
-        "\"max_bytes\":${max_bytes}" \
-        "\"cluster\":\"${NATS_CLUSTER_NAME}\""; do
+        "\"max_bytes\":${max_bytes}"; do
         printf '%s' "${compact}" | grep -F "${expected}" >/dev/null || {
           echo "${stream} does not match ${expected}" >&2
           exit 1
         }
       done
+      if [ "${NATS_CLUSTERED}" = true ]; then
+        printf '%s' "${compact}" | grep -F "\"cluster\":\"${NATS_CLUSTER_NAME}\"" >/dev/null || exit 1
+      fi
       if [ "${history}" != skip ]; then
         printf '%s' "${compact}" | grep -F "\"max_msgs_per_subject\":${history}" >/dev/null || {
           echo "${stream} has the wrong history limit" >&2
@@ -607,11 +630,11 @@ data:
       max_bytes=$5
       assert_regional_name "${bucket}"
       if nats ${nats_args} kv info "${bucket}" >/dev/null 2>&1; then
-        nats ${nats_args} kv edit "${bucket}" --history="${history}" --replicas=3 \
-          --ttl="${ttl}" --max-bucket-size="${max_bytes}" --cluster="${NATS_CLUSTER_NAME}"
+        nats ${nats_args} kv edit "${bucket}" --history="${history}" --replicas="${NATS_JETSTREAM_REPLICAS}" \
+          --ttl="${ttl}" --max-bucket-size="${max_bytes}" ${placement_args}
       else
-        nats ${nats_args} kv add "${bucket}" --history="${history}" --replicas=3 \
-          --storage=file --ttl="${ttl}" --max-bucket-size="${max_bytes}" --cluster="${NATS_CLUSTER_NAME}"
+        nats ${nats_args} kv add "${bucket}" --history="${history}" --replicas="${NATS_JETSTREAM_REPLICAS}" \
+          --storage=file --ttl="${ttl}" --max-bucket-size="${max_bytes}" ${placement_args}
       fi
       assert_backing_stream "KV_${bucket}" "${history}" "${max_age}" "${max_bytes}"
     }
@@ -620,11 +643,11 @@ data:
       bucket=$1
       assert_regional_name "${bucket}"
       if nats ${nats_args} object info "${bucket}" >/dev/null 2>&1; then
-        nats ${nats_args} object edit "${bucket}" --replicas=3 \
-          --max-bucket-size=4294967296 --cluster="${NATS_CLUSTER_NAME}"
+        nats ${nats_args} object edit "${bucket}" --replicas="${NATS_JETSTREAM_REPLICAS}" \
+          --max-bucket-size=4294967296 ${placement_args}
       else
-        nats ${nats_args} object add "${bucket}" --replicas=3 --storage=file \
-          --max-bucket-size=4294967296 --cluster="${NATS_CLUSTER_NAME}"
+        nats ${nats_args} object add "${bucket}" --replicas="${NATS_JETSTREAM_REPLICAS}" --storage=file \
+          --max-bucket-size=4294967296 ${placement_args}
       fi
       assert_backing_stream "OBJ_${bucket}" skip 0 4294967296
     }
@@ -648,6 +671,26 @@ metadata:
 ---
 apiVersion: v1
 data:
+  cluster.conf: |
+    cluster {
+      name: $NATS_CLUSTER_NAME
+      listen: 0.0.0.0:6222
+      # Kubernetes clients connect through the TLS service name. Do not gossip
+      # pod IPs, which are not stable and are intentionally absent from the cert.
+      no_advertise: true
+      connect_retries: 120
+      connect_backoff: true
+      routes: [
+        __NATS_CLUSTER_ROUTES__
+      ]
+      tls {
+        cert_file: "/etc/nats/tls/tls.crt"
+        key_file: "/etc/nats/tls/tls.key"
+        ca_file: "/etc/nats/tls/ca.crt"
+        min_version: "1.2"
+        timeout: 2
+      }
+    }
   nats.conf: |
     server_name: $NATS_SERVER_NAME
     server_tags: [$NATS_REGION_TAG, $NATS_CLUSTER_TAG, $NATS_NODE_TAG]
@@ -667,27 +710,7 @@ data:
       timeout: 2
     }
 
-    cluster {
-      name: $NATS_CLUSTER_NAME
-      listen: 0.0.0.0:6222
-      # Kubernetes clients connect through the TLS service name. Do not gossip
-      # pod IPs, which are not stable and are intentionally absent from the cert.
-      no_advertise: true
-      connect_retries: 120
-      connect_backoff: true
-      routes: [
-        nats://nats-0.nats-headless.nats.svc.cluster.local:6222,
-        nats://nats-1.nats-headless.nats.svc.cluster.local:6222,
-        nats://nats-2.nats-headless.nats.svc.cluster.local:6222
-      ]
-      tls {
-        cert_file: "/etc/nats/tls/tls.crt"
-        key_file: "/etc/nats/tls/tls.key"
-        ca_file: "/etc/nats/tls/ca.crt"
-        min_version: "1.2"
-        timeout: 2
-      }
-    }
+    include ./cluster.conf
 
     # Empty in standalone mode. A regional supercluster overlay supplies a
     # gateway block with exact remote cluster names and seed URLs.
@@ -1442,8 +1465,9 @@ spec:
         - -ec
         - |
           until nats --server="${NATS_URL}" --user="${NATS_USER}" --password="${NATS_PASSWORD}" \
-            --tlsca=/etc/nats-ca/ca.crt account info >/dev/null 2>&1; do
-            echo "waiting for NATS"
+            --tlsca=/etc/nats-ca/ca.crt --timeout=2s \
+            request '$JS.API.INFO' '' >/dev/null 2>&1; do
+            echo "waiting for JetStream"
             sleep 2
           done
           echo "watching JetStream max-delivery advisories"
@@ -1625,7 +1649,10 @@ spec:
             -e "s|__NATS_PROJECTION_OPERATIONS_SUBJECT__|${NATS_PROJECTION_OPERATIONS_SUBJECT}|g" \
             -e "s|__NATS_BENCHMARK_RUNS_SUBJECT__|${NATS_BENCHMARK_RUNS_SUBJECT}|g" \
             -e "s|__NATS_BENCHMARK_ARTIFACTS_SUBJECT__|${NATS_BENCHMARK_ARTIFACTS_SUBJECT}|g" \
+            -e "s|__NATS_CLUSTER_ROUTES__|${NATS_CLUSTER_ROUTES}|g" \
             /etc/nats-config/nats.conf > /var/run/nats/nats.conf
+          sed -e "s|__NATS_CLUSTER_ROUTES__|${NATS_CLUSTER_ROUTES}|g" \
+            /etc/nats-config/cluster.conf > /var/run/nats/cluster.conf
           cp /etc/nats-config/gateway.conf /var/run/nats/gateway.conf
           exec nats-server -c /var/run/nats/nats.conf
         command:
@@ -2157,6 +2184,8 @@ spec:
           - benchmarkservice
     ports:
     - port: 7777
+      protocol: TCP
+    - port: 8222
       protocol: TCP
   podSelector:
     matchLabels:
@@ -2919,7 +2948,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-benchmarkservice
-        image: matslo123/benchmarkservice:v0.4.0@sha256:2ef9f1ffc6ebe9c3390197c290565ce12993ac62358cdebbd5d38a6ce12566f4
+        image: matslo123/benchmarkservice:v0.4.0@sha256:58ea489d8d2db6094d5e60d75d7fc03cc1de1484d5107ba6caef2fea5e654222
         livenessProbe:
           httpGet:
             path: /healthz
@@ -4293,157 +4322,12 @@ spec:
               - app
               topologyKey: kubernetes.io/hostname
             weight: 100
-          - podAffinityTerm:
-              labelSelector:
-                matchExpressions:
-                - key: app
-                  operator: In
-                  values:
-                  - storefrontprojectionservice
-                  - storefrontqueryservice
-              topologyKey: kubernetes.io/hostname
-            weight: 100
       containers:
       - env:
-        - name: STOREFRONT_RUNTIME_ROLE
-          value: projection
         - name: NATS_REQUIRED
           value: "true"
         - name: NATS_REQUIRED_SUBSCRIPTIONS
-          value: storefront-projection-local-v1
-        - name: GOMEMLIMIT
-          value: 400MiB
-        - name: STOREFRONT_QUERY_CONCURRENCY
-          value: "16"
-        - name: STOREFRONT_QUERY_MAX_IN_FLIGHT
-          value: "12"
-        - name: STOREFRONT_QUERY_PENDING_MESSAGES
-          value: "512"
-        - name: STOREFRONT_QUERY_PENDING_BYTES
-          value: "2097152"
-        - name: STOREFRONT_CART_CACHE_ENTRIES
-          value: "32768"
-        - name: STOREFRONT_CONTEXT_CACHE_ENTRIES
-          value: "65536"
-        - name: ENABLE_TRACING
-          value: "1"
-        - name: OTEL_RESOURCE_ATTRIBUTES
-          value: cloud.region=local,k8s.cluster.name=local,nats.cluster.name=BOUTIQUE
-        envFrom:
-        - configMapRef:
-            name: nats-client-config
-        - secretRef:
-            name: nats-credentials-storefrontprojectionservice
-        image: matslo123/storefrontprojectionservice:v0.4.0@sha256:cf6fdfe30ede8ecf44102322e973380579fe02676fcf74fcfb849983f91a7234
-        livenessProbe:
-          failureThreshold: 6
-          httpGet:
-            path: /healthz
-            port: 8080
-          periodSeconds: 10
-          timeoutSeconds: 3
-        name: server
-        ports:
-        - containerPort: 8080
-          name: http
-        readinessProbe:
-          httpGet:
-            path: /readyz
-            port: 8080
-          periodSeconds: 5
-          timeoutSeconds: 5
-        resources:
-          limits:
-            cpu: "4"
-            memory: 2Gi
-          requests:
-            cpu: 400m
-            memory: 128Mi
-        securityContext:
-          allowPrivilegeEscalation: false
-          capabilities:
-            drop:
-            - ALL
-          readOnlyRootFilesystem: true
-        volumeMounts:
-        - mountPath: /etc/nats-ca
-          name: nats-ca
-          readOnly: true
-      securityContext:
-        fsGroup: 1000
-        runAsGroup: 1000
-        runAsNonRoot: true
-        runAsUser: 1000
-      serviceAccountName: storefrontprojectionservice
-      terminationGracePeriodSeconds: 35
-      topologySpreadConstraints:
-      - labelSelector: {}
-        matchLabelKeys:
-        - app
-        maxSkew: 1
-        topologyKey: kubernetes.io/hostname
-        whenUnsatisfiable: ScheduleAnyway
-      volumes:
-      - configMap:
-          name: nats-ca
-        name: nats-ca
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  labels:
-    app: storefrontqueryservice
-    boutique.online.io/k8s-cluster: local
-    boutique.online.io/region: local
-  name: storefrontqueryservice
-spec:
-  replicas: 2
-  selector:
-    matchLabels:
-      app: storefrontqueryservice
-  strategy:
-    rollingUpdate:
-      maxSurge: 1
-      maxUnavailable: 0
-    type: RollingUpdate
-  template:
-    metadata:
-      annotations:
-        prometheus.io/path: /metrics
-        prometheus.io/port: "8080"
-        prometheus.io/scrape: "true"
-      labels:
-        app: storefrontqueryservice
-        boutique.online.io/k8s-cluster: local
-        boutique.online.io/region: local
-    spec:
-      affinity:
-        podAntiAffinity:
-          preferredDuringSchedulingIgnoredDuringExecution:
-          - podAffinityTerm:
-              labelSelector: {}
-              matchLabelKeys:
-              - app
-              topologyKey: kubernetes.io/hostname
-            weight: 100
-          - podAffinityTerm:
-              labelSelector:
-                matchExpressions:
-                - key: app
-                  operator: In
-                  values:
-                  - storefrontprojectionservice
-                  - storefrontqueryservice
-              topologyKey: kubernetes.io/hostname
-            weight: 100
-      containers:
-      - env:
-        - name: STOREFRONT_RUNTIME_ROLE
-          value: query
-        - name: NATS_REQUIRED
-          value: "true"
-        - name: NATS_REQUIRED_SUBSCRIPTIONS
-          value: boutique.qry.storefront.home.v1,boutique.qry.storefront.product.v1,boutique.qry.storefront.cart.v1,boutique.qry.storefront.currencies.v1,boutique.qry.storefront.product-meta.v1,boutique.qry.storefront.operation.v1,boutique.qry.storefront.order.v1
+          value: storefront-projection-local-v1,boutique.qry.storefront.home.v1,boutique.qry.storefront.product.v1,boutique.qry.storefront.cart.v1,boutique.qry.storefront.currencies.v1,boutique.qry.storefront.product-meta.v1,boutique.qry.storefront.operation.v1,boutique.qry.storefront.order.v1
         - name: GOMEMLIMIT
           value: 400MiB
         - name: STOREFRONT_QUERY_CONCURRENCY
@@ -5086,19 +4970,6 @@ spec:
     matchLabels:
       app: storefrontprojectionservice
 ---
-apiVersion: policy/v1
-kind: PodDisruptionBudget
-metadata:
-  labels:
-    boutique.online.io/k8s-cluster: local
-    boutique.online.io/region: local
-  name: storefrontqueryservice
-spec:
-  maxUnavailable: 1
-  selector:
-    matchLabels:
-      app: storefrontqueryservice
----
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -5327,6 +5198,8 @@ spec:
       protocol: TCP
     - port: 7777
       protocol: TCP
+    - port: 8222
+      protocol: TCP
     to:
     - namespaceSelector:
         matchLabels:
@@ -5383,6 +5256,8 @@ spec:
           app: frontend
   - ports:
     - port: 7777
+      protocol: TCP
+    - port: 8222
       protocol: TCP
     - port: 4222
       protocol: TCP

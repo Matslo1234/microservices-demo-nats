@@ -16,6 +16,7 @@ from parse_results import (
     average_interpolated_saturation_pending_points,
     average_saturation_points,
     collect_closed_nats_waiting_series,
+    collect_closed_resource_measurements,
     fault_tolerance_markers,
     find_results,
     main,
@@ -26,6 +27,7 @@ from parse_results import (
     write_average_saturation_graphs,
     write_png_chart,
     write_png_multi_series_chart,
+    write_resource_usage_tables,
     write_saturation_graphs,
 )
 
@@ -74,6 +76,7 @@ class ParseResultsTest(unittest.TestCase):
                 100,
                 application_type="NATS",
                 waiting_events=[(0, 2), (1, 4)],
+                steady_seconds=3,
             )
             self._write_result(
                 folder / "users-10-b.json",
@@ -84,6 +87,7 @@ class ParseResultsTest(unittest.TestCase):
                 120,
                 application_type="NATS",
                 waiting_events=[(0, 4), (1, 8)],
+                steady_seconds=3,
             )
             self._write_result(
                 folder / "users-20.json",
@@ -94,13 +98,53 @@ class ParseResultsTest(unittest.TestCase):
                 200,
                 application_type="NATS",
                 waiting_events=[(0, 5), (1, 10)],
+                steady_seconds=3,
             )
 
-            outputs = process_folder(folder)
+            with mock.patch(
+                "parse_results.write_png_multi_series_chart",
+                wraps=write_png_multi_series_chart,
+            ) as write_chart:
+                outputs = process_folder(folder, closed_infer_end=True)
 
             waiting_path = folder / "closed_nats_waiting_events.png"
             self.assertIn(waiting_path, outputs)
             self.assert_png(waiting_path)
+            self.assertEqual(
+                [
+                    [(0.0, 1.0), (1.0, 2.0), (2.0, 2.0)],
+                    [(0.0, 0.0), (1.0, 0.0), (2.0, 0.0)],
+                ],
+                write_chart.call_args.kwargs["deviation_bands"],
+            )
+            self.assertEqual(3, write_chart.call_args.kwargs["x_limit"])
+
+    def test_closed_end_inference_is_opt_in(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            folder = Path(temporary)
+            self._write_result(
+                folder / "summary.json",
+                "closed",
+                10,
+                10,
+                10,
+                100,
+                application_type="NATS",
+                waiting_events=[(0, 3), (2, 7)],
+                steady_seconds=5,
+            )
+            results = find_results(folder)
+
+            observed = collect_closed_nats_waiting_series(results)
+            inferred = collect_closed_nats_waiting_series(
+                results, infer_end=True
+            )
+
+            self.assertEqual((2.0, 7.0), observed[10][-1])
+            self.assertEqual(
+                [(2.0, 7.0), (3.0, 7.0), (4.0, 7.0)],
+                inferred[10][-3:],
+            )
 
     def test_reads_closed_nats_waiting_series_from_resource_samples(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -130,7 +174,7 @@ class ParseResultsTest(unittest.TestCase):
                 series,
             )
 
-    def test_rebases_waiting_series_to_end_of_warmup(self) -> None:
+    def test_rebases_waiting_series_and_excludes_drain(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             folder = Path(temporary)
             path = folder / "summary.json"
@@ -142,10 +186,17 @@ class ParseResultsTest(unittest.TestCase):
                 10,
                 100,
                 application_type="NATS",
-                waiting_events=[(30, 1_683), (35, 1_197), (45, 1)],
+                waiting_events=[
+                    (30, 1_683),
+                    (35, 1_197),
+                    (39, 500),
+                    (40, 400),
+                    (45, 1),
+                ],
             )
             summary = json.loads(path.read_text(encoding="utf-8"))
             summary["warmup_seconds"] = 30
+            summary["steady_seconds"] = 10
             path.write_text(json.dumps(summary), encoding="utf-8")
 
             series = collect_closed_nats_waiting_series(find_results(folder))
@@ -162,13 +213,7 @@ class ParseResultsTest(unittest.TestCase):
                         (6.0, 1_197.0),
                         (7.0, 1_197.0),
                         (8.0, 1_197.0),
-                        (9.0, 1_197.0),
-                        (10.0, 1_197.0),
-                        (11.0, 1_197.0),
-                        (12.0, 1_197.0),
-                        (13.0, 1_197.0),
-                        (14.0, 1_197.0),
-                        (15.0, 1.0),
+                        (9.0, 500.0),
                     ]
                 },
                 series,
@@ -193,8 +238,21 @@ class ParseResultsTest(unittest.TestCase):
                     "nats": {"consumer_pending": {"max": 8}},
                     "outstanding_orders": {
                         "series": [
-                            {"elapsed_seconds": 0, "max_outstanding": 3},
-                            {"elapsed_seconds": 2, "max_outstanding": 7},
+                            {
+                                "elapsed_seconds": 0,
+                                "phase": "steady",
+                                "max_outstanding": 3,
+                            },
+                            {
+                                "elapsed_seconds": 2,
+                                "phase": "steady",
+                                "max_outstanding": 7,
+                            },
+                            {
+                                "elapsed_seconds": 3,
+                                "phase": "drain",
+                                "max_outstanding": 1,
+                            },
                         ]
                     },
                 }
@@ -218,6 +276,7 @@ class ParseResultsTest(unittest.TestCase):
                 {
                     "frontend": (20, 100_000_000),
                     "checkout_service": (10, 50_000_000),
+                    "nats": (100, 1_000_000_000),
                 },
             )
             self._write_resource_result(
@@ -227,6 +286,7 @@ class ParseResultsTest(unittest.TestCase):
                 {
                     "frontend": (60, 120_000_000),
                     "checkout_service": (40, 70_000_000),
+                    "nats": (200, 2_000_000_000),
                 },
             )
             self._write_resource_result(
@@ -258,6 +318,44 @@ class ParseResultsTest(unittest.TestCase):
                 r"Total & 4.000000 & 1.000000 & 170.000 & 20.000",
                 table,
             )
+            self.assertNotIn("nats &", table)
+
+    def test_combines_nats_storefront_resource_services(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            folder = Path(temporary)
+            self._write_resource_result(
+                folder / "summary.json",
+                10,
+                10,
+                {
+                    "storefrontprojectionservice": (20, 100_000_000),
+                    "storefrontqueryservice": (10, 50_000_000),
+                    "nats": (40, 200_000_000),
+                },
+                application_type="NATS",
+            )
+
+            destination = folder / "resource-usage.tex"
+            write_resource_usage_tables(
+                destination,
+                collect_closed_resource_measurements(find_results(folder)),
+            )
+
+            table = destination.read_text(encoding="utf-8")
+            self.assertIn(
+                "storefrontprojectionservice & 3.000000 & 0.000000 & "
+                "150.000 & 0.000",
+                table,
+            )
+            self.assertIn(
+                "nats & 4.000000 & 0.000000 & 200.000 & 0.000",
+                table,
+            )
+            self.assertIn(
+                "Total & 7.000000 & 0.000000 & 350.000 & 0.000",
+                table,
+            )
+            self.assertNotIn("storefrontqueryservice", table)
 
     def test_closed_order_average_can_be_fractional(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -368,11 +466,17 @@ class ParseResultsTest(unittest.TestCase):
             "parse_results.process_folder", return_value=[]
         ) as process:
             exit_code = main(
-                ["results", "--saturation-limit", "15.5"]
+                [
+                    "results",
+                    "--saturation-limit",
+                    "15.5",
+                    "--closed-infer-end",
+                    "--saturation-add-accepted",
+                ]
             )
 
         self.assertEqual(0, exit_code)
-        process.assert_called_once_with(Path("results"), 15.5)
+        process.assert_called_once_with(Path("results"), 15.5, True, True)
 
     def test_process_folder_applies_saturation_limit_to_graphs(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -390,7 +494,11 @@ class ParseResultsTest(unittest.TestCase):
                     "parse_results.write_png_chart"
                 ) as write_chart,
             ):
-                process_folder(folder, saturation_limit=10)
+                process_folder(
+                    folder,
+                    saturation_limit=10,
+                    saturation_add_accepted=True,
+                )
 
         self.assertEqual(
             [
@@ -399,6 +507,7 @@ class ParseResultsTest(unittest.TestCase):
                     "Zaključena tekom obremenitvene stopnice",
                     [(10.0, 9.2)],
                 ),
+                ("Sprejeta naročila", [(10.0, 9.8)]),
             ],
             write_multi_series.call_args_list[0].args[1],
         )
@@ -473,6 +582,44 @@ class ParseResultsTest(unittest.TestCase):
         for chart_call in write_multi_series.call_args_list:
             self.assertNotIn("error_bars", chart_call.kwargs)
         write_chart.assert_not_called()
+
+    def test_adds_accepted_orders_to_average_saturation_graph(self) -> None:
+        results: list[Result] = []
+        for name, accepted in (
+            ("first", (98, 195)),
+            ("second", (100, 190)),
+        ):
+            summary = self._saturation_summary("GRPC")
+            summary["configured_steady_seconds"] = 60
+            for rung, accepted_orders in zip(
+                summary["saturation"]["rungs"], accepted
+            ):
+                rung["business"]["accepted"] = accepted_orders
+            results.append(Result(Path(f"{name}.json"), summary))
+
+        with mock.patch(
+            "parse_results.write_png_multi_series_chart"
+        ) as write_chart:
+            write_average_saturation_graphs(
+                Path("results"), results, add_accepted=True
+            )
+
+        goodput_call = write_chart.call_args_list[0]
+        self.assertEqual(
+            (
+                "Sprejeta naročila",
+                [(10.0, 9.9), (20.0, 19.25)],
+            ),
+            goodput_call.args[1][-1],
+        )
+        accepted_deviations = goodput_call.kwargs["deviation_bands"][-1]
+        self.assertEqual(
+            [10.0, 20.0],
+            [point[0] for point in accepted_deviations],
+        )
+        self.assertAlmostEqual(0.1, accepted_deviations[0][1])
+        self.assertAlmostEqual(0.25, accepted_deviations[1][1])
+        self.assertEqual("#ff7f0e", goodput_call.kwargs["colors"][-1])
 
     def test_average_latency_uses_timeout_when_any_run_has_no_data(self) -> None:
         first = self._saturation_summary("GRPC")
@@ -549,7 +696,9 @@ class ParseResultsTest(unittest.TestCase):
             results.append(Result(path=Path(f"{name}.json"), summary=summary))
 
         with (
-            mock.patch("parse_results.write_png_multi_series_chart"),
+            mock.patch(
+                "parse_results.write_png_multi_series_chart"
+            ) as write_multi_series,
             mock.patch("parse_results.write_png_chart") as write_chart,
         ):
             outputs = write_average_saturation_graphs(Path("results"), results)
@@ -563,6 +712,18 @@ class ParseResultsTest(unittest.TestCase):
         self.assertEqual(
             [(10.0, 0.0), (20.0, 0.0)],
             write_chart.call_args.kwargs["deviation_band"],
+        )
+        latency_call = write_multi_series.call_args_list[1]
+        self.assertEqual(
+            (
+                "P95 sprejema naročila",
+                [(10.0, 25.0), (20.0, 50.0)],
+            ),
+            latency_call.args[1][1],
+        )
+        self.assertEqual(
+            [(10.0, 0.0), (20.0, 0.0)],
+            latency_call.kwargs["deviation_bands"][1],
         )
 
     def test_keeps_per_run_plots_when_writing_saturation_averages(self) -> None:
@@ -770,6 +931,7 @@ class ParseResultsTest(unittest.TestCase):
                 x_label="Rate",
                 colors=["blue"],
                 deviation_bands=[[(10.0, 5.0), (20.0, 20.0)]],
+                x_limit=20.0,
             )
 
         band = axes.fill_between.call_args
@@ -778,6 +940,7 @@ class ParseResultsTest(unittest.TestCase):
         self.assertEqual([105.0, 220.0], band.args[2])
         self.assertEqual("blue", band.kwargs["color"])
         self.assertEqual(0.2, band.kwargs["alpha"])
+        axes.set_xlim.assert_called_once_with(0, 20.0)
         axes.errorbar.assert_not_called()
 
     def test_multi_series_chart_allows_timeout_without_deviation_band(
@@ -821,6 +984,37 @@ class ParseResultsTest(unittest.TestCase):
         self.assertEqual(
             ["#1f77b4", "#2ca02c"],
             write_multi_series.call_args_list[0].kwargs["colors"],
+        )
+
+    def test_adds_nats_checkout_acceptance_p95_to_latency_graph(self) -> None:
+        result = Result(
+            path=Path("summary.json"),
+            summary=self._saturation_summary("NATS"),
+        )
+
+        with (
+            mock.patch(
+                "parse_results.write_png_multi_series_chart"
+            ) as write_multi_series,
+            mock.patch("parse_results.write_png_chart"),
+        ):
+            write_saturation_graphs(result)
+
+        latency_call = write_multi_series.call_args_list[1]
+        self.assertEqual(
+            (
+                "P95 sprejema naročila",
+                [(10.0, 25.0), (20.0, 50.0)],
+            ),
+            latency_call.args[1][1],
+        )
+        self.assertEqual(
+            ["#1f77b4", "#ff7f0e", "#1f77b4"],
+            latency_call.kwargs["colors"],
+        )
+        self.assertEqual(
+            ["-", "-", "--"],
+            latency_call.kwargs["line_styles"],
         )
 
     def test_unsupported_workload_has_required_error(self) -> None:
@@ -913,6 +1107,7 @@ class ParseResultsTest(unittest.TestCase):
         *,
         application_type: str = "GRPC",
         waiting_events: list[tuple[int, float]] | None = None,
+        steady_seconds: float | None = None,
     ) -> None:
         nats = (
             {
@@ -935,6 +1130,11 @@ class ParseResultsTest(unittest.TestCase):
                     "application_type": application_type,
                     "workload": workload,
                     "users": users,
+                    **(
+                        {"steady_seconds": steady_seconds}
+                        if steady_seconds is not None
+                        else {}
+                    ),
                     "business": {
                         "submitted": submitted,
                         "completed": completed,
@@ -952,11 +1152,13 @@ class ParseResultsTest(unittest.TestCase):
         users: int,
         completed: int,
         services: dict[str, tuple[float, int]],
+        *,
+        application_type: str = "GRPC",
     ) -> None:
         path.write_text(
             json.dumps(
                 {
-                    "application_type": "GRPC",
+                    "application_type": application_type,
                     "workload": "closed",
                     "users": users,
                     "business": {
@@ -1019,20 +1221,26 @@ class ParseResultsTest(unittest.TestCase):
                 "rungs": [
                     {
                         "target_requests_per_second": 10,
+                        "duration_seconds": 10,
                         "observed_goodput_orders_per_second": 9.0,
                         "processing_goodput_orders_per_second": 9.2,
                         "business": {
+                            "accepted": 98,
                             "goodput_orders_per_second": 9.5,
+                            "checkout_acceptance": {"p95_ms": 25},
                             "checkout_to_outcome": {"p95_ms": 125},
                         },
                         "nats": {"consumer_pending": {"max": 2}},
                     },
                     {
                         "target_requests_per_second": 20,
+                        "duration_seconds": 10,
                         "observed_goodput_orders_per_second": 17.0,
                         "processing_goodput_orders_per_second": 17.5,
                         "business": {
+                            "accepted": 195,
                             "goodput_orders_per_second": 18.5,
+                            "checkout_acceptance": {"p95_ms": 50},
                             "checkout_to_outcome": {"p95_ms": 250},
                         },
                         "nats": {"consumer_pending": {"max": 7}},

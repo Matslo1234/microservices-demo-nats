@@ -36,6 +36,15 @@ class _IndependentCollector:
             "sample": {"collected_at": time.time()},
         }
 
+    def _collect_nats_raft(self):
+        return {
+            "nats_raft_groups": [
+                {"account": "BOUTIQUE", "group": "_meta_"}
+            ],
+            "errors": [],
+            "sample": {"collected_at": time.time()},
+        }
+
     def close(self) -> None:
         self.closed = True
 
@@ -59,7 +68,9 @@ class SnapshotCacheTest(unittest.TestCase):
 
         self.assertLess(duration, 0.05)
         self.assertTrue(value["nats_metrics"])
+        self.assertTrue(value["nats_raft_groups"])
         self.assertIn("nats", value["source_samples"])
+        self.assertIn("nats_raft", value["source_samples"])
         self.assertTrue(collector.closed)
 
 

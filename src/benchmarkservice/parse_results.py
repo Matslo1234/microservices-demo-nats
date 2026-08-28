@@ -368,6 +368,100 @@ def saturation_interpolated_pending_points(
     return interpolated
 
 
+def saturation_accepted_points(
+    result: Result,
+    saturation_limit: float | None = None,
+) -> list[tuple[float, float]]:
+    """Return accepted orders per second for each saturation rung."""
+    rungs = _nested(result.summary, "saturation", "rungs")
+    if not isinstance(rungs, list) or not rungs:
+        raise ResultError(
+            f"{result.path}: saturation.rungs must be a non-empty list"
+        )
+
+    points: list[tuple[float, float]] = []
+    for index, rung in enumerate(rungs):
+        if not isinstance(rung, dict):
+            raise ResultError(
+                f"{result.path}: saturation.rungs[{index}] must be an object"
+            )
+        rate = _number(
+            rung.get("target_requests_per_second"),
+            f"saturation.rungs[{index}].target_requests_per_second",
+            result.path,
+        )
+        if saturation_limit is not None and rate > saturation_limit:
+            continue
+        accepted = _number(
+            _nested(rung, "business", "accepted"),
+            f"saturation.rungs[{index}].business.accepted",
+            result.path,
+        )
+        duration = _number(
+            rung.get("duration_seconds"),
+            f"saturation.rungs[{index}].duration_seconds",
+            result.path,
+        )
+        if accepted < 0:
+            raise ResultError(
+                f"{result.path}: saturation.rungs[{index}].business.accepted "
+                "must not be negative"
+            )
+        if duration <= 0:
+            raise ResultError(
+                f"{result.path}: saturation.rungs[{index}].duration_seconds "
+                "must be positive"
+            )
+        points.append((rate, accepted / duration))
+    return sorted(points)
+
+
+def saturation_acceptance_latency_points(
+    result: Result,
+    saturation_limit: float | None = None,
+) -> list[tuple[float, float]]:
+    """Return NATS checkout-acceptance P95 latency for each rung."""
+    if str(result.summary.get("application_type", "")).upper() != "NATS":
+        return []
+    rungs = _nested(result.summary, "saturation", "rungs")
+    if not isinstance(rungs, list) or not rungs:
+        raise ResultError(
+            f"{result.path}: saturation.rungs must be a non-empty list"
+        )
+
+    points: list[tuple[float, float]] = []
+    for index, rung in enumerate(rungs):
+        if not isinstance(rung, dict):
+            raise ResultError(
+                f"{result.path}: saturation.rungs[{index}] must be an object"
+            )
+        rate = _number(
+            rung.get("target_requests_per_second"),
+            f"saturation.rungs[{index}].target_requests_per_second",
+            result.path,
+        )
+        if saturation_limit is not None and rate > saturation_limit:
+            continue
+        p95_latency = _nested(
+            rung, "business", "checkout_acceptance", "p95_ms"
+        )
+        if p95_latency is not None:
+            points.append(
+                (
+                    rate,
+                    _number(
+                        p95_latency,
+                        (
+                            f"saturation.rungs[{index}].business."
+                            "checkout_acceptance.p95_ms"
+                        ),
+                        result.path,
+                    ),
+                )
+            )
+    return sorted(points)
+
+
 def saturation_latency_timeout_points(
     result: Result,
     saturation_limit: float | None = None,
@@ -572,6 +666,7 @@ def write_png_multi_series_chart(
     line_styles: list[str] | None = None,
     error_bars: list[list[tuple[float, float]]] | None = None,
     deviation_bands: list[list[tuple[float, float]] | None] | None = None,
+    x_limit: float | None = None,
 ) -> None:
     _write_png_series_chart(
         destination,
@@ -583,6 +678,7 @@ def write_png_multi_series_chart(
         line_styles=line_styles,
         error_bars=error_bars,
         deviation_bands=deviation_bands,
+        x_limit=x_limit,
         show_legend=True,
     )
 
@@ -607,6 +703,7 @@ def _write_png_series_chart(
     vertical_lines: list[tuple[float, str, str]] | None = None,
     colors: list[str | None] | None = None,
     line_styles: list[str] | None = None,
+    x_limit: float | None = None,
     show_legend: bool,
 ) -> None:
     if colors is not None and len(colors) != len(series):
@@ -680,6 +777,13 @@ def _write_png_series_chart(
         maximum_x = max(
             maximum_x, max(position for position, _, _ in vertical_lines)
         )
+    if x_limit is not None and (
+        not math.isfinite(x_limit) or x_limit <= 0 or x_limit < maximum_x
+    ):
+        raise ResultError(
+            f"cannot create {destination}: x-axis limit must be finite, "
+            "positive, and include every point"
+        )
     maximum_y = max(point[1] for point in all_points)
     for deviations in (error_bars, deviation_bands):
         if deviations:
@@ -691,7 +795,7 @@ def _write_png_series_chart(
             ]
             if upper_bounds:
                 maximum_y = max(maximum_y, max(upper_bounds))
-    x_limit = _axis_limit(maximum_x)
+    x_axis_limit = x_limit if x_limit is not None else _axis_limit(maximum_x)
     y_limit = _axis_limit(maximum_y, headroom=1.1)
 
     figure = Figure(figsize=(9.6, 6), dpi=100, layout="constrained")
@@ -700,9 +804,9 @@ def _write_png_series_chart(
     axes.set_title(title, fontsize=16)
     axes.set_xlabel(x_label, fontsize=12)
     axes.set_ylabel(y_label, fontsize=12)
-    axes.set_xlim(0, x_limit)
+    axes.set_xlim(0, x_axis_limit)
     axes.set_ylim(0, y_limit)
-    axes.set_xticks([tick * x_limit / 5 for tick in range(6)])
+    axes.set_xticks([tick * x_axis_limit / 5 for tick in range(6)])
     axes.set_yticks([tick * y_limit / 5 for tick in range(6)])
     axes.xaxis.set_major_formatter(StrMethodFormatter("{x:.0f}"))
     axes.yaxis.set_major_formatter(StrMethodFormatter("{x:.0f}"))
@@ -794,41 +898,70 @@ def _write_png_series_chart(
 
 
 def write_saturation_graphs(
-    result: Result, saturation_limit: float | None = None
+    result: Result,
+    saturation_limit: float | None = None,
+    *,
+    add_accepted: bool = False,
 ) -> list[Path]:
     submitted_goodput, processed_goodput, pending, p95_latency = (
         saturation_points(result, saturation_limit)
     )
     base = result.path.with_suffix("")
     goodput_path = base.with_name(f"{base.name}_goodput.png")
+    goodput_series = [
+        ("Zaključena znotraj 30s oddaje", submitted_goodput),
+        ("Zaključena tekom obremenitvene stopnice", processed_goodput),
+    ]
+    goodput_colors = ["#1f77b4", "#2ca02c"]
+    if add_accepted:
+        goodput_series.append(
+            (
+                "Sprejeta naročila",
+                saturation_accepted_points(result, saturation_limit),
+            )
+        )
+        goodput_colors.append("#ff7f0e")
     write_png_multi_series_chart(
         goodput_path,
-        [
-            ("Zaključena znotraj 30s oddaje", submitted_goodput),
-            ("Zaključena tekom obremenitvene stopnice", processed_goodput),
-        ],
+        goodput_series,
         title=f"",
-        y_label="Št. zaključenih naročil na sekundo",
+        y_label=(
+            "Št. naročil na sekundo"
+            if add_accepted
+            else "Št. zaključenih naročil na sekundo"
+        ),
         x_label="Št. oddanih naročil na sekundo",
-        colors=["#1f77b4", "#2ca02c"],
+        colors=goodput_colors,
     )
     outputs = [goodput_path]
     timeout_latency = saturation_latency_timeout_points(
         result, saturation_limit
     )
-    if p95_latency or timeout_latency:
+    acceptance_latency = saturation_acceptance_latency_points(
+        result, saturation_limit
+    )
+    if p95_latency or acceptance_latency or timeout_latency:
         p95_latency_path = base.with_name(f"{base.name}_p95_latency.png")
+        latency_series = [("P95 tranjanje naročila", p95_latency)]
+        latency_colors = ["#1f77b4"]
+        latency_styles = ["-"]
+        if acceptance_latency:
+            latency_series.append(
+                ("P95 sprejema naročila", acceptance_latency)
+            )
+            latency_colors.append("#ff7f0e")
+            latency_styles.append("-")
+        latency_series.append(("30s časovna omejitev", timeout_latency))
+        latency_colors.append("#1f77b4")
+        latency_styles.append("--")
         write_png_multi_series_chart(
             p95_latency_path,
-            [
-                ("P95 tranjanje naročila", p95_latency),
-                ("30s časovna omejitev", timeout_latency),
-            ],
+            latency_series,
             title=f"",
             y_label="P95 trajanje naročila (ms)",
             x_label="Št. naročil na sekundo",
-            colors=["#1f77b4", "#1f77b4"],
-            line_styles=["-", "--"],
+            colors=latency_colors,
+            line_styles=latency_styles,
         )
         outputs.append(p95_latency_path)
     if pending:
@@ -934,6 +1067,34 @@ def average_saturation_points(
     )
 
 
+def average_saturation_accepted_points(
+    results: list[Result],
+    saturation_limit: float | None = None,
+) -> tuple[list[tuple[float, float]], list[tuple[float, float]]]:
+    """Average accepted-order throughput across saturation runs."""
+    return _average_saturation_series(
+        [
+            saturation_accepted_points(result, saturation_limit)
+            for result in results
+        ],
+        require_all_runs=True,
+    )
+
+
+def average_saturation_acceptance_latency_points(
+    results: list[Result],
+    saturation_limit: float | None = None,
+) -> tuple[list[tuple[float, float]], list[tuple[float, float]]]:
+    """Average NATS checkout-acceptance P95 latency across runs."""
+    return _average_saturation_series(
+        [
+            saturation_acceptance_latency_points(result, saturation_limit)
+            for result in results
+        ],
+        require_all_runs=True,
+    )
+
+
 def _average_saturation_latency_plot_points(
     submitted: list[tuple[float, float]],
     latency: list[tuple[float, float]],
@@ -1000,6 +1161,8 @@ def write_average_saturation_graphs(
     folder: Path,
     results: list[Result],
     saturation_limit: float | None = None,
+    *,
+    add_accepted: bool = False,
 ) -> list[Path]:
     by_duration: dict[float, list[Result]] = {}
     for result in results:
@@ -1028,39 +1191,38 @@ def write_average_saturation_graphs(
         suffix = _filename_number(maximum_orders)
 
         goodput_path = folder / f"average_goodput_{suffix}.png"
+        goodput_series = [
+            ("Zaključena znotraj 30s oddaje", submitted),
+            ("Zaključena tekom obremenitvene stopnice", processed),
+        ]
+        goodput_colors = ["#1f77b4", "#2ca02c"]
+        goodput_deviations = [
+            submitted_deviations,
+            processed_deviations,
+        ]
+        if add_accepted:
+            accepted, accepted_deviations = (
+                average_saturation_accepted_points(
+                    matching_results, saturation_limit
+                )
+            )
+            goodput_series.append(("Sprejeta naročila", accepted))
+            goodput_colors.append("#ff7f0e")
+            goodput_deviations.append(accepted_deviations)
         write_png_multi_series_chart(
             goodput_path,
-            [
-                ("Zaključena znotraj 30s oddaje", submitted),
-                (
-                    "Zaključena tekom obremenitvene stopnice",
-                    processed,
-                ),
-            ],
+            goodput_series,
             title="",
-            y_label="Št. zaključenih naročil na sekundo",
+            y_label=(
+                "Št. naročil na sekundo"
+                if add_accepted
+                else "Št. zaključenih naročil na sekundo"
+            ),
             x_label="Št. oddanih naročil na sekundo",
-            colors=["#1f77b4", "#2ca02c"],
-            deviation_bands=[submitted_deviations, processed_deviations],
+            colors=goodput_colors,
+            deviation_bands=goodput_deviations,
         )
         outputs.append(goodput_path)
-
-        if latency or timeout_latency:
-            latency_path = folder / f"average_latency_{suffix}.png"
-            write_png_multi_series_chart(
-                latency_path,
-                [
-                    ("P95 trajanje naročila", latency),
-                    ("30s časovna omejitev", timeout_latency),
-                ],
-                title="",
-                y_label="P95 trajanje naročila (ms)",
-                x_label="Št. naročil na sekundo",
-                colors=["#1f77b4", "#1f77b4"],
-                line_styles=["-", "--"],
-                deviation_bands=[latency_deviations, None],
-            )
-            outputs.append(latency_path)
 
         nats_results = [
             result
@@ -1068,6 +1230,46 @@ def write_average_saturation_graphs(
             if str(result.summary.get("application_type", "")).upper()
             == "NATS"
         ]
+        acceptance_latency: list[tuple[float, float]] = []
+        acceptance_deviations: list[tuple[float, float]] = []
+        if len(nats_results) == len(matching_results):
+            acceptance_latency, acceptance_deviations = (
+                average_saturation_acceptance_latency_points(
+                    nats_results, saturation_limit
+                )
+            )
+
+        if latency or acceptance_latency or timeout_latency:
+            latency_path = folder / f"average_latency_{suffix}.png"
+            latency_series = [("P95 trajanje naročila", latency)]
+            latency_colors = ["#1f77b4"]
+            latency_styles = ["-"]
+            latency_bands: list[
+                list[tuple[float, float]] | None
+            ] = [latency_deviations]
+            if acceptance_latency:
+                latency_series.append(
+                    ("P95 sprejema naročila", acceptance_latency)
+                )
+                latency_colors.append("#ff7f0e")
+                latency_styles.append("-")
+                latency_bands.append(acceptance_deviations)
+            latency_series.append(("30s časovna omejitev", timeout_latency))
+            latency_colors.append("#1f77b4")
+            latency_styles.append("--")
+            latency_bands.append(None)
+            write_png_multi_series_chart(
+                latency_path,
+                latency_series,
+                title="",
+                y_label="P95 trajanje naročila (ms)",
+                x_label="Št. naročil na sekundo",
+                colors=latency_colors,
+                line_styles=latency_styles,
+                deviation_bands=latency_bands,
+            )
+            outputs.append(latency_path)
+
         if len(nats_results) >= 2:
             pending, pending_deviations = (
                 average_interpolated_saturation_pending_points(
@@ -1180,6 +1382,8 @@ def _summary_nats_waiting_samples(
             raise ResultError(
                 f"{result.path}: {series_field}[{index}] must be an object"
             )
+        if sample.get("phase") not in {None, "steady"}:
+            continue
         elapsed = _number(
             sample.get("elapsed_seconds"),
             f"{series_field}[{index}].elapsed_seconds",
@@ -1199,7 +1403,7 @@ def _summary_nats_waiting_samples(
                 f"{result.path}: NATS waiting-event samples must not be negative"
             )
         points.append((elapsed, waiting))
-    return points
+    return points or None
 
 
 def _resource_nats_waiting_samples(
@@ -1270,10 +1474,17 @@ def _resource_nats_waiting_samples(
     return points or None
 
 
-def collect_closed_nats_waiting_series(
+def _collect_closed_nats_waiting_statistics(
     results: list[Result],
-) -> dict[int, list[tuple[float, float]]]:
+    *,
+    infer_end: bool = False,
+) -> tuple[
+    dict[int, list[tuple[float, float]]],
+    dict[int, list[tuple[float, float]]],
+    float | None,
+]:
     by_users: dict[int, dict[int, list[float]]] = {}
+    plot_end_seconds: float | None = None
     for result in results:
         if str(result.summary.get("application_type", "")).upper() != "NATS":
             continue
@@ -1301,17 +1512,53 @@ def collect_closed_nats_waiting_series(
             raise ResultError(
                 f"{result.path}: warmup_seconds must not be negative"
             )
+        steady_seconds_field = "steady_seconds"
+        steady_seconds_value = result.summary.get(steady_seconds_field)
+        if steady_seconds_value is None:
+            steady_seconds_field = "duration_seconds"
+            steady_seconds_value = result.summary.get(steady_seconds_field)
+        steady_seconds: float | None = None
+        if steady_seconds_value is not None:
+            steady_seconds = _number(
+                steady_seconds_value,
+                steady_seconds_field,
+                result.path,
+            )
+            if steady_seconds <= 0:
+                raise ResultError(
+                    f"{result.path}: {steady_seconds_field} must be positive"
+                )
+        elif infer_end:
+            raise ResultError(
+                f"{result.path}: --closed-infer-end requires steady_seconds "
+                "or duration_seconds"
+            )
 
         # Keep the last observation in a second, then average matching seconds
-        # across repeated runs with the same closed-loop user count.
+        # across repeated runs with the same closed-loop user count. Explicitly
+        # bound the samples to the steady interval so legacy summary series
+        # that contain drain observations cannot extend the plot.
         observed_by_second: dict[int, float] = {}
         for elapsed, waiting in samples:
-            steady_elapsed = max(0.0, elapsed - warmup_seconds)
+            steady_elapsed = elapsed - warmup_seconds
+            if steady_elapsed < 0:
+                continue
+            if steady_seconds is not None and steady_elapsed >= steady_seconds:
+                continue
             observed_by_second[math.floor(steady_elapsed)] = waiting
+        if not observed_by_second:
+            raise ResultError(
+                f"{result.path}: NATS closed-loop result must contain "
+                "steady-state waiting-event samples"
+            )
         run_by_second: dict[int, float] = {}
         latest: float | None = None
+        last_second = max(observed_by_second)
+        if infer_end:
+            assert steady_seconds is not None
+            last_second = math.ceil(steady_seconds) - 1
         for second in range(
-            min(observed_by_second), max(observed_by_second) + 1
+            min(observed_by_second), last_second + 1
         ):
             latest = observed_by_second.get(second, latest)
             if latest is not None:
@@ -1319,14 +1566,39 @@ def collect_closed_nats_waiting_series(
         grouped_seconds = by_users.setdefault(users, {})
         for second, waiting in run_by_second.items():
             grouped_seconds.setdefault(second, []).append(waiting)
+        run_end_seconds = (
+            steady_seconds
+            if steady_seconds is not None
+            else float(max(run_by_second) + 1)
+        )
+        plot_end_seconds = max(plot_end_seconds or 0.0, run_end_seconds)
 
-    return {
+    means = {
         users: [
             (float(second), statistics.mean(values))
             for second, values in sorted(seconds.items())
         ]
         for users, seconds in sorted(by_users.items())
     }
+    deviations = {
+        users: [
+            (float(second), statistics.pstdev(values))
+            for second, values in sorted(seconds.items())
+        ]
+        for users, seconds in sorted(by_users.items())
+    }
+    return means, deviations, plot_end_seconds
+
+
+def collect_closed_nats_waiting_series(
+    results: list[Result],
+    *,
+    infer_end: bool = False,
+) -> dict[int, list[tuple[float, float]]]:
+    means, _, _ = _collect_closed_nats_waiting_statistics(
+        results, infer_end=infer_end
+    )
+    return means
 
 
 def collect_closed_resource_measurements(
@@ -1352,60 +1624,96 @@ def collect_closed_resource_measurements(
         )
         total_cpu_seconds_per_order = 0.0
         total_average_memory_mb = 0.0
-        complete_cpu_total = completed > 0 and bool(by_service)
-        complete_memory_total = bool(by_service)
+        complete_cpu_total = completed > 0
+        complete_memory_total = True
+        is_nats = (
+            str(result.summary.get("application_type", "")).upper()
+            == "NATS"
+        )
+        logical_services: dict[
+            str, list[tuple[str, dict[str, Any]]]
+        ] = {}
         for service, values in sorted(by_service.items()):
             if not isinstance(service, str) or not isinstance(values, dict):
                 raise ResultError(
                     f"{result.path}: resources.by_service entries must be objects"
                 )
+            if service == "nats" and not is_nats:
+                continue
+            logical_service = (
+                "storefrontprojectionservice"
+                if is_nats and service == "storefrontqueryservice"
+                else service
+            )
+            logical_services.setdefault(logical_service, []).append(
+                (service, values)
+            )
+
+        for service, components in sorted(logical_services.items()):
             measurements = group.services.setdefault(
                 service, ServiceResourceMeasurements()
             )
 
-            cpu_seconds_value = values.get("cpu_seconds")
-            if cpu_seconds_value is None or completed <= 0:
-                complete_cpu_total = False
-            else:
-                cpu_seconds = _number(
+            cpu_seconds = 0.0
+            complete_service_cpu = completed > 0
+            for component, values in components:
+                cpu_seconds_value = values.get("cpu_seconds")
+                if cpu_seconds_value is None:
+                    complete_service_cpu = False
+                    continue
+                component_cpu_seconds = _number(
                     cpu_seconds_value,
-                    f"resources.by_service.{service}.cpu_seconds",
+                    f"resources.by_service.{component}.cpu_seconds",
                     result.path,
                 )
-                if cpu_seconds < 0:
+                if component_cpu_seconds < 0:
                     raise ResultError(
-                        f"{result.path}: resources.by_service.{service}."
+                        f"{result.path}: resources.by_service.{component}."
                         "cpu_seconds must not be negative"
                     )
+                cpu_seconds += component_cpu_seconds
+            if not complete_service_cpu:
+                complete_cpu_total = False
+            else:
                 cpu_seconds_per_order = cpu_seconds / completed
                 measurements.cpu_seconds_per_order.append(
                     cpu_seconds_per_order
                 )
                 total_cpu_seconds_per_order += cpu_seconds_per_order
 
-            average_memory_value = values.get("average_memory_bytes")
-            if average_memory_value is None:
-                complete_memory_total = False
-            else:
-                average_memory_bytes = _number(
+            average_memory_bytes = 0.0
+            complete_service_memory = True
+            for component, values in components:
+                average_memory_value = values.get("average_memory_bytes")
+                if average_memory_value is None:
+                    complete_service_memory = False
+                    continue
+                component_average_memory_bytes = _number(
                     average_memory_value,
-                    f"resources.by_service.{service}.average_memory_bytes",
+                    (
+                        f"resources.by_service.{component}."
+                        "average_memory_bytes"
+                    ),
                     result.path,
                 )
-                if average_memory_bytes < 0:
+                if component_average_memory_bytes < 0:
                     raise ResultError(
-                        f"{result.path}: resources.by_service.{service}."
+                        f"{result.path}: resources.by_service.{component}."
                         "average_memory_bytes must not be negative"
                     )
+                average_memory_bytes += component_average_memory_bytes
+            if not complete_service_memory:
+                complete_memory_total = False
+            else:
                 average_memory_mb = average_memory_bytes / 1_000_000
                 measurements.average_memory_mb.append(average_memory_mb)
                 total_average_memory_mb += average_memory_mb
 
-        if complete_cpu_total:
+        if logical_services and complete_cpu_total:
             group.total.cpu_seconds_per_order.append(
                 total_cpu_seconds_per_order
             )
-        if complete_memory_total:
+        if logical_services and complete_memory_total:
             group.total.average_memory_mb.append(total_average_memory_mb)
     return groups
 
@@ -1493,6 +1801,8 @@ def write_closed_graphs(
     folder: Path,
     results: list[Result],
     groups: dict[int, ClosedMeasurements],
+    *,
+    infer_end: bool = False,
 ) -> list[Path]:
     outputs: list[Path] = []
     latency_points: list[tuple[float, float]] = []
@@ -1518,18 +1828,26 @@ def write_closed_graphs(
         )
         outputs.append(latency_path)
 
-    waiting_by_users = collect_closed_nats_waiting_series(results)
+    waiting_by_users, waiting_deviations, waiting_end_seconds = (
+        _collect_closed_nats_waiting_statistics(
+            results, infer_end=infer_end
+        )
+    )
     if waiting_by_users:
         waiting_path = folder / "closed_nats_waiting_events.png"
         write_png_multi_series_chart(
             waiting_path,
             [
-                (f"{users} users", points)
+                (f"{users} uporabnikov", points)
                 for users, points in waiting_by_users.items()
             ],
             title="",
             x_label="Čas (s)",
             y_label="Št. čakajočih dogodkov",
+            deviation_bands=[
+                waiting_deviations[users] for users in waiting_by_users
+            ],
+            x_limit=waiting_end_seconds,
         )
         outputs.append(waiting_path)
     return outputs
@@ -1573,7 +1891,10 @@ def write_resource_usage_tables(
 
 
 def process_folder(
-    folder: Path, saturation_limit: float | None = None
+    folder: Path,
+    saturation_limit: float | None = None,
+    closed_infer_end: bool = False,
+    saturation_add_accepted: bool = False,
 ) -> list[Path]:
     results = find_results(folder)
     for result in results:
@@ -1597,7 +1918,12 @@ def process_folder(
         )
         outputs.append(resource_table_path)
         outputs.extend(
-            write_closed_graphs(folder, closed_results, closed_measurements)
+            write_closed_graphs(
+                folder,
+                closed_results,
+                closed_measurements,
+                infer_end=closed_infer_end,
+            )
         )
 
     saturation_results = [
@@ -1608,13 +1934,20 @@ def process_folder(
     for result in results:
         if result.summary["workload"] == "saturation":
             outputs.extend(
-                write_saturation_graphs(result, saturation_limit)
+                write_saturation_graphs(
+                    result,
+                    saturation_limit,
+                    add_accepted=saturation_add_accepted,
+                )
             )
         elif result.summary["workload"] == "fault_tolerance":
             outputs.extend(write_fault_tolerance_graphs(result))
     outputs.extend(
         write_average_saturation_graphs(
-            folder, saturation_results, saturation_limit
+            folder,
+            saturation_results,
+            saturation_limit,
+            add_accepted=saturation_add_accepted,
         )
     )
     return outputs
@@ -1638,6 +1971,21 @@ def parser() -> argparse.ArgumentParser:
             "requests-per-second rate"
         ),
     )
+    argument_parser.add_argument(
+        "--closed-infer-end",
+        action="store_true",
+        help=(
+            "forward-fill the final closed-loop waiting-event observation "
+            "through the end of the steady period"
+        ),
+    )
+    argument_parser.add_argument(
+        "--saturation-add-accepted",
+        action="store_true",
+        help=(
+            "add accepted orders per second to saturation goodput graphs"
+        ),
+    )
     return argument_parser
 
 
@@ -1645,7 +1993,10 @@ def main(arguments: list[str] | None = None) -> int:
     options = parser().parse_args(arguments)
     try:
         outputs = process_folder(
-            options.results_folder, options.saturation_limit
+            options.results_folder,
+            options.saturation_limit,
+            options.closed_infer_end,
+            options.saturation_add_accepted,
         )
     except ResultError as error:
         print(error, file=sys.stderr)

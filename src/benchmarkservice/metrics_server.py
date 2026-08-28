@@ -40,6 +40,13 @@ class SnapshotCache:
             sources.append(
                 ("nats", self._nats_interval, self.collector._collect_nats)
             )
+            sources.append(
+                (
+                    "nats_raft",
+                    self._nats_interval,
+                    self.collector._collect_nats_raft,
+                )
+            )
         self._threads = [
             threading.Thread(
                 target=self._refresh_source,
@@ -86,12 +93,13 @@ class SnapshotCache:
             "nats_metrics": [],
             "nats_micro_endpoints": [],
             "nats_order_completed_observer": None,
+            "nats_raft_groups": [],
             "errors": [],
             "source_samples": {},
         }
         expected = {"kubernetes"}
         if self.collector.application_type == "NATS":
-            expected.add("nats")
+            expected.update({"nats", "nats_raft"})
         for source in sorted(expected):
             value = values.get(source)
             if value is None:

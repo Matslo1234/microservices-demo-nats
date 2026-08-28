@@ -390,6 +390,8 @@ spec:
     - protocol: TCP
       port: 7777
     - protocol: TCP
+      port: 8222
+    - protocol: TCP
       port: 4222
   # Kubernetes API endpoints are not consistently selectable with namespace
   # and pod labels across CNI implementations.
@@ -443,6 +445,8 @@ spec:
       port: 4222
     - protocol: TCP
       port: 7777
+    - protocol: TCP
+      port: 8222
   # Remote targets use HTTP(S); local resource sampling reads the Kubernetes
   # API. API endpoints are not consistently selectable with labels across CNI
   # implementations.

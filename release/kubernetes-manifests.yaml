@@ -1887,151 +1887,12 @@ spec:
               - app
               topologyKey: kubernetes.io/hostname
             weight: 100
-          - podAffinityTerm:
-              labelSelector:
-                matchExpressions:
-                - key: app
-                  operator: In
-                  values:
-                  - storefrontprojectionservice
-                  - storefrontqueryservice
-              topologyKey: kubernetes.io/hostname
-            weight: 100
       containers:
       - env:
-        - name: STOREFRONT_RUNTIME_ROLE
-          value: projection
         - name: NATS_REQUIRED
           value: "true"
         - name: NATS_REQUIRED_SUBSCRIPTIONS
-          value: storefront-projection-local-v1
-        - name: GOMEMLIMIT
-          value: 400MiB
-        - name: STOREFRONT_QUERY_CONCURRENCY
-          value: "16"
-        - name: STOREFRONT_QUERY_MAX_IN_FLIGHT
-          value: "12"
-        - name: STOREFRONT_QUERY_PENDING_MESSAGES
-          value: "512"
-        - name: STOREFRONT_QUERY_PENDING_BYTES
-          value: "2097152"
-        - name: STOREFRONT_CART_CACHE_ENTRIES
-          value: "32768"
-        - name: STOREFRONT_CONTEXT_CACHE_ENTRIES
-          value: "65536"
-        - name: ENABLE_TRACING
-          value: "1"
-        envFrom:
-        - configMapRef:
-            name: nats-client-config
-        - secretRef:
-            name: nats-credentials-storefrontprojectionservice
-        image: matslo123/storefrontprojectionservice:v0.4.0@sha256:cf6fdfe30ede8ecf44102322e973380579fe02676fcf74fcfb849983f91a7234
-        livenessProbe:
-          failureThreshold: 6
-          httpGet:
-            path: /healthz
-            port: 8080
-          periodSeconds: 10
-          timeoutSeconds: 3
-        name: server
-        ports:
-        - containerPort: 8080
-          name: http
-        readinessProbe:
-          httpGet:
-            path: /readyz
-            port: 8080
-          periodSeconds: 5
-          timeoutSeconds: 5
-        resources:
-          limits:
-            cpu: "4"
-            memory: 2Gi
-          requests:
-            cpu: 400m
-            memory: 128Mi
-        securityContext:
-          allowPrivilegeEscalation: false
-          capabilities:
-            drop:
-            - ALL
-          readOnlyRootFilesystem: true
-        volumeMounts:
-        - mountPath: /etc/nats-ca
-          name: nats-ca
-          readOnly: true
-      securityContext:
-        fsGroup: 1000
-        runAsGroup: 1000
-        runAsNonRoot: true
-        runAsUser: 1000
-      serviceAccountName: storefrontprojectionservice
-      terminationGracePeriodSeconds: 35
-      topologySpreadConstraints:
-      - labelSelector: {}
-        matchLabelKeys:
-        - app
-        maxSkew: 1
-        topologyKey: kubernetes.io/hostname
-        whenUnsatisfiable: ScheduleAnyway
-      volumes:
-      - configMap:
-          name: nats-ca
-        name: nats-ca
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  labels:
-    app: storefrontqueryservice
-  name: storefrontqueryservice
-spec:
-  replicas: 2
-  selector:
-    matchLabels:
-      app: storefrontqueryservice
-  strategy:
-    rollingUpdate:
-      maxSurge: 1
-      maxUnavailable: 0
-    type: RollingUpdate
-  template:
-    metadata:
-      annotations:
-        prometheus.io/path: /metrics
-        prometheus.io/port: "8080"
-        prometheus.io/scrape: "true"
-      labels:
-        app: storefrontqueryservice
-    spec:
-      affinity:
-        podAntiAffinity:
-          preferredDuringSchedulingIgnoredDuringExecution:
-          - podAffinityTerm:
-              labelSelector: {}
-              matchLabelKeys:
-              - app
-              topologyKey: kubernetes.io/hostname
-            weight: 100
-          - podAffinityTerm:
-              labelSelector:
-                matchExpressions:
-                - key: app
-                  operator: In
-                  values:
-                  - storefrontprojectionservice
-                  - storefrontqueryservice
-              topologyKey: kubernetes.io/hostname
-            weight: 100
-      containers:
-      - env:
-        - name: STOREFRONT_RUNTIME_ROLE
-          value: query
-        - name: NATS_REQUIRED
-          value: "true"
-        - name: NATS_REQUIRED_SUBSCRIPTIONS
-          value: boutique.qry.storefront.home.v1,boutique.qry.storefront.product.v1,boutique.qry.storefront.cart.v1,boutique.qry.storefront.currencies.v1,boutique.qry.storefront.product-meta.v1,boutique.qry.storefront.operation.v1,boutique.qry.storefront.order.v1
+          value: storefront-projection-local-v1,boutique.qry.storefront.home.v1,boutique.qry.storefront.product.v1,boutique.qry.storefront.cart.v1,boutique.qry.storefront.currencies.v1,boutique.qry.storefront.product-meta.v1,boutique.qry.storefront.operation.v1,boutique.qry.storefront.order.v1
         - name: GOMEMLIMIT
           value: 400MiB
         - name: STOREFRONT_QUERY_CONCURRENCY
@@ -2615,16 +2476,6 @@ spec:
     matchLabels:
       app: storefrontprojectionservice
 ---
-apiVersion: policy/v1
-kind: PodDisruptionBudget
-metadata:
-  name: storefrontqueryservice
-spec:
-  maxUnavailable: 1
-  selector:
-    matchLabels:
-      app: storefrontqueryservice
----
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -2839,6 +2690,8 @@ spec:
       protocol: TCP
     - port: 7777
       protocol: TCP
+    - port: 8222
+      protocol: TCP
     to:
     - namespaceSelector:
         matchLabels:
@@ -2892,6 +2745,8 @@ spec:
           app: frontend
   - ports:
     - port: 7777
+      protocol: TCP
+    - port: 8222
       protocol: TCP
     - port: 4222
       protocol: TCP

@@ -62,12 +62,12 @@ flowchart LR
     SQ -->|materialized views| KV[(JetStream KV or projection DB)]
 ```
 
-The logical `storefrontprojectionservice` is a CQRS read side. Projection-role
-pods consume exact view-relevant subjects and maintain denormalized products,
-carts, recommendations, ads, shipping quotes, orders, and operation statuses.
-Separate query-role pods serve the same KV-backed views, isolating durable
-consumer progress from page-query bursts. The frontend makes one NATS
-query/reply call per HTTP page instead of calling several domain services.
+The `storefrontprojectionservice` is a CQRS read side. Every pod participates in
+the shared durable consumer for exact view-relevant subjects, maintains
+denormalized products, carts, recommendations, ads, shipping quotes, orders,
+and operation statuses, and serves the same KV-backed views. The frontend makes
+one NATS query/reply call per HTTP page instead of calling several domain
+services.
 
 For this demo, the projection can use JetStream Key/Value buckets. A production
 deployment with richer search, joins, or strict read-your-write requirements
@@ -525,7 +525,7 @@ permissions. Use these controls even inside the Kubernetes cluster.
 | Service | Publishes | Subscribes / serves |
 | --- | --- | --- |
 | `frontend` | Cart/order/assistant commands; page-view events | HTTP externally; storefront queries and payment tokenization internally; optional live status subjects |
-| `storefrontprojectionservice` | Optional sanitized Core live-status notifications | Exact view-relevant events; projection-role pods write views and query-role pods serve `boutique.qry.storefront.*` |
+| `storefrontprojectionservice` | Optional sanitized Core live-status notifications | Exact view-relevant events through one shared durable; every pod writes views and serves `boutique.qry.storefront.*` |
 | `productcatalogservice` | Product upsert/remove/snapshot events | Its local file/admin source; no per-page query traffic |
 | `currencyservice` | Rate snapshot events | Its local rate source; no per-price conversion traffic |
 | `cartservice` | Cart success/rejection events | Cart commands and catalog events; owns Redis cart state |

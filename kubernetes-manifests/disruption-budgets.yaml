@@ -130,13 +130,3 @@ spec:
   selector:
     matchLabels:
       app: storefrontprojectionservice
----
-apiVersion: policy/v1
-kind: PodDisruptionBudget
-metadata:
-  name: storefrontqueryservice
-spec:
-  maxUnavailable: 1
-  selector:
-    matchLabels:
-      app: storefrontqueryservice

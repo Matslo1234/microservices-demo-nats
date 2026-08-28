@@ -2,6 +2,8 @@
 # Licensed under the Apache License, Version 2.0 (the "License");
 
 import asyncio
+import io
+import json
 import os
 import time
 import unittest
@@ -14,6 +16,7 @@ from cluster_metrics import (
     add_cadvisor_metrics,
     normalize_nats_micro_stats,
     parse_labels,
+    scrape_nats_raft,
     scrape_prometheus,
     service_for_pod,
 )
@@ -36,6 +39,62 @@ class ClusterMetricsTest(unittest.TestCase):
 
         urlopen.assert_called_once()
         self.assertEqual(2, urlopen.call_args.kwargs["timeout"])
+
+    def test_prometheus_scrape_captures_saturation_diagnostics(self) -> None:
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = b"""
+gnatsd_varz_jetstream_meta_snapshot_pending_entries{server_id="a"} 17
+jetstream_stream_last_seq{stream_name="BOUTIQUE_EVENTS"} 65536
+gnatsd_varz_in_msgs{server_id="a"} 1234
+unrelated_metric 99
+"""
+        with mock.patch(
+            "cluster_metrics.urlopen", return_value=response
+        ):
+            metrics = scrape_prometheus("http://nats/metrics")
+
+        self.assertEqual(
+            {
+                "gnatsd_varz_jetstream_meta_snapshot_pending_entries",
+                "jetstream_stream_last_seq",
+                "gnatsd_varz_in_msgs",
+            },
+            {metric["name"] for metric in metrics},
+        )
+
+    def test_raft_scrape_flattens_wal_and_internal_queues(self) -> None:
+        body = {
+            "BOUTIQUE": {
+                "S-R3F-events": {
+                    "id": "node-a",
+                    "state": "LEADER",
+                    "leader": "node-a",
+                    "size": 3,
+                    "quorum_needed": 2,
+                    "committed": 65537,
+                    "applied": 65536,
+                    "term": 4,
+                    "ipq_apply_len": 2,
+                    "wal": {
+                        "messages": 1,
+                        "bytes": 512,
+                        "first_seq": 65537,
+                        "last_seq": 65537,
+                    },
+                }
+            }
+        }
+        with mock.patch(
+            "cluster_metrics.urlopen",
+            return_value=io.BytesIO(json.dumps(body).encode()),
+        ):
+            groups = scrape_nats_raft("http://nats/raftz?acc=BOUTIQUE")
+
+        self.assertEqual(1, len(groups))
+        self.assertEqual("stream", groups[0]["kind"])
+        self.assertEqual(65536, groups[0]["applied"])
+        self.assertEqual(2, groups[0]["apply_queue"])
+        self.assertEqual(512, groups[0]["wal_bytes"])
 
     def test_nats_micro_stats_uses_doubled_default_timeouts(self) -> None:
         thread = mock.MagicMock()
@@ -211,9 +270,9 @@ class ClusterMetricsTest(unittest.TestCase):
             )
         )
         self.assertEqual(
-            "storefrontqueryservice",
+            "storefrontprojectionservice",
             service_for_pod(
-                "shop", "storefrontqueryservice-abc", "NATS", "shop"
+                "shop", "storefrontprojectionservice-abc", "NATS", "shop"
             ),
         )
         self.assertEqual(

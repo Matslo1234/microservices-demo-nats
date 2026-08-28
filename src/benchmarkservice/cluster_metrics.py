@@ -21,7 +21,6 @@ from urllib.request import Request, urlopen
 
 DEFAULT_SERVICES = (
     "storefrontprojectionservice",
-    "storefrontqueryservice",
     "productcatalogservice",
     "recommendationservice",
     "checkoutservice",
@@ -43,11 +42,50 @@ PROMETHEUS_LINE = re.compile(
 PROMETHEUS_LABEL = re.compile(
     r'(?P<name>[a-zA-Z_][a-zA-Z0-9_]*)="(?P<value>(?:\\.|[^"])*)"(?:,|$)'
 )
+APPLICATION_STREAMS = {"BOUTIQUE_COMMANDS", "BOUTIQUE_EVENTS"}
 NATS_METRICS = {
     "jetstream_consumer_num_pending",
     "jetstream_consumer_num_ack_pending",
     "jetstream_consumer_num_redelivered",
+    "jetstream_consumer_num_waiting",
+    "jetstream_consumer_ack_floor_consumer_seq",
+    "jetstream_consumer_ack_floor_stream_seq",
+    "jetstream_consumer_delivered_consumer_seq",
+    "jetstream_consumer_delivered_stream_seq",
+    "jetstream_stream_consumer_count",
+    "jetstream_stream_first_seq",
+    "jetstream_stream_last_seq",
+    "jetstream_stream_subject_count",
+    "jetstream_stream_total_bytes",
+    "jetstream_stream_total_messages",
+    "gnatsd_varz_in_bytes",
+    "gnatsd_varz_in_msgs",
+    "gnatsd_varz_out_bytes",
+    "gnatsd_varz_out_msgs",
+    "gnatsd_varz_cpu",
+    "gnatsd_varz_mem",
+    "gnatsd_varz_jetstream_config_max_memory",
+    "gnatsd_varz_jetstream_config_max_storage",
+    "gnatsd_varz_jetstream_config_sync_interval",
+    "gnatsd_varz_jetstream_meta_cluster_size",
+    "gnatsd_varz_jetstream_meta_leader",
+    "gnatsd_varz_jetstream_meta_pending",
+    "gnatsd_varz_jetstream_meta_pending_infos",
+    "gnatsd_varz_jetstream_meta_pending_requests",
+    "gnatsd_varz_jetstream_meta_snapshot_last_duration",
+    "gnatsd_varz_jetstream_meta_snapshot_pending_entries",
+    "gnatsd_varz_jetstream_meta_snapshot_pending_size",
+    "gnatsd_varz_jetstream_stats_api_errors",
+    "gnatsd_varz_jetstream_stats_api_total",
+    "gnatsd_varz_jetstream_stats_ha_assets",
+    "gnatsd_varz_jetstream_stats_memory",
+    "gnatsd_varz_jetstream_stats_reserved_memory",
+    "gnatsd_varz_jetstream_stats_reserved_storage",
     "gnatsd_varz_jetstream_stats_storage",
+    "gnatsd_varz_slow_consumers",
+    "gnatsd_varz_stale_connections",
+    "gnatsd_varz_stalled_clients",
+    "jetstream_account_storage_used",
 }
 ORDER_COMPLETED_SUBJECT = "boutique.evt.order.completed.v1"
 CADVISOR_METRICS = {
@@ -91,7 +129,7 @@ def service_for_pod(
     for service in DEFAULT_SERVICES:
         if pod_name == service or pod_name.startswith(service + "-"):
             if (
-                service in {"storefrontprojectionservice", "storefrontqueryservice"}
+                service == "storefrontprojectionservice"
                 and application_type == "GRPC"
             ):
                 return None
@@ -354,6 +392,77 @@ def scrape_prometheus(
     ) as response:
         body = response.read().decode("utf-8", errors="replace")
     return parse_prometheus(body, NATS_METRICS, url)
+
+
+def scrape_nats_raft(
+    url: str, timeout: float | None = None
+) -> list[dict[str, Any]]:
+    """Return compact per-group Raft/WAL observations from one NATS server."""
+    request = Request(url, headers={"Accept": "application/json"})
+    with urlopen(
+        request,
+        timeout=(
+            timeout
+            if timeout is not None
+            else float(os.environ.get("NATS_RAFT_REQUEST_TIMEOUT_SECONDS", "1"))
+        ),
+    ) as response:
+        value = json.load(response)
+    if not isinstance(value, dict):
+        raise RuntimeError(f"NATS Raft endpoint {url} returned non-object JSON")
+
+    result: list[dict[str, Any]] = []
+    for account, groups in value.items():
+        if not isinstance(groups, dict):
+            continue
+        for group_name, group in groups.items():
+            if not isinstance(group, dict):
+                continue
+            wal = group.get("wal", {})
+            if not isinstance(wal, dict):
+                wal = {}
+
+            def number(source: dict[str, Any], name: str) -> int:
+                try:
+                    return int(source.get(name, 0))
+                except (TypeError, ValueError):
+                    return 0
+
+            result.append(
+                {
+                    "endpoint": url,
+                    "account": str(account),
+                    "group": str(group_name),
+                    "kind": (
+                        "meta"
+                        if group_name == "_meta_"
+                        else "stream"
+                        if str(group_name).startswith("S-")
+                        else "consumer"
+                        if str(group_name).startswith("C-")
+                        else "other"
+                    ),
+                    "id": str(group.get("id", "")),
+                    "state": str(group.get("state", "")),
+                    "leader": str(group.get("leader", "")),
+                    "size": number(group, "size"),
+                    "quorum_needed": number(group, "quorum_needed"),
+                    "committed": number(group, "committed"),
+                    "applied": number(group, "applied"),
+                    "term": number(group, "term"),
+                    "pterm": number(group, "pterm"),
+                    "pindex": number(group, "pindex"),
+                    "proposal_queue": number(group, "ipq_proposal_len"),
+                    "entry_queue": number(group, "ipq_entry_len"),
+                    "response_queue": number(group, "ipq_resp_len"),
+                    "apply_queue": number(group, "ipq_apply_len"),
+                    "wal_messages": number(wal, "messages"),
+                    "wal_bytes": number(wal, "bytes"),
+                    "wal_first_seq": number(wal, "first_seq"),
+                    "wal_last_seq": number(wal, "last_seq"),
+                }
+            )
+    return result
 
 
 def add_cadvisor_metrics(
@@ -626,6 +735,21 @@ class ClusterMetricsCollector:
             ).split(",")
             if value.strip()
         ]
+        self.nats_raft_urls = [
+            value.strip()
+            for value in os.environ.get(
+                "NATS_RAFT_URLS",
+                ",".join(
+                    "http://nats-"
+                    f"{index}.nats-headless.nats.svc.cluster.local:8222/"
+                    "raftz?acc=BOUTIQUE"
+                    for index in range(3)
+                ),
+            ).split(",")
+            if value.strip()
+        ]
+        self._application_stream_raft_groups: dict[str, str] = {}
+        self._raft_group_lock = threading.Lock()
         self.nats_micro = (
             NatsMicroStatsClient()
             if self.application_type == "NATS" and os.environ.get("NATS_URL")
@@ -638,11 +762,15 @@ class ClusterMetricsCollector:
             os.environ.get("NATS_METRICS_SNAPSHOT_DEADLINE_SECONDS", "3")
         )
         self._source_executor = ThreadPoolExecutor(
-            max_workers=2, thread_name_prefix="benchmark-metrics-source"
+            max_workers=3, thread_name_prefix="benchmark-metrics-source"
         )
         self._nats_executor = ThreadPoolExecutor(
             max_workers=max(1, len(self.nats_urls) + 2),
             thread_name_prefix="benchmark-nats-exporter",
+        )
+        self._raft_executor = ThreadPoolExecutor(
+            max_workers=max(1, len(self.nats_raft_urls)),
+            thread_name_prefix="benchmark-nats-raft",
         )
 
     def _collect_kubernetes(self) -> dict[str, Any]:
@@ -711,6 +839,16 @@ class ClusterMetricsCollector:
             value["errors"].append(
                 f"{futures[future][1]}: NATS snapshot deadline exceeded"
             )
+        raft_groups: dict[str, str] = {}
+        for metric in value["nats_metrics"]:
+            labels = metric.get("labels", {})
+            stream = labels.get("stream_name") or labels.get("stream")
+            group = labels.get("stream_raft_group")
+            if stream in APPLICATION_STREAMS and group:
+                raft_groups[str(group)] = str(stream)
+        if raft_groups:
+            with self._raft_group_lock:
+                self._application_stream_raft_groups.update(raft_groups)
         value["sample"] = {
             "requested_at": started_at,
             "collected_at": time.time(),
@@ -718,6 +856,52 @@ class ClusterMetricsCollector:
             "requests": len(futures),
             "requests_completed": len(completed),
             "requests_timed_out": len(unfinished),
+            "partial": bool(value["errors"]),
+        }
+        return value
+
+    def _collect_nats_raft(self) -> dict[str, Any]:
+        started_at = time.time()
+        started = time.monotonic()
+        value: dict[str, Any] = {"nats_raft_groups": [], "errors": []}
+        futures = {
+            self._raft_executor.submit(scrape_nats_raft, url): url
+            for url in self.nats_raft_urls
+        }
+        completed, unfinished = wait(futures, timeout=self.nats_deadline)
+        for future in completed:
+            endpoint = futures[future]
+            try:
+                value["nats_raft_groups"].extend(future.result())
+            except Exception as error:
+                value["errors"].append(f"{endpoint}: {error}")
+        for future in unfinished:
+            future.cancel()
+            value["errors"].append(
+                f"{futures[future]}: NATS Raft snapshot deadline exceeded"
+            )
+
+        with self._raft_group_lock:
+            stream_groups = dict(self._application_stream_raft_groups)
+        selected: list[dict[str, Any]] = []
+        for group in value["nats_raft_groups"]:
+            group_name = str(group.get("group", ""))
+            if group.get("kind") not in {"meta", "consumer"} and (
+                group_name not in stream_groups
+            ):
+                continue
+            if group_name in stream_groups:
+                group["stream_name"] = stream_groups[group_name]
+            selected.append(group)
+        value["nats_raft_groups"] = selected
+        value["sample"] = {
+            "requested_at": started_at,
+            "collected_at": time.time(),
+            "duration_seconds": round(time.monotonic() - started, 6),
+            "requests": len(futures),
+            "requests_completed": len(completed),
+            "requests_timed_out": len(unfinished),
+            "groups": len(selected),
             "partial": bool(value["errors"]),
         }
         return value
@@ -730,6 +914,7 @@ class ClusterMetricsCollector:
             "nats_metrics": [],
             "nats_micro_endpoints": [],
             "nats_order_completed_observer": None,
+            "nats_raft_groups": [],
             "errors": [],
             "source_samples": {},
         }
@@ -738,6 +923,9 @@ class ClusterMetricsCollector:
         }
         if self.application_type == "NATS":
             futures[self._source_executor.submit(self._collect_nats)] = "nats"
+            futures[
+                self._source_executor.submit(self._collect_nats_raft)
+            ] = "nats_raft"
         completed, unfinished = wait(futures, timeout=self.snapshot_deadline)
         for future in completed:
             source = futures[future]
@@ -774,5 +962,6 @@ class ClusterMetricsCollector:
         self.kubernetes.close()
         self._source_executor.shutdown(wait=False, cancel_futures=True)
         self._nats_executor.shutdown(wait=False, cancel_futures=True)
+        self._raft_executor.shutdown(wait=False, cancel_futures=True)
         if self.nats_micro is not None:
             self.nats_micro.close()

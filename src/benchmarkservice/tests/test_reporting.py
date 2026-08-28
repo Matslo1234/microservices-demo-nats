@@ -39,12 +39,19 @@ class ReportingTest(unittest.TestCase):
                 "source_elapsed_seconds": {"nats": 12},
                 "source_samples": {"nats": {"collected_at": 110}},
             },
+            {
+                "timestamp": 109.9,
+                "elapsed_seconds": 9.9,
+                "source_elapsed_seconds": {"nats": 9.95},
+                "source_samples": {"nats": {"collected_at": 110}},
+            },
         ]
 
         selected = source_records_for_window(records, "nats", 5, 10)
 
-        self.assertEqual(1, len(selected))
+        self.assertEqual(2, len(selected))
         self.assertEqual(9, selected[0]["elapsed_seconds"])
+        self.assertEqual(9.95, selected[1]["elapsed_seconds"])
 
     def test_percentile_interpolates_and_handles_empty_input(self) -> None:
         self.assertIsNone(percentile([], 0.95))
@@ -193,6 +200,92 @@ class ReportingTest(unittest.TestCase):
         self.assertEqual(4, endpoint["requests"])
         self.assertEqual(0.0005, endpoint["average_processing_seconds"])
         self.assertEqual(5, endpoint["max_pending_requests"])
+
+    def test_nats_summary_captures_snapshot_stream_and_raft_diagnostics(
+        self,
+    ) -> None:
+        records = []
+        for elapsed, first_seq, wal_messages, snapshot_duration in (
+            (10, 100, 800, 2_000),
+            (11, 900, 5, 9_000),
+        ):
+            stream_metric = self._nats_metric(
+                "jetstream_stream_last_seq",
+                65_000 + elapsed,
+                "BOUTIQUE_EVENTS",
+            )
+            stream_metric["labels"].update(
+                {
+                    "stream_leader": "nats-1",
+                    "stream_raft_group": "S-events",
+                }
+            )
+            records.append(
+                {
+                    "timestamp": 1_000 + elapsed,
+                    "elapsed_seconds": elapsed,
+                    "phase": "steady",
+                    "source_samples": {
+                        "nats": {
+                            "collected_at": 1_000 + elapsed - 0.2,
+                            "duration_seconds": 0.1,
+                        },
+                        "nats_raft": {
+                            "collected_at": 1_000 + elapsed - 0.1,
+                            "duration_seconds": 0.02,
+                        },
+                    },
+                    "errors": [],
+                    "nats_metrics": [
+                        stream_metric,
+                        self._nats_metric(
+                            "gnatsd_varz_jetstream_meta_snapshot_last_duration",
+                            snapshot_duration,
+                        ),
+                        self._nats_metric("gnatsd_varz_in_msgs", 100 + elapsed),
+                        self._nats_metric("gnatsd_varz_in_msgs", 200 + elapsed),
+                    ],
+                    "nats_raft_groups": [
+                        {
+                            "account": "BOUTIQUE",
+                            "group": "S-events",
+                            "kind": "stream",
+                            "stream_name": "BOUTIQUE_EVENTS",
+                            "state": "LEADER",
+                            "leader": "node-a",
+                            "term": 3,
+                            "committed": 1_000 + elapsed,
+                            "applied": 999 + elapsed,
+                            "wal_messages": wal_messages,
+                            "wal_bytes": wal_messages * 100,
+                            "wal_first_seq": first_seq,
+                            "wal_last_seq": 1_000 + elapsed,
+                        }
+                    ],
+                }
+            )
+
+        summary = nats_summary(records)
+
+        snapshot = summary["maintenance"][
+            "meta_snapshot_last_duration_nanoseconds"
+        ]
+        self.assertEqual(9_000, snapshot["max"])
+        self.assertEqual(11, snapshot["max_at_elapsed_seconds"])
+        self.assertEqual(
+            1,
+            summary["raft"]["snapshot_or_compaction_event_count"],
+        )
+        self.assertEqual(
+            1,
+            summary["streams"]["BOUTIQUE_EVENTS"]["last_sequence"][
+                "change"
+            ],
+        )
+        self.assertEqual(322, summary["server"]["in_messages"]["last"])
+        self.assertEqual(
+            2, summary["collection"]["raft"]["unique_source_samples"]
+        )
 
     def test_resource_summary_reports_throttling_and_disk_latency(self) -> None:
         first = self._resource(1, 1_000_000_000, 100, 10, 20)

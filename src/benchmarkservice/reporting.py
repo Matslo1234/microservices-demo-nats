@@ -19,6 +19,99 @@ from saturation import RAPID_PENDING_GROWTH_PER_SECOND
 
 
 APPLICATION_STREAMS = {"BOUTIQUE_COMMANDS", "BOUTIQUE_EVENTS"}
+NATS_CONSUMER_METRICS = {
+    "jetstream_consumer_num_pending": "consumer_pending",
+    "jetstream_consumer_num_ack_pending": "consumer_ack_pending",
+    "jetstream_consumer_num_redelivered": "consumer_redelivered",
+    "jetstream_consumer_num_waiting": "consumer_waiting",
+    "jetstream_consumer_ack_floor_consumer_seq": "ack_floor_consumer_seq",
+    "jetstream_consumer_ack_floor_stream_seq": "ack_floor_stream_seq",
+    "jetstream_consumer_delivered_consumer_seq": "delivered_consumer_seq",
+    "jetstream_consumer_delivered_stream_seq": "delivered_stream_seq",
+}
+NATS_STREAM_METRICS = {
+    "jetstream_stream_consumer_count": "consumer_count",
+    "jetstream_stream_first_seq": "first_sequence",
+    "jetstream_stream_last_seq": "last_sequence",
+    "jetstream_stream_subject_count": "subject_count",
+    "jetstream_stream_total_bytes": "stored_bytes",
+    "jetstream_stream_total_messages": "stored_messages",
+}
+NATS_SERVER_METRICS = {
+    "gnatsd_varz_jetstream_stats_storage": ("storage_bytes", "sum"),
+    "gnatsd_varz_jetstream_stats_memory": ("jetstream_memory_bytes", "sum"),
+    "gnatsd_varz_jetstream_stats_reserved_storage": (
+        "reserved_storage_bytes",
+        "sum",
+    ),
+    "gnatsd_varz_jetstream_stats_reserved_memory": (
+        "reserved_memory_bytes",
+        "sum",
+    ),
+    "gnatsd_varz_jetstream_config_max_storage": (
+        "max_storage_bytes",
+        "sum",
+    ),
+    "gnatsd_varz_jetstream_config_max_memory": ("max_memory_bytes", "sum"),
+    "jetstream_account_storage_used": ("account_storage_used_bytes", "max"),
+    "gnatsd_varz_jetstream_stats_ha_assets": ("ha_assets", "sum"),
+    "gnatsd_varz_cpu": ("nats_cpu_percent", "sum"),
+    "gnatsd_varz_mem": ("nats_memory_bytes", "sum"),
+    "gnatsd_varz_in_bytes": ("in_bytes", "sum"),
+    "gnatsd_varz_in_msgs": ("in_messages", "sum"),
+    "gnatsd_varz_out_bytes": ("out_bytes", "sum"),
+    "gnatsd_varz_out_msgs": ("out_messages", "sum"),
+    "gnatsd_varz_jetstream_stats_api_errors": (
+        "jetstream_api_errors",
+        "sum",
+    ),
+    "gnatsd_varz_jetstream_stats_api_total": (
+        "jetstream_api_requests",
+        "sum",
+    ),
+    "gnatsd_varz_slow_consumers": ("slow_consumers", "sum"),
+    "gnatsd_varz_stale_connections": ("stale_connections", "sum"),
+    "gnatsd_varz_stalled_clients": ("stalled_clients", "sum"),
+    "gnatsd_varz_jetstream_config_sync_interval": (
+        "sync_interval_nanoseconds",
+        "max",
+    ),
+    "gnatsd_varz_jetstream_meta_cluster_size": (
+        "meta_cluster_size",
+        "max",
+    ),
+    "gnatsd_varz_jetstream_meta_pending": ("meta_pending", "max"),
+    "gnatsd_varz_jetstream_meta_pending_infos": (
+        "meta_pending_infos",
+        "max",
+    ),
+    "gnatsd_varz_jetstream_meta_pending_requests": (
+        "meta_pending_requests",
+        "max",
+    ),
+    "gnatsd_varz_jetstream_meta_snapshot_last_duration": (
+        "meta_snapshot_last_duration_nanoseconds",
+        "max",
+    ),
+    "gnatsd_varz_jetstream_meta_snapshot_pending_entries": (
+        "meta_snapshot_pending_entries",
+        "max",
+    ),
+    "gnatsd_varz_jetstream_meta_snapshot_pending_size": (
+        "meta_snapshot_pending_bytes",
+        "max",
+    ),
+}
+NATS_MAINTENANCE_ALIASES = {
+    "sync_interval_nanoseconds",
+    "meta_cluster_size",
+    "meta_pending",
+    "meta_pending_infos",
+    "meta_pending_requests",
+    "meta_snapshot_last_duration_nanoseconds",
+    "meta_snapshot_pending_entries",
+    "meta_snapshot_pending_bytes",
+}
 
 
 def read_json_lines(path: Path) -> list[dict[str, Any]]:
@@ -492,65 +585,390 @@ def resource_summary(
     }
 
 
-def nats_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
-    steady = [record for record in records if record.get("phase") == "steady"]
-    if not steady:
-        return {"available": False, "reason": "no steady-state samples"}
-
-    names = {
-        "jetstream_consumer_num_pending": "consumer_pending",
-        "jetstream_consumer_num_ack_pending": "consumer_ack_pending",
-        "jetstream_consumer_num_redelivered": "consumer_redelivered",
-        "gnatsd_varz_jetstream_stats_storage": "storage_bytes",
+def _metric_stats(values: list[tuple[float, float]]) -> dict[str, Any]:
+    maximum = max(value for _, value in values)
+    maximum_elapsed = next(
+        elapsed for elapsed, value in values if value == maximum
+    )
+    return {
+        "first": values[0][1],
+        "last": values[-1][1],
+        "max": maximum,
+        "max_at_elapsed_seconds": round(maximum_elapsed, 3),
+        "change": values[-1][1] - values[0][1],
     }
-    series: dict[str, list[float]] = defaultdict(list)
+
+
+def _leader_summary(values: list[tuple[float, str]]) -> dict[str, Any]:
+    changes: list[dict[str, Any]] = []
+    previous: str | None = None
+    leaders: list[str] = []
+    for elapsed, leader in values:
+        if not leader or leader == previous:
+            continue
+        if leader not in leaders:
+            leaders.append(leader)
+        if previous is not None:
+            changes.append(
+                {
+                    "elapsed_seconds": round(elapsed, 3),
+                    "from": previous,
+                    "to": leader,
+                }
+            )
+        previous = leader
+    return {
+        "last": previous,
+        "observed": leaders,
+        "changes": changes,
+        "change_count": len(changes),
+    }
+
+
+def source_collection_summary(
+    records: list[dict[str, Any]], source: str
+) -> dict[str, Any]:
+    steady = [record for record in records if record.get("phase") == "steady"]
+    ages: list[float] = []
+    durations: list[float] = []
+    partial = timed_out = missing = 0
+    identities: list[tuple[float, float]] = []
+    errors = 0
+    for record in steady:
+        sample = record.get("source_samples", {}).get(source)
+        if not isinstance(sample, dict) or not sample:
+            missing += 1
+            continue
+        collected_at = sample.get("collected_at")
+        timestamp = record.get("timestamp")
+        if isinstance(collected_at, (int, float)) and isinstance(
+            timestamp, (int, float)
+        ):
+            ages.append(max(0.0, float(timestamp) - float(collected_at)))
+            identities.append((float(timestamp), float(collected_at)))
+        duration = sample.get("duration_seconds")
+        if isinstance(duration, (int, float)):
+            durations.append(float(duration))
+        partial += int(bool(sample.get("partial")))
+        timed_out += int(sample.get("requests_timed_out", 0) or 0)
+        errors += sum(
+            1
+            for error in record.get("errors", [])
+            if str(error).startswith(f"{source}:")
+        )
+
+    longest_stale = 0.0
+    stale_started: float | None = None
+    previous_identity: float | None = None
+    previous_timestamp: float | None = None
+    for timestamp, identity in identities:
+        if identity == previous_identity:
+            if stale_started is None:
+                stale_started = previous_timestamp
+            if stale_started is not None:
+                longest_stale = max(longest_stale, timestamp - stale_started)
+        else:
+            stale_started = None
+        previous_identity = identity
+        previous_timestamp = timestamp
+
+    if not ages and not durations:
+        return {
+            "available": False,
+            "reason": "source sample metadata unavailable",
+            "missing_samples": missing,
+        }
+    return {
+        "available": True,
+        "samples": len(steady),
+        "unique_source_samples": len({identity for _, identity in identities}),
+        "missing_samples": missing,
+        "partial_samples": partial,
+        "timed_out_requests": timed_out,
+        "recorded_errors": errors,
+        "max_sample_age_seconds": round(max(ages), 6) if ages else None,
+        "p95_sample_age_seconds": percentile(ages, 0.95),
+        "max_collection_duration_seconds": (
+            round(max(durations), 6) if durations else None
+        ),
+        "p95_collection_duration_seconds": percentile(durations, 0.95),
+        "longest_repeated_sample_seconds": round(longest_stale, 6),
+    }
+
+
+def nats_raft_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
+    points_by_group: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for record_index, record in enumerate(records):
+        if record.get("phase") != "steady":
+            continue
+        elapsed = float(record.get("elapsed_seconds", record_index))
+        sample_groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for observation in record.get("nats_raft_groups", []):
+            if not isinstance(observation, dict):
+                continue
+            account = str(observation.get("account", "unknown"))
+            group = str(observation.get("group", ""))
+            if group:
+                sample_groups[f"{account}/{group}"].append(observation)
+        for key, observations in sample_groups.items():
+            leader_observation = next(
+                (
+                    observation
+                    for observation in observations
+                    if observation.get("state") == "LEADER"
+                ),
+                max(
+                    observations,
+                    key=lambda item: int(item.get("committed", 0)),
+                ),
+            )
+            committed = max(
+                int(item.get("committed", 0)) for item in observations
+            )
+            applied = max(int(item.get("applied", 0)) for item in observations)
+            points_by_group[key].append(
+                {
+                    "elapsed": elapsed,
+                    "kind": str(leader_observation.get("kind", "other")),
+                    "stream_name": leader_observation.get("stream_name"),
+                    "leader": str(leader_observation.get("leader", "")),
+                    "term": int(leader_observation.get("term", 0)),
+                    "committed": committed,
+                    "applied": applied,
+                    "commit_apply_gap": max(
+                        committed - int(item.get("applied", 0))
+                        for item in observations
+                    ),
+                    "queue_depth": max(
+                        sum(
+                            int(item.get(name, 0))
+                            for name in (
+                                "proposal_queue",
+                                "entry_queue",
+                                "response_queue",
+                                "apply_queue",
+                            )
+                        )
+                        for item in observations
+                    ),
+                    "wal_messages": int(
+                        leader_observation.get("wal_messages", 0)
+                    ),
+                    "wal_bytes": int(leader_observation.get("wal_bytes", 0)),
+                    "wal_first_seq": int(
+                        leader_observation.get("wal_first_seq", 0)
+                    ),
+                    "wal_last_seq": int(
+                        leader_observation.get("wal_last_seq", 0)
+                    ),
+                    "replicas_seen": len(observations),
+                }
+            )
+
+    by_group: dict[str, dict[str, Any]] = {}
+    all_snapshot_events: list[dict[str, Any]] = []
+    maximum_gap = maximum_queue = 0
+    for key, points in sorted(points_by_group.items()):
+        events: list[dict[str, Any]] = []
+        for previous, current in zip(points, points[1:]):
+            if (
+                current["wal_first_seq"] <= previous["wal_first_seq"]
+                or current["leader"] != previous["leader"]
+                or current["term"] != previous["term"]
+            ):
+                continue
+            event = {
+                "elapsed_seconds": round(current["elapsed"], 3),
+                "wal_first_sequence_before": previous["wal_first_seq"],
+                "wal_first_sequence_after": current["wal_first_seq"],
+                "wal_messages_before": previous["wal_messages"],
+                "wal_messages_after": current["wal_messages"],
+                "wal_bytes_before": previous["wal_bytes"],
+                "wal_bytes_after": current["wal_bytes"],
+            }
+            events.append(event)
+            all_snapshot_events.append({"group": key, **event})
+        group_gap = max(point["commit_apply_gap"] for point in points)
+        group_queue = max(point["queue_depth"] for point in points)
+        maximum_gap = max(maximum_gap, group_gap)
+        maximum_queue = max(maximum_queue, group_queue)
+        by_group[key] = {
+            "kind": points[-1]["kind"],
+            "stream_name": points[-1]["stream_name"],
+            "samples": len(points),
+            "replicas_seen_max": max(point["replicas_seen"] for point in points),
+            "leader": _leader_summary(
+                [(point["elapsed"], point["leader"]) for point in points]
+            ),
+            "term": _metric_stats(
+                [(point["elapsed"], point["term"]) for point in points]
+            ),
+            "committed": _metric_stats(
+                [(point["elapsed"], point["committed"]) for point in points]
+            ),
+            "applied": _metric_stats(
+                [(point["elapsed"], point["applied"]) for point in points]
+            ),
+            "max_commit_apply_gap": group_gap,
+            "max_queue_depth": group_queue,
+            "wal_messages": _metric_stats(
+                [(point["elapsed"], point["wal_messages"]) for point in points]
+            ),
+            "wal_bytes": _metric_stats(
+                [(point["elapsed"], point["wal_bytes"]) for point in points]
+            ),
+            "wal_first_sequence": _metric_stats(
+                [(point["elapsed"], point["wal_first_seq"]) for point in points]
+            ),
+            "wal_last_sequence": _metric_stats(
+                [(point["elapsed"], point["wal_last_seq"]) for point in points]
+            ),
+            "snapshot_or_compaction_events": events,
+        }
+
+    return {
+        "available": bool(by_group),
+        "groups": len(by_group),
+        "stream_groups": sum(
+            1 for value in by_group.values() if value["kind"] == "stream"
+        ),
+        "consumer_groups": sum(
+            1 for value in by_group.values() if value["kind"] == "consumer"
+        ),
+        "snapshot_or_compaction_event_count": len(all_snapshot_events),
+        "snapshot_or_compaction_events": all_snapshot_events,
+        "max_commit_apply_gap": maximum_gap,
+        "max_queue_depth": maximum_queue,
+        "by_group": by_group,
+    }
+
+
+def nats_summary(
+    records: list[dict[str, Any]],
+    *,
+    raft_records: list[dict[str, Any]] | None = None,
+    health_records: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    steady = [record for record in records if record.get("phase") == "steady"]
+    raft_steady = [
+        record
+        for record in (raft_records if raft_records is not None else records)
+        if record.get("phase") == "steady"
+    ]
+    health = health_records if health_records is not None else records
+    if not steady and not raft_steady:
+        return {
+            "available": False,
+            "reason": "no steady-state samples",
+            "collection": {
+                "exporter": source_collection_summary(health, "nats"),
+                "raft": source_collection_summary(health, "nats_raft"),
+            },
+        }
+
+    series: dict[str, list[tuple[float, float]]] = defaultdict(list)
     pending_by_second: dict[int, float] = {}
-    consumers: dict[str, dict[str, list[float]]] = defaultdict(
+    consumers: dict[str, dict[str, list[tuple[float, float]]]] = defaultdict(
         lambda: defaultdict(list)
     )
+    streams: dict[str, dict[str, list[tuple[float, float]]]] = defaultdict(
+        lambda: defaultdict(list)
+    )
+    stream_leaders: dict[str, list[tuple[float, str]]] = defaultdict(list)
+    meta_leaders: list[tuple[float, str]] = []
     for record_index, record in enumerate(steady):
-        totals: dict[str, float] = defaultdict(float)
+        elapsed = float(record.get("elapsed_seconds", record_index))
+        consumer_totals: dict[str, float] = defaultdict(float)
         record_consumers: dict[str, dict[str, float]] = defaultdict(dict)
+        record_streams: dict[str, dict[str, float]] = defaultdict(dict)
+        record_stream_leaders: dict[str, str] = {}
+        server_values: dict[str, list[float]] = defaultdict(list)
         for metric in record.get("nats_metrics", []):
             metric_name = str(metric.get("name", ""))
-            alias = names.get(metric_name)
-            if alias is None:
-                continue
             value = float(metric.get("value", 0))
             labels = metric.get("labels", {})
             consumer = labels.get("consumer_name") or labels.get("consumer")
             stream = labels.get("stream_name") or labels.get("stream")
-            if consumer:
+
+            consumer_alias = NATS_CONSUMER_METRICS.get(metric_name)
+            if consumer_alias is not None:
+                if stream not in APPLICATION_STREAMS or not consumer:
+                    continue
+                key = f"{stream}/{consumer}"
+                record_consumers[key][consumer_alias] = max(
+                    value,
+                    record_consumers[key].get(consumer_alias, 0.0),
+                )
+                continue
+
+            stream_alias = NATS_STREAM_METRICS.get(metric_name)
+            if stream_alias is not None:
                 if stream not in APPLICATION_STREAMS:
                     continue
-                key = f"{stream or 'unknown'}/{consumer}"
-                record_consumers[key][alias] = max(
-                    value, record_consumers[key].get(alias, 0.0)
+                record_streams[str(stream)][stream_alias] = max(
+                    value,
+                    record_streams[str(stream)].get(stream_alias, 0.0),
                 )
-            else:
-                # Non-consumer values such as storage are per server.
-                totals[alias] += value
+                leader = labels.get("stream_leader")
+                if leader:
+                    record_stream_leaders[str(stream)] = str(leader)
+                continue
+
+            server = NATS_SERVER_METRICS.get(metric_name)
+            if server is not None:
+                server_values[server[0]].append(value)
+                continue
+            if (
+                metric_name == "gnatsd_varz_jetstream_meta_leader"
+                and value > 0
+            ):
+                leader = labels.get("value") or labels.get("leader")
+                if leader:
+                    meta_leaders.append((elapsed, str(leader)))
+
         for consumer, metrics in record_consumers.items():
             for alias, value in metrics.items():
-                consumers[consumer][alias].append(value)
-                totals[alias] += value
-        for alias, value in totals.items():
-            series[alias].append(value)
+                consumers[consumer][alias].append((elapsed, value))
+                consumer_totals[alias] += value
+        for alias, value in consumer_totals.items():
+            series[alias].append((elapsed, value))
             if alias == "consumer_pending":
-                elapsed = float(
-                    record.get("elapsed_seconds", record_index)
-                )
                 pending_by_second[max(0, math.floor(elapsed))] = value
+        for stream, metrics in record_streams.items():
+            for alias, value in metrics.items():
+                streams[stream][alias].append((elapsed, value))
+        for stream, leader in record_stream_leaders.items():
+            stream_leaders[stream].append((elapsed, leader))
+        for alias, values in server_values.items():
+            reduction = next(
+                reduction
+                for _, (candidate, reduction) in NATS_SERVER_METRICS.items()
+                if candidate == alias
+            )
+            series[alias].append(
+                (elapsed, sum(values) if reduction == "sum" else max(values))
+            )
 
-    result: dict[str, Any] = {"available": bool(series)}
+    raft = nats_raft_summary(raft_steady)
+    result: dict[str, Any] = {
+        "available": bool(series or streams or raft.get("available")),
+        "collection": {
+            "exporter": source_collection_summary(health, "nats"),
+            "raft": source_collection_summary(health, "nats_raft"),
+        },
+        "raft": raft,
+    }
+    maintenance: dict[str, Any] = {}
+    server: dict[str, Any] = {}
     for alias, values in sorted(series.items()):
-        result[alias] = {
-            "first": values[0],
-            "last": values[-1],
-            "max": max(values),
-            "change": values[-1] - values[0],
-        }
-        if alias == "consumer_pending":
+        stats = _metric_stats(values)
+        if alias in NATS_CONSUMER_METRICS.values() or alias == "storage_bytes":
+            result[alias] = stats
+        elif alias in NATS_MAINTENANCE_ALIASES:
+            maintenance[alias] = stats
+        else:
+            server[alias] = stats
+        if alias == "consumer_pending" and pending_by_second:
             first_second = min(pending_by_second)
             last_second = max(pending_by_second)
             latest: float | None = None
@@ -565,13 +983,22 @@ def nats_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
                         }
                     )
             result[alias]["series"] = per_second
+    maintenance["meta_leader"] = _leader_summary(meta_leaders)
+    result["maintenance"] = maintenance
+    result["server"] = server
+    result["streams"] = {
+        stream: {
+            **{
+                alias: _metric_stats(values)
+                for alias, values in sorted(metrics.items())
+            },
+            "leader": _leader_summary(stream_leaders.get(stream, [])),
+        }
+        for stream, metrics in sorted(streams.items())
+    }
     result["by_consumer"] = {
         consumer: {
-            alias: {
-                "last": values[-1],
-                "max": max(values),
-                "change": values[-1] - values[0],
-            }
+            alias: _metric_stats(values)
             for alias, values in sorted(metrics.items())
         }
         for consumer, metrics in sorted(consumers.items())
@@ -1284,6 +1711,16 @@ def saturation_summary(
         rung_nats_records = source_records_for_window(
             resource_records, "nats", started, ended
         )
+        rung_raft_records = source_records_for_window(
+            resource_records, "nats_raft", started, ended
+        )
+        rung_metrics_health_records = [
+            record
+            for record in resource_records
+            if started
+            <= float(record.get("elapsed_seconds", -1))
+            <= ended
+        ]
         rung_outstanding_records = [
             record
             for record in outstanding_records
@@ -1295,7 +1732,11 @@ def saturation_summary(
         )
         add_per_order_resource_metrics(resources, business["completed"])
         nats = (
-            nats_summary(rung_nats_records)
+            nats_summary(
+                rung_nats_records,
+                raft_records=rung_raft_records,
+                health_records=rung_metrics_health_records,
+            )
             if config.application_type == "NATS"
             else {
                 "available": False,
@@ -1391,22 +1832,26 @@ def source_records_for_window(
             elapsed = float(source_elapsed)
         except (TypeError, ValueError):
             continue
+        if not started <= elapsed <= ended:
+            continue
         collected_at = sample.get("collected_at")
         record_timestamp = record.get("timestamp")
         if isinstance(collected_at, (int, float)) and isinstance(
             record_timestamp, (int, float)
         ):
             age = float(record_timestamp) - float(collected_at)
-            if age < 0 or age > maximum_age_seconds:
+            # The source cache can finish a refresh while the sampler's HTTP
+            # request is in flight, making collected_at slightly newer than
+            # the record timestamp captured immediately before that request.
+            if age < -maximum_age_seconds or age > maximum_age_seconds:
                 continue
             identity = float(collected_at)
             if identity in seen:
                 continue
             seen.add(identity)
-        if started <= elapsed <= ended:
-            selected_record = dict(record)
-            selected_record["elapsed_seconds"] = elapsed
-            selected.append(selected_record)
+        selected_record = dict(record)
+        selected_record["elapsed_seconds"] = elapsed
+        selected.append(selected_record)
     return selected
 
 
@@ -1435,7 +1880,15 @@ def build_report(run_directory: Path) -> dict[str, Any]:
         allow_single_sample=config.workload == "saturation",
     )
     nats = (
-        nats_summary(resource_records)
+        nats_summary(
+            source_records_for_window(
+                resource_records, "nats", 0, measured_duration
+            ),
+            raft_records=source_records_for_window(
+                resource_records, "nats_raft", 0, measured_duration
+            ),
+            health_records=resource_records,
+        )
         if config.application_type == "NATS"
         else {"available": False, "reason": "not applicable to GRPC application"}
     )

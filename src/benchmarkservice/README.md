@@ -143,9 +143,12 @@ Store buckets expected by the application namespace.
 Every checked-in benchmark bundle deploys `benchmarkmetrics`, a small metrics
 gateway, and exposes it through the `benchmarkmetrics-external` LoadBalancer
 Service.
-It reads kubelet summaries and local NATS exporter endpoints in the tested
-cluster. Locust only performs HTTP requests to the supplied frontend and
-metrics URLs.
+It reads kubelet summaries, local NATS exporter endpoints, and the lightweight
+NATS Raft monitoring endpoint in the tested cluster. Locust only performs HTTP
+requests to the supplied frontend and metrics URLs. Saturation reports retain
+stream positions and sizes, JetStream snapshot gauges, broker traffic and API
+counters, Raft WAL compaction indicators, apply lag, queue depth, leaders,
+terms, and collection freshness for every rung.
 
 The gateway refreshes NATS and Kubernetes data independently and serves
 `/snapshot` entirely from cache. NATS refreshes every second; Kubernetes
@@ -154,6 +157,7 @@ cAdvisor counters refresh every 30 seconds. Every response includes per-source
 collection timestamps, ages, durations, partial-result errors, and timeout
 diagnostics. The intervals and bounds can be tuned with
 `NATS_METRICS_CACHE_INTERVAL_SECONDS`,
+`NATS_RAFT_URLS`, `NATS_RAFT_REQUEST_TIMEOUT_SECONDS`,
 `KUBERNETES_METRICS_CACHE_INTERVAL_SECONDS`,
 `KUBERNETES_METRICS_SNAPSHOT_DEADLINE_SECONDS`,
 `KUBERNETES_METRICS_REQUEST_TIMEOUT_SECONDS`, `KUBERNETES_METRICS_WORKERS`,

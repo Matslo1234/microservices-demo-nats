@@ -199,6 +199,13 @@ availability, connection counts, message rates, storage, quorum, consumer
 pending messages, acknowledgement backlog, and redeliveries. Application
 services do not reproduce those broker metrics.
 
+The benchmark metrics gateway also samples `/raftz?acc=BOUTIQUE` directly on
+port `8222`. This path is independent of the exporter's comparatively expensive
+full JetStream scrape, so saturation artifacts retain per-group WAL sequence
+and size, commit/apply lag, internal queue depth, term, and leader observations
+when the exporter is delayed. Stream position/size, meta snapshot state,
+traffic, API errors, and metrics-source freshness are summarized per rung.
+
 Checkout shipping- and payment-stage lag must be inspected by durable consumer,
 because early- and late-stage responses intentionally have independent handler
 capacity:

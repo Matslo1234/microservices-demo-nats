@@ -81,6 +81,8 @@ spec:
     ports:
     - protocol: TCP
       port: 7777
+    - protocol: TCP
+      port: 8222
   egress:
   - to:
     - namespaceSelector:

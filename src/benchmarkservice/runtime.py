@@ -227,20 +227,29 @@ class RemoteMetricsClient:
         nats_order_completed_observer = value.get(
             "nats_order_completed_observer"
         )
+        nats_raft_groups = value.get("nats_raft_groups", [])
+        source_samples = value.get("source_samples", {})
+        snapshot = value.get("snapshot", {})
         errors = value.get("errors", [])
         if not isinstance(pods, dict):
             raise RuntimeError("metrics endpoint returned invalid pods")
         if (
             not isinstance(nats_metrics, list)
             or not isinstance(nats_micro_endpoints, list)
+            or not isinstance(nats_raft_groups, list)
             or not isinstance(errors, list)
         ):
             raise RuntimeError("metrics endpoint returned invalid metric lists")
+        if not isinstance(source_samples, dict) or not isinstance(snapshot, dict):
+            raise RuntimeError("metrics endpoint returned invalid sample metadata")
         return {
             "pods": pods,
             "nats_metrics": nats_metrics,
             "nats_micro_endpoints": nats_micro_endpoints,
             "nats_order_completed_observer": nats_order_completed_observer,
+            "nats_raft_groups": nats_raft_groups,
+            "source_samples": source_samples,
+            "snapshot": snapshot,
             "errors": [str(error) for error in errors],
         }
 
@@ -370,6 +379,7 @@ class ResourceSampler:
                 "nats_metrics": [],
                 "nats_micro_endpoints": [],
                 "nats_order_completed_observer": None,
+                "nats_raft_groups": [],
                 "errors": [],
             }
             if CONFIG.workload == "saturation":
@@ -400,6 +410,9 @@ class ResourceSampler:
                     record["pods"] = snapshot["pods"]
                 if CONFIG.collect_nats_metrics:
                     record["nats_metrics"] = snapshot["nats_metrics"]
+                    record["nats_raft_groups"] = snapshot.get(
+                        "nats_raft_groups", []
+                    )
                     record["nats_micro_endpoints"] = snapshot[
                         "nats_micro_endpoints"
                     ]
