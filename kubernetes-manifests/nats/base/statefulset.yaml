@@ -161,7 +161,10 @@ spec:
             -e "s|__NATS_PROJECTION_OPERATIONS_SUBJECT__|${NATS_PROJECTION_OPERATIONS_SUBJECT}|g" \
             -e "s|__NATS_BENCHMARK_RUNS_SUBJECT__|${NATS_BENCHMARK_RUNS_SUBJECT}|g" \
             -e "s|__NATS_BENCHMARK_ARTIFACTS_SUBJECT__|${NATS_BENCHMARK_ARTIFACTS_SUBJECT}|g" \
+            -e "s|__NATS_CLUSTER_ROUTES__|${NATS_CLUSTER_ROUTES}|g" \
             /etc/nats-config/nats.conf > /var/run/nats/nats.conf
+          sed -e "s|__NATS_CLUSTER_ROUTES__|${NATS_CLUSTER_ROUTES}|g" \
+            /etc/nats-config/cluster.conf > /var/run/nats/cluster.conf
           cp /etc/nats-config/gateway.conf /var/run/nats/gateway.conf
           exec nats-server -c /var/run/nats/nats.conf
         env:

@@ -320,6 +320,10 @@ python -m pip install -r src/benchmarkservice/requirements.txt
 python src/benchmarkservice/parse_results.py ./benchmark-results
 ```
 
+Pass `--saturation-limit REQUESTS_PER_SECOND` to include only saturation rungs
+at or below that requested rate. Without the option, all saturation rungs are
+included.
+
 For every saturation summary, the script uses Matplotlib to write PNGs of
 goodput and P95 outcome latency against the requested rate beside the input
 file. The goodput graph contains both completed orders attributed to the rung
@@ -330,10 +334,25 @@ metrics agent owns it for remote collection, while local Job runs use an
 unpatched helper process. It therefore remains accurate after individual
 benchmark clients reach their outcome timeout. Observer continuity is checked
 at every rung boundary; an observer restart or NATS disconnect makes the
-measurement unavailable instead of silently reporting a partial count. Rungs
-without a P95 latency sample are omitted from the latency graph.
+measurement unavailable instead of silently reporting a partial count. From
+the first rung without a P95 latency sample, the latency graph continues with
+a dashed line at the 30-second timeout through the remaining rungs. When two
+or more saturation summaries have the same configured steady duration, the
+script additionally writes `average_goodput_MAX_ORDERS.png` and
+`average_latency_MAX_ORDERS.png` in the supplied results folder, where
+`MAX_ORDERS` is the highest requested orders-per-second rate in the grouped
+runs. These plots show the per-rate run mean with a translucent band extending
+one population standard deviation above and below it; the individual run plots
+are still written beside each summary. The combined latency chart continues at
+the 30-second timeout from the first rate where any grouped run has no latency
+measurement. Groups containing at least two NATS saturation summaries also
+get `average_waiting_events_MAX_ORDERS.png`, calculated from the linearly
+interpolated per-run waiting-event values with the same standard-deviation
+band.
 NATS saturation summaries
-also get a PNG of maximum consumer-pending events. Fault-tolerance summaries
+also get a faithful PNG of maximum consumer-pending events and a second PNG
+that replaces repeated copies of a value with a linear ramp to the next
+different value. Fault-tolerance summaries
 get a PNG of successfully processed requests per second; NATS fault-tolerance
 summaries also get a PNG of queued events per second. Closed-run summaries
 include the configured closed-loop user count and are grouped by that count

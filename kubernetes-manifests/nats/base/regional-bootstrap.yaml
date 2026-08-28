@@ -12,6 +12,10 @@ data:
     set -eu
 
     nats_args="--server=${NATS_URL} --user=${NATS_USER} --password=${NATS_PASSWORD} --tlsca=/etc/nats-ca/ca.crt"
+    placement_args=""
+    if [ "${NATS_CLUSTERED}" = true ]; then
+      placement_args="--cluster=${NATS_CLUSTER_NAME}"
+    fi
     until nats ${nats_args} account info >/dev/null 2>&1; do
       echo "waiting for the local NATS JetStream account"
       sleep 2
@@ -31,16 +35,18 @@ data:
       max_bytes=$4
       compact="$(nats ${nats_args} stream info "${stream}" --json | tr -d '[:space:]')"
       for expected in \
-        "\"num_replicas\":3" \
+        "\"num_replicas\":${NATS_JETSTREAM_REPLICAS}" \
         "\"storage\":\"file\"" \
         "\"max_age\":${max_age}" \
-        "\"max_bytes\":${max_bytes}" \
-        "\"cluster\":\"${NATS_CLUSTER_NAME}\""; do
+        "\"max_bytes\":${max_bytes}"; do
         printf '%s' "${compact}" | grep -F "${expected}" >/dev/null || {
           echo "${stream} does not match ${expected}" >&2
           exit 1
         }
       done
+      if [ "${NATS_CLUSTERED}" = true ]; then
+        printf '%s' "${compact}" | grep -F "\"cluster\":\"${NATS_CLUSTER_NAME}\"" >/dev/null || exit 1
+      fi
       if [ "${history}" != skip ]; then
         printf '%s' "${compact}" | grep -F "\"max_msgs_per_subject\":${history}" >/dev/null || {
           echo "${stream} has the wrong history limit" >&2
@@ -57,11 +63,11 @@ data:
       max_bytes=$5
       assert_regional_name "${bucket}"
       if nats ${nats_args} kv info "${bucket}" >/dev/null 2>&1; then
-        nats ${nats_args} kv edit "${bucket}" --history="${history}" --replicas=3 \
-          --ttl="${ttl}" --max-bucket-size="${max_bytes}" --cluster="${NATS_CLUSTER_NAME}"
+        nats ${nats_args} kv edit "${bucket}" --history="${history}" --replicas="${NATS_JETSTREAM_REPLICAS}" \
+          --ttl="${ttl}" --max-bucket-size="${max_bytes}" ${placement_args}
       else
-        nats ${nats_args} kv add "${bucket}" --history="${history}" --replicas=3 \
-          --storage=file --ttl="${ttl}" --max-bucket-size="${max_bytes}" --cluster="${NATS_CLUSTER_NAME}"
+        nats ${nats_args} kv add "${bucket}" --history="${history}" --replicas="${NATS_JETSTREAM_REPLICAS}" \
+          --storage=file --ttl="${ttl}" --max-bucket-size="${max_bytes}" ${placement_args}
       fi
       assert_backing_stream "KV_${bucket}" "${history}" "${max_age}" "${max_bytes}"
     }
@@ -70,11 +76,11 @@ data:
       bucket=$1
       assert_regional_name "${bucket}"
       if nats ${nats_args} object info "${bucket}" >/dev/null 2>&1; then
-        nats ${nats_args} object edit "${bucket}" --replicas=3 \
-          --max-bucket-size=4294967296 --cluster="${NATS_CLUSTER_NAME}"
+        nats ${nats_args} object edit "${bucket}" --replicas="${NATS_JETSTREAM_REPLICAS}" \
+          --max-bucket-size=4294967296 ${placement_args}
       else
-        nats ${nats_args} object add "${bucket}" --replicas=3 --storage=file \
-          --max-bucket-size=4294967296 --cluster="${NATS_CLUSTER_NAME}"
+        nats ${nats_args} object add "${bucket}" --replicas="${NATS_JETSTREAM_REPLICAS}" --storage=file \
+          --max-bucket-size=4294967296 ${placement_args}
       fi
       assert_backing_stream "OBJ_${bucket}" skip 0 4294967296
     }

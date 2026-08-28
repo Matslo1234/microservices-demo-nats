@@ -1,0 +1,49 @@
+# A development/test NATS installation with one server and one JetStream copy.
+# TLS, JetStream encryption, persistence, and resource settings are inherited
+# from the three-server configuration, but server clustering and placement are
+# disabled because a single NATS process cannot establish a route to itself.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- ../overlays/standalone
+patches:
+- target:
+    group: apps
+    version: v1
+    kind: StatefulSet
+    name: nats
+  patch: |-
+    - op: replace
+      path: /spec/replicas
+      value: 1
+- target:
+    group: policy
+    version: v1
+    kind: PodDisruptionBudget
+    name: nats
+  patch: |-
+    - op: replace
+      path: /spec/minAvailable
+      value: 1
+- target:
+    version: v1
+    kind: ConfigMap
+    name: nats-region-config
+  patch: |-
+    - op: replace
+      path: /data/NATS_JETSTREAM_REPLICAS
+      value: "1"
+    - op: replace
+      path: /data/NATS_CLUSTER_ROUTES
+      value: ""
+    - op: replace
+      path: /data/NATS_CLUSTERED
+      value: "false"
+- target:
+    version: v1
+    kind: ConfigMap
+    name: nats-server-config
+  patch: |-
+    - op: replace
+      path: /data/cluster.conf
+      value: "# Single-worker mode runs non-clustered JetStream."

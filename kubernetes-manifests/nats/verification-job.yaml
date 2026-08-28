@@ -50,9 +50,9 @@ data:
 
     nats_admin account info >/dev/null
     for stream in BOUTIQUE_COMMANDS BOUTIQUE_EVENTS BOUTIQUE_DLQ BOUTIQUE_ADVISORIES; do
-      nats_admin stream info "${stream}" --json | grep -q '"num_replicas": 3'
+      nats_admin stream info "${stream}" --json | grep -Eq "\"num_replicas\"[[:space:]]*:[[:space:]]*${NATS_JETSTREAM_REPLICAS}"
     done
-    echo "PASS: account and replicated streams are healthy"
+    echo "PASS: account and R${NATS_JETSTREAM_REPLICAS} streams are healthy"
 
     first_publish="$(nats_admin pub "${event_subject}" "${payload}" --jetstream \
       --header "Nats-Msg-Id:${message_id}" 2>&1)"
@@ -63,7 +63,7 @@ data:
 
     nats_admin consumer add BOUTIQUE_EVENTS "${consumer}" --pull \
       --filter "${event_subject}" --deliver all --ack explicit --max-deliver 3 \
-      --replicas 3 --defaults >/dev/null
+      --replicas "${NATS_JETSTREAM_REPLICAS}" --defaults >/dev/null
     received="$(nats_admin consumer next BOUTIQUE_EVENTS "${consumer}" \
       --count 1 --no-ack --raw --wait=5s)"
     test "${received}" = "${payload}"
@@ -71,7 +71,7 @@ data:
 
     nats_admin consumer add BOUTIQUE_EVENTS "${consumer}" --pull \
       --filter "${event_subject}" --deliver all --ack explicit --max-deliver 3 \
-      --replicas 3 --defaults >/dev/null
+      --replicas "${NATS_JETSTREAM_REPLICAS}" --defaults >/dev/null
     replayed="$(nats_admin consumer next BOUTIQUE_EVENTS "${consumer}" \
       --count 1 --no-ack --raw --wait=5s)"
     test "${replayed}" = "${payload}"
@@ -81,7 +81,7 @@ data:
       --header "Nats-Msg-Id:phase1-max-delivery-$(date +%s)" >/dev/null 2>&1
     nats_admin consumer add BOUTIQUE_EVENTS "${advisory_consumer}" --pull \
       --filter "${advisory_subject}" --deliver all --ack explicit --wait=1s \
-      --max-deliver 2 --replicas 3 --defaults >/dev/null
+      --max-deliver 2 --replicas "${NATS_JETSTREAM_REPLICAS}" --defaults >/dev/null
     nats_admin consumer next BOUTIQUE_EVENTS "${advisory_consumer}" \
       --count 1 --no-ack --raw --wait=5s >/dev/null
     sleep 2

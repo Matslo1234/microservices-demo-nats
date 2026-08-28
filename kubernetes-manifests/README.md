@@ -18,6 +18,12 @@ templates under [`nats/overlays`](nats/overlays). Prefer
 <primary|secondary> --application`; it validates the inventory and rendered
 role boundary, then applies to exactly one context.
 
+For a resource-constrained development/test cluster, the
+[`nats/single-worker`](nats/single-worker) entry point runs one NATS server and
+uses one JetStream copy while inheriting the standalone configuration's
+encryption, persistence, resource, security, monitoring, and backup settings.
+It provides no NATS server-failure tolerance.
+
 The local overlay is intentionally WAN-free. A supercluster overlay must have
 real ordinal gateway DNS, gateway certificate SANs, shared gateway trust, and
 allowlisted TCP `7222` CIDRs before it is selected in the inventory.

@@ -288,6 +288,34 @@ def verify_manifests() -> str:
     )
     require(benchmark_backup, "suspend: true")
 
+    single_worker_nats = run(
+        [kubectl, "kustomize", "kubernetes-manifests/nats/single-worker"]
+    )
+    single_worker_statefulset = document(
+        single_worker_nats, "StatefulSet", "nats"
+    )
+    require(
+        single_worker_statefulset,
+        "replicas: 1",
+        "cpu: 500m",
+        "memory: 4Gi",
+        'secretName: nats-server-tls',
+        "storage: 20Gi",
+    )
+    single_worker_region = document(
+        single_worker_nats, "ConfigMap", "nats-region-config"
+    )
+    require(
+        single_worker_region,
+        'NATS_CLUSTERED: "false"',
+        'NATS_CLUSTER_ROUTES: ""',
+        'NATS_JETSTREAM_REPLICAS: "1"',
+    )
+    single_worker_pdb = document(
+        single_worker_nats, "PodDisruptionBudget", "nats"
+    )
+    require(single_worker_pdb, "minAvailable: 1")
+
     for legacy in (
         "email-data",
         "shipping-data",
@@ -801,7 +829,7 @@ def verify_dashboard_and_bootstrap() -> None:
         'ensure_kv "${STOREFRONT_ORDERS_BUCKET}" 2 0s 0 2147483648',
         'ensure_kv "${BENCHMARK_RUNS_BUCKET}" 10 0s 0 536870912',
         'ensure_object "${BENCHMARK_ARTIFACTS_BUCKET}"',
-        "--replicas=3",
+        '--replicas="${NATS_JETSTREAM_REPLICAS}"',
         "nats ${nats_args} object ls",
     )
     forbid(bootstrap, "nats ${nats_args} object list")

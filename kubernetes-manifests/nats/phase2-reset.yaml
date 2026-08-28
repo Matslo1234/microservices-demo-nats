@@ -30,9 +30,9 @@ spec:
           nats ${args} kv del "${STOREFRONT_PRODUCTS_BUCKET}" --force
           nats ${args} kv del "${STOREFRONT_CARTS_BUCKET}" --force
           nats ${args} kv del RECOMMENDATION_CATALOG --force
-          nats ${args} kv add "${STOREFRONT_PRODUCTS_BUCKET}" --history=5 --replicas=3 --storage=file --ttl=0s --max-bucket-size=536870912 --placement="${NATS_CLUSTER_NAME}"
-          nats ${args} kv add "${STOREFRONT_CARTS_BUCKET}" --history=2 --replicas=3 --storage=file --ttl=0s --max-bucket-size=536870912 --placement="${NATS_CLUSTER_NAME}"
-          nats ${args} kv add RECOMMENDATION_CATALOG --history=5 --replicas=3 --storage=file --ttl=0s --max-bucket-size=268435456 --placement="${GLOBAL_ASSET_CLUSTER}"
+          nats ${args} kv add "${STOREFRONT_PRODUCTS_BUCKET}" --history=5 --replicas="${NATS_JETSTREAM_REPLICAS}" --storage=file --ttl=0s --max-bucket-size=536870912 --placement="${NATS_CLUSTER_NAME}"
+          nats ${args} kv add "${STOREFRONT_CARTS_BUCKET}" --history=2 --replicas="${NATS_JETSTREAM_REPLICAS}" --storage=file --ttl=0s --max-bucket-size=536870912 --placement="${NATS_CLUSTER_NAME}"
+          nats ${args} kv add RECOMMENDATION_CATALOG --history=5 --replicas="${NATS_JETSTREAM_REPLICAS}" --storage=file --ttl=0s --max-bucket-size=268435456 --placement="${GLOBAL_ASSET_CLUSTER}"
           nats ${args} consumer rm "${STOREFRONT_EVENT_STREAM}" "${STOREFRONT_PROJECTION_DURABLE}" --force || true
           nats ${args} consumer rm "${STOREFRONT_EVENT_STREAM}" recommendation-catalog-v1 --force || true
         envFrom:

@@ -12,6 +12,9 @@ data:
   K8S_CLUSTER_NAME: local
   NATS_CLUSTER_NAME: BOUTIQUE
   NATS_CLUSTER_ROLE: primary
+  NATS_JETSTREAM_REPLICAS: "3"
+  NATS_CLUSTERED: "true"
+  NATS_CLUSTER_ROUTES: nats://nats-0.nats-headless.nats.svc.cluster.local:6222,nats://nats-1.nats-headless.nats.svc.cluster.local:6222,nats://nats-2.nats-headless.nats.svc.cluster.local:6222
   NATS_SUPERCLUSTER_ENABLED: "false"
   STREAM_OWNER_REGION: local
   GLOBAL_ASSET_CLUSTER: BOUTIQUE

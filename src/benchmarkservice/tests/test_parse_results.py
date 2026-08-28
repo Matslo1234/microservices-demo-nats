@@ -7,21 +7,34 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from parse_results import (
+    _axis_limit,
     Result,
     ResultError,
+    average_interpolated_saturation_pending_points,
+    average_saturation_points,
     collect_closed_nats_waiting_series,
     fault_tolerance_markers,
     find_results,
     main,
     process_folder,
+    saturation_interpolated_pending_points,
+    saturation_latency_timeout_points,
     saturation_points,
+    write_average_saturation_graphs,
     write_png_chart,
+    write_png_multi_series_chart,
+    write_saturation_graphs,
 )
 
 
 class ParseResultsTest(unittest.TestCase):
+    def test_axis_limit_produces_round_tick_intervals(self) -> None:
+        self.assertEqual(150.0, _axis_limit(120.0))
+        self.assertEqual(35_000.0, _axis_limit(30_000.0, headroom=1.1))
+
     def test_groups_closed_runs_and_writes_latex_table(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             folder = Path(temporary)
@@ -288,6 +301,290 @@ class ParseResultsTest(unittest.TestCase):
                     nested / "nats-summary_goodput.png",
                     nested / "nats-summary_p95_latency.png",
                     nested / "nats-summary_max_pending_events.png",
+                    nested
+                    / "nats-summary_max_pending_events_interpolated.png",
+                },
+                set(outputs),
+            )
+            for output in outputs:
+                self.assert_png(output)
+
+    def test_limits_saturation_data_by_requested_rate(self) -> None:
+        summary = self._saturation_summary("NATS")
+        excluded_rung = summary["saturation"]["rungs"][1]
+        excluded_rung["processing_goodput_orders_per_second"] = "invalid"
+        excluded_rung["business"]["goodput_orders_per_second"] = "invalid"
+        excluded_rung["business"]["checkout_to_outcome"]["p95_ms"] = (
+            "invalid"
+        )
+        excluded_rung["nats"]["consumer_pending"]["max"] = "invalid"
+        result = Result(path=Path("summary.json"), summary=summary)
+
+        points = saturation_points(result, saturation_limit=10)
+
+        self.assertEqual([(10.0, 9.5)], points[0])
+        self.assertEqual([(10.0, 9.2)], points[1])
+        self.assertEqual([(10.0, 2.0)], points[2])
+        self.assertEqual([(10.0, 125.0)], points[3])
+        self.assertEqual(
+            [], saturation_latency_timeout_points(result, saturation_limit=10)
+        )
+
+    def test_limit_ignores_pending_samples_for_excluded_rungs(self) -> None:
+        summary = self._saturation_summary("NATS")
+        first, second = summary["saturation"]["rungs"]
+        first.update(
+            {
+                "started_elapsed_seconds": 0,
+                "ended_elapsed_seconds": 10,
+                "nats": {"available": False},
+            }
+        )
+        second.update(
+            {
+                "started_elapsed_seconds": 11,
+                "ended_elapsed_seconds": 20,
+                "nats": {"available": False},
+            }
+        )
+        summary["nats"] = {
+            "consumer_pending": {
+                "series": [
+                    {"elapsed_seconds": 5, "waiting_events": 3},
+                    {"elapsed_seconds": 15, "waiting_events": "invalid"},
+                ]
+            }
+        }
+
+        _, _, pending, _ = saturation_points(
+            Result(path=Path("summary.json"), summary=summary),
+            saturation_limit=10,
+        )
+
+        self.assertEqual([(10.0, 3.0)], pending)
+
+    def test_main_passes_saturation_limit_to_result_processing(self) -> None:
+        with mock.patch(
+            "parse_results.process_folder", return_value=[]
+        ) as process:
+            exit_code = main(
+                ["results", "--saturation-limit", "15.5"]
+            )
+
+        self.assertEqual(0, exit_code)
+        process.assert_called_once_with(Path("results"), 15.5)
+
+    def test_process_folder_applies_saturation_limit_to_graphs(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            folder = Path(temporary)
+            (folder / "summary.json").write_text(
+                json.dumps(self._saturation_summary("NATS")),
+                encoding="utf-8",
+            )
+
+            with (
+                mock.patch(
+                    "parse_results.write_png_multi_series_chart"
+                ) as write_multi_series,
+                mock.patch(
+                    "parse_results.write_png_chart"
+                ) as write_chart,
+            ):
+                process_folder(folder, saturation_limit=10)
+
+        self.assertEqual(
+            [
+                ("Zaključena znotraj 30s oddaje", [(10.0, 9.5)]),
+                (
+                    "Zaključena tekom obremenitvene stopnice",
+                    [(10.0, 9.2)],
+                ),
+            ],
+            write_multi_series.call_args_list[0].args[1],
+        )
+        self.assertEqual(
+            [(10.0, 2.0)], write_chart.call_args_list[0].args[1]
+        )
+        self.assertEqual(
+            [(10.0, 2.0)], write_chart.call_args_list[1].args[1]
+        )
+
+    def test_averages_saturation_runs_with_population_standard_deviation(
+        self,
+    ) -> None:
+        first = self._saturation_summary("GRPC")
+        second = self._saturation_summary("GRPC")
+        second_rungs = second["saturation"]["rungs"]
+        second_rungs[0]["business"]["goodput_orders_per_second"] = 11.5
+        second_rungs[1]["business"]["goodput_orders_per_second"] = 20.5
+        second_rungs[0]["processing_goodput_orders_per_second"] = 11.2
+        second_rungs[1]["processing_goodput_orders_per_second"] = 19.5
+        second_rungs[0]["business"]["checkout_to_outcome"]["p95_ms"] = 175
+        second_rungs[1]["business"]["checkout_to_outcome"]["p95_ms"] = 350
+
+        measurements = average_saturation_points(
+            [
+                Result(path=Path("first.json"), summary=first),
+                Result(path=Path("second.json"), summary=second),
+            ]
+        )
+
+        self.assertEqual([(10.0, 10.5), (20.0, 19.5)], measurements[0])
+        self.assertEqual([(10.0, 1.0), (20.0, 1.0)], measurements[1])
+        self.assertEqual([(10.0, 10.2), (20.0, 18.5)], measurements[2])
+        self.assertEqual([(10.0, 1.0), (20.0, 1.0)], measurements[3])
+        self.assertEqual([(10.0, 150.0), (20.0, 300.0)], measurements[4])
+        self.assertEqual([(10.0, 25.0), (20.0, 50.0)], measurements[5])
+
+    def test_writes_average_saturation_graphs_for_matching_durations(
+        self,
+    ) -> None:
+        results: list[Result] = []
+        for name, duration in (("first", 60), ("second", 60), ("third", 90)):
+            summary = self._saturation_summary("GRPC")
+            summary["configured_steady_seconds"] = duration
+            results.append(Result(path=Path(f"{name}.json"), summary=summary))
+
+        with (
+            mock.patch(
+                "parse_results.write_png_multi_series_chart"
+            ) as write_multi_series,
+            mock.patch("parse_results.write_png_chart") as write_chart,
+        ):
+            outputs = write_average_saturation_graphs(Path("results"), results)
+
+        self.assertEqual(
+            [
+                Path("results/average_goodput_20.png"),
+                Path("results/average_latency_20.png"),
+            ],
+            outputs,
+        )
+        goodput_call, latency_call = write_multi_series.call_args_list
+        self.assertEqual(
+            [[(10.0, 0.0), (20.0, 0.0)]] * 2,
+            goodput_call.kwargs["deviation_bands"],
+        )
+        self.assertEqual(
+            [[(10.0, 0.0), (20.0, 0.0)], None],
+            latency_call.kwargs["deviation_bands"],
+        )
+        self.assertEqual(["-", "--"], latency_call.kwargs["line_styles"])
+        for chart_call in write_multi_series.call_args_list:
+            self.assertNotIn("error_bars", chart_call.kwargs)
+        write_chart.assert_not_called()
+
+    def test_average_latency_uses_timeout_when_any_run_has_no_data(self) -> None:
+        first = self._saturation_summary("GRPC")
+        second = self._saturation_summary("GRPC")
+        for summary in (first, second):
+            summary["configured_steady_seconds"] = 60
+        second["saturation"]["rungs"][1]["business"][
+            "checkout_to_outcome"
+        ]["p95_ms"] = None
+
+        with mock.patch(
+            "parse_results.write_png_multi_series_chart"
+        ) as write_multi_series:
+            write_average_saturation_graphs(
+                Path("results"),
+                [
+                    Result(path=Path("first.json"), summary=first),
+                    Result(path=Path("second.json"), summary=second),
+                ],
+            )
+
+        latency_call = write_multi_series.call_args_list[1]
+        self.assertEqual(
+            [
+                ("Povprečna izmerjena P95 latenca", [(10.0, 125.0)]),
+                (
+                    "30 s časovna omejitev",
+                    [(10.0, 125.0), (20.0, 30_000.0)],
+                ),
+            ],
+            latency_call.args[1],
+        )
+        self.assertEqual(
+            [[(10.0, 0.0)], None],
+            latency_call.kwargs["deviation_bands"],
+        )
+
+    def test_averages_interpolated_nats_waiting_events(self) -> None:
+        results: list[Result] = []
+        for name, pending_values in (
+            ("first", (10, 10, 30)),
+            ("second", (20, 20, 40)),
+        ):
+            summary = self._saturation_summary("NATS")
+            rungs = summary["saturation"]["rungs"]
+            rungs.insert(
+                1,
+                {
+                    **rungs[1],
+                    "target_requests_per_second": 15,
+                    "nats": {"consumer_pending": {"max": pending_values[1]}},
+                },
+            )
+            for rung, pending in zip(rungs, pending_values):
+                rung["nats"]["consumer_pending"]["max"] = pending
+            results.append(Result(path=Path(f"{name}.json"), summary=summary))
+
+        points, deviations = average_interpolated_saturation_pending_points(
+            results
+        )
+
+        self.assertEqual(
+            [(10.0, 15.0), (15.0, 25.0), (20.0, 35.0)], points
+        )
+        self.assertEqual(
+            [(10.0, 5.0), (15.0, 5.0), (20.0, 5.0)], deviations
+        )
+
+    def test_writes_average_nats_waiting_events_chart(self) -> None:
+        results: list[Result] = []
+        for name in ("first", "second"):
+            summary = self._saturation_summary("NATS")
+            summary["configured_steady_seconds"] = 60
+            results.append(Result(path=Path(f"{name}.json"), summary=summary))
+
+        with (
+            mock.patch("parse_results.write_png_multi_series_chart"),
+            mock.patch("parse_results.write_png_chart") as write_chart,
+        ):
+            outputs = write_average_saturation_graphs(Path("results"), results)
+
+        waiting_path = Path("results/average_waiting_events_20.png")
+        self.assertIn(waiting_path, outputs)
+        self.assertEqual(waiting_path, write_chart.call_args.args[0])
+        self.assertEqual(
+            [(10.0, 2.0), (20.0, 7.0)], write_chart.call_args.args[1]
+        )
+        self.assertEqual(
+            [(10.0, 0.0), (20.0, 0.0)],
+            write_chart.call_args.kwargs["deviation_band"],
+        )
+
+    def test_keeps_per_run_plots_when_writing_saturation_averages(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            folder = Path(temporary)
+            for name in ("first", "second"):
+                summary = self._saturation_summary("GRPC")
+                summary["configured_steady_seconds"] = 60
+                (folder / f"{name}.json").write_text(
+                    json.dumps(summary), encoding="utf-8"
+                )
+
+            outputs = process_folder(folder)
+
+            self.assertEqual(
+                {
+                    folder / "first_goodput.png",
+                    folder / "first_p95_latency.png",
+                    folder / "second_goodput.png",
+                    folder / "second_p95_latency.png",
+                    folder / "average_goodput_20.png",
+                    folder / "average_latency_20.png",
                 },
                 set(outputs),
             )
@@ -375,6 +672,38 @@ class ParseResultsTest(unittest.TestCase):
 
         self.assertEqual([(10.0, 7.0), (20.0, 11.0)], pending)
 
+    def test_interpolates_missing_saturation_pending_rungs(self) -> None:
+        summary = self._saturation_summary("NATS")
+        rungs = summary["saturation"]["rungs"]
+        rungs[0]["nats"]["consumer_pending"]["max"] = 10
+        rungs.insert(
+            1,
+            {
+                **rungs[1],
+                "target_requests_per_second": 15,
+                "nats": {"consumer_pending": {"max": 10}},
+            },
+        )
+        rungs[2]["nats"]["consumer_pending"]["max"] = 30
+
+        points = saturation_interpolated_pending_points(
+            Result(path=Path("summary.json"), summary=summary)
+        )
+
+        self.assertEqual([(10.0, 10.0), (15.0, 20.0), (20.0, 30.0)], points)
+
+    def test_continues_null_saturation_latency_at_timeout(self) -> None:
+        summary = self._saturation_summary("NATS")
+        summary["saturation"]["rungs"][1]["business"][
+            "checkout_to_outcome"
+        ]["p95_ms"] = None
+
+        points = saturation_latency_timeout_points(
+            Result(path=Path("summary.json"), summary=summary)
+        )
+
+        self.assertEqual([(10.0, 125.0), (20.0, 30_000.0)], points)
+
     def test_writes_single_rung_nats_saturation_pngs(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             folder = Path(temporary)
@@ -386,7 +715,7 @@ class ParseResultsTest(unittest.TestCase):
 
             outputs = process_folder(folder)
 
-            self.assertEqual(3, len(outputs))
+            self.assertEqual(4, len(outputs))
             for output in outputs:
                 self.assert_png(output)
 
@@ -401,6 +730,98 @@ class ParseResultsTest(unittest.TestCase):
             )
 
             self.assert_png(chart_path)
+
+    def test_multi_series_chart_uses_explicit_colors(self) -> None:
+        with (
+            mock.patch("parse_results.Figure") as figure_constructor,
+            mock.patch("parse_results.FigureCanvasAgg"),
+        ):
+            axes = figure_constructor.return_value.subplots.return_value
+
+            write_png_multi_series_chart(
+                Path("chart.png"),
+                [
+                    ("First", [(1.0, 2.0)]),
+                    ("Second", [(1.0, 3.0)]),
+                ],
+                title="Chart",
+                y_label="Values",
+                x_label="Time",
+                colors=["blue", "green"],
+            )
+
+        self.assertEqual(
+            ["blue", "green"],
+            [call.kwargs["color"] for call in axes.plot.call_args_list],
+        )
+
+    def test_multi_series_chart_draws_standard_deviation_band(self) -> None:
+        with (
+            mock.patch("parse_results.Figure") as figure_constructor,
+            mock.patch("parse_results.FigureCanvasAgg"),
+        ):
+            axes = figure_constructor.return_value.subplots.return_value
+
+            write_png_multi_series_chart(
+                Path("chart.png"),
+                [("Mean", [(10.0, 100.0), (20.0, 200.0)])],
+                title="Chart",
+                y_label="Values",
+                x_label="Rate",
+                colors=["blue"],
+                deviation_bands=[[(10.0, 5.0), (20.0, 20.0)]],
+            )
+
+        band = axes.fill_between.call_args
+        self.assertEqual([10.0, 20.0], band.args[0])
+        self.assertEqual([95.0, 180.0], band.args[1])
+        self.assertEqual([105.0, 220.0], band.args[2])
+        self.assertEqual("blue", band.kwargs["color"])
+        self.assertEqual(0.2, band.kwargs["alpha"])
+        axes.errorbar.assert_not_called()
+
+    def test_multi_series_chart_allows_timeout_without_deviation_band(
+        self,
+    ) -> None:
+        with (
+            mock.patch("parse_results.Figure") as figure_constructor,
+            mock.patch("parse_results.FigureCanvasAgg"),
+        ):
+            axes = figure_constructor.return_value.subplots.return_value
+
+            write_png_multi_series_chart(
+                Path("chart.png"),
+                [
+                    ("Measured", []),
+                    ("Timeout", [(10.0, 30_000.0)]),
+                ],
+                title="Chart",
+                y_label="Latency",
+                x_label="Rate",
+                deviation_bands=[[], None],
+            )
+
+        axes.fill_between.assert_not_called()
+        self.assertEqual(1, axes.plot.call_count)
+
+    def test_saturation_goodput_lines_use_requested_colors(self) -> None:
+        result = Result(
+            path=Path("summary.json"),
+            summary=self._saturation_summary("NATS"),
+        )
+
+        with (
+            mock.patch(
+                "parse_results.write_png_multi_series_chart"
+            ) as write_multi_series,
+            mock.patch("parse_results.write_png_chart"),
+        ):
+            write_saturation_graphs(result)
+
+        self.assertEqual(
+            ["#1f77b4", "#2ca02c"],
+            write_multi_series.call_args_list[0].kwargs["colors"],
+        )
 
     def test_unsupported_workload_has_required_error(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

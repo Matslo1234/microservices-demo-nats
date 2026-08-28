@@ -239,8 +239,9 @@ spec:
         - -ec
         - |
           until nats --server="${NATS_URL}" --user="${NATS_USER}" --password="${NATS_PASSWORD}" \
-            --tlsca=/etc/nats-ca/ca.crt account info >/dev/null 2>&1; do
-            echo "waiting for NATS"
+            --tlsca=/etc/nats-ca/ca.crt --timeout=2s \
+            request '$JS.API.INFO' '' >/dev/null 2>&1; do
+            echo "waiting for JetStream"
             sleep 2
           done
           echo "watching JetStream max-delivery advisories"

@@ -138,6 +138,16 @@ kubectl -n nats wait --for=condition=complete job/nats-global-bootstrap --timeou
 kubectl -n nats wait --for=condition=complete job/nats-regional-bootstrap --timeout=10m
 ```
 
+For a development/test installation with one NATS server and no replicated
+JetStream copies, use `kubernetes-manifests/nats/single-worker` instead. It
+inherits the same TLS, JetStream encryption, persistent storage, resource
+requests/limits, security contexts, monitoring, and backup settings. This
+topology has no server-failure tolerance:
+
+```sh
+kubectl apply -k kubernetes-manifests/nats/single-worker
+```
+
 Optionally run the NATS acceptance checks:
 
 ```sh
