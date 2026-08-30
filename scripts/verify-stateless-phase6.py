@@ -492,6 +492,18 @@ def verify_release_manifests() -> None:
             "value: 10m",
             "checkout-saga-payment-authorization-v1",
             "checkout-saga-payment-v1",
+            "key: eks.amazonaws.com/nodegroup",
+            "- checkout-node",
+            "preferredDuringSchedulingIgnoredDuringExecution:",
+            "topologyKey: kubernetes.io/hostname",
+            "key: dedicated",
+            "value: checkoutservice",
+            "effect: NoSchedule",
+        )
+        forbid(
+            checkout,
+            "nodeSelector:",
+            "requiredDuringSchedulingIgnoredDuringExecution:",
         )
         message_operations = document(
             content, "Deployment", "messageoperationsservice"
@@ -513,6 +525,7 @@ def verify_release_manifests() -> None:
             require(
                 stateful_set,
                 appendfsync,
+                "--auto-aof-rewrite-percentage 0",
                 '--save ""',
             )
             forbid(stateful_set, "--save 3600 1")
@@ -729,11 +742,29 @@ def verify_release_manifests() -> None:
             f"cpu: {request}",
             f"cpu: {limit}",
         )
+    original_checkout = document(original, "Deployment", "checkoutservice")
+    require(
+        original_checkout,
+        "key: eks.amazonaws.com/nodegroup",
+        "- checkout-node",
+        "preferredDuringSchedulingIgnoredDuringExecution:",
+        "topologyKey: kubernetes.io/hostname",
+        "key: dedicated",
+        "value: checkoutservice",
+        "effect: NoSchedule",
+    )
+    forbid(
+        original_checkout,
+        "nodeSelector:",
+        "requiredDuringSchedulingIgnoredDuringExecution:",
+    )
     redis_cart = document(original, "Deployment", "redis-cart")
     require(
         redis_cart,
         "cpu: 50m",
         "cpu: 500m",
+        "- --auto-aof-rewrite-percentage",
+        '- "0"',
         "- --save",
         '- ""',
     )
@@ -767,6 +798,24 @@ def verify_release_manifests() -> None:
             f"cpu: {request}",
             f"cpu: {limit}",
         )
+    delayed_checkout = document(
+        delayed_original, "Deployment", "checkoutservice"
+    )
+    require(
+        delayed_checkout,
+        "key: eks.amazonaws.com/nodegroup",
+        "- checkout-node",
+        "preferredDuringSchedulingIgnoredDuringExecution:",
+        "topologyKey: kubernetes.io/hostname",
+        "key: dedicated",
+        "value: checkoutservice",
+        "effect: NoSchedule",
+    )
+    forbid(
+        delayed_checkout,
+        "nodeSelector:",
+        "requiredDuringSchedulingIgnoredDuringExecution:",
+    )
     delayed_redis_cart = document(
         delayed_original, "Deployment", "redis-cart"
     )
@@ -774,6 +823,8 @@ def verify_release_manifests() -> None:
         delayed_redis_cart,
         "cpu: 50m",
         "cpu: 500m",
+        "- --auto-aof-rewrite-percentage",
+        '- "0"',
         "- --save",
         '- ""',
     )

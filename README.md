@@ -5,7 +5,8 @@ Kubernetes cluster. It uses Kubernetes resources, a container registry, and
 NATS for the event-driven workflows; no provider-specific services are
 required.
 
-The goal of the project is to explore how NATS can be used for event-driven architecture. The user-facing functinallity is practically identical to the [original project's](https://github.com/GoogleCloudPlatform/microservices-demo).
+The goal of the project is to explore how NATS can be used for event-driven architecture.
+The user-facing functinallity is practically identical to the [original project's](https://github.com/GoogleCloudPlatform/microservices-demo).
 
 ## Architecture
 
@@ -171,7 +172,8 @@ Check the status of the deploy. Wait for all pods to start.
 kubectl get pods
 ```
 
-Once the deploy finishes you can access the application via the ip of the LoadBalancer. Use CLUSTER-IP if running the cluster locally or EXTERNAL-IP if running on a remote cluster.
+Once the deploy finishes you can access the application via the ip of the LoadBalancer.
+Use CLUSTER-IP if running the cluster locally or EXTERNAL-IP if running on a remote cluster.
 ```sh
 kubectl get service frontend-external
 ```
@@ -225,4 +227,6 @@ gateway PKI, application endpoints, and the complete deployment procedure, see t
 
 ## Development
 
-For local development you will need to build your own Docker images and publish them to your own Docker image repository. You can use [build-and-push-images.sh](scripts/build-and-push-images.sh) to build all of the images but you must provide your own username and image tag.
+For local development you will need to build your own Docker images and publish them to your own Docker image repository. 
+You can use [build-and-push-images.sh](scripts/build-and-push-images.sh) to build all of the images but you must provide
+your own username and image tag.

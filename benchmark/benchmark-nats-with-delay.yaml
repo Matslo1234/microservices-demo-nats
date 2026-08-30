@@ -592,7 +592,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-benchmarkservice
-        image: matslo123/benchmarkservice:v0.4.0@sha256:58ea489d8d2db6094d5e60d75d7fc03cc1de1484d5107ba6caef2fea5e654222
+        image: matslo123/benchmarkservice:v0.4.0@sha256:c18ae5f23585fd3fe864a1c0f08165cf337da5727bcb9c8b1892745b5ceb8ed5
         livenessProbe:
           httpGet:
             path: /healthz
@@ -784,6 +784,15 @@ spec:
         app: checkoutservice
     spec:
       affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - preference:
+              matchExpressions:
+              - key: eks.amazonaws.com/nodegroup
+                operator: In
+                values:
+                - checkout-node
+            weight: 100
         podAntiAffinity:
           preferredDuringSchedulingIgnoredDuringExecution:
           - podAffinityTerm:
@@ -893,6 +902,11 @@ spec:
         runAsUser: 1000
       serviceAccountName: checkoutservice
       terminationGracePeriodSeconds: 35
+      tolerations:
+      - effect: NoSchedule
+        key: dedicated
+        operator: Equal
+        value: checkoutservice
       topologySpreadConstraints:
       - labelSelector: {}
         matchLabelKeys:
@@ -1933,7 +1947,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-storefrontprojectionservice
-        image: matslo123/storefrontprojectionservice:v0.4.0@sha256:cf6fdfe30ede8ecf44102322e973380579fe02676fcf74fcfb849983f91a7234
+        image: matslo123/storefrontprojectionservice:v0.4.0@sha256:93c4edaf83e90d60a67e95668a5b3e76ac40958c419faded9fa2da6f8594ce68
         livenessProbe:
           failureThreshold: 6
           httpGet:
@@ -2018,6 +2032,7 @@ spec:
             --port 6379 \
             --appendonly yes \
             --appendfsync always \
+            --auto-aof-rewrite-percentage 0 \
             --save "" \
             --cluster-enabled yes \
             --cluster-config-file /data/nodes.conf \
@@ -2196,6 +2211,7 @@ spec:
             --port 6379 \
             --appendonly yes \
             --appendfsync always \
+            --auto-aof-rewrite-percentage 0 \
             --save "" \
             --cluster-enabled yes \
             --cluster-config-file /data/nodes.conf \
@@ -3194,7 +3210,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-benchmarkservice
-        image: matslo123/benchmarkservice:v0.4.0@sha256:58ea489d8d2db6094d5e60d75d7fc03cc1de1484d5107ba6caef2fea5e654222
+        image: matslo123/benchmarkservice:v0.4.0@sha256:c18ae5f23585fd3fe864a1c0f08165cf337da5727bcb9c8b1892745b5ceb8ed5
         imagePullPolicy: IfNotPresent
         livenessProbe:
           httpGet:

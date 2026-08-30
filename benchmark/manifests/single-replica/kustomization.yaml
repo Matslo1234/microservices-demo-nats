@@ -25,4 +25,5 @@ patches:
           --port 6379 \
           --appendonly yes \
           --appendfsync always \
+          --auto-aof-rewrite-percentage 0 \
           --save ""

@@ -91,7 +91,7 @@ class FaultToleranceTest(unittest.TestCase):
         )
         self.assertEqual("fault_tolerance", config.workload)
         self.assertEqual(150, config.duration_seconds)
-        self.assertEqual(3, config.worker_count)
+        self.assertEqual(5, config.worker_count)
         self.assertEqual(1, config.resource_sample_interval_seconds)
 
     @patch("fault_tolerance.subprocess.run")

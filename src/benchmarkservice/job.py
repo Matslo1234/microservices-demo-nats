@@ -15,7 +15,13 @@ from pathlib import Path
 from typing import Any, Callable
 
 from config import BenchmarkConfig
-from control import LEASE_KEY, RUN_PREFIX, RunConflict, utc_now
+from control import (
+    LEASE_KEY,
+    RUN_PREFIX,
+    RunConflict,
+    summary_overview,
+    utc_now,
+)
 from parallel import (
     archive_directory,
     extract_archive,
@@ -539,7 +545,7 @@ def main() -> int:
             value["status"].pop("lease_until", None)
             if message:
                 value["status"]["message"] = message
-            value["summary"] = summary
+            value["summary"] = summary_overview(summary)
             value["artifacts"] = artifacts
 
         heartbeat_stop.set()

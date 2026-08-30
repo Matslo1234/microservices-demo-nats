@@ -33,6 +33,7 @@ class ClosedMeasurements:
     submitted: int = 0
     completed: int = 0
     runs: int = 0
+    completed_values: list[int] = field(default_factory=list)
     p95_values: list[float] = field(default_factory=list)
 
 
@@ -571,9 +572,45 @@ def fault_tolerance_points(
     return sorted(successful_points), sorted(queued_points)
 
 
+def fault_tolerance_accepted_points(
+    result: Result,
+) -> list[tuple[float, float]]:
+    samples = _nested(result.summary, "fault_tolerance", "per_second")
+    if not isinstance(samples, list) or not samples:
+        raise ResultError(
+            f"{result.path}: fault_tolerance.per_second must be a non-empty list"
+        )
+
+    points: list[tuple[float, float]] = []
+    for index, sample in enumerate(samples):
+        if not isinstance(sample, dict):
+            raise ResultError(
+                f"{result.path}: fault_tolerance.per_second[{index}] "
+                "must be an object"
+            )
+        points.append(
+            (
+                _number(
+                    sample.get("elapsed_seconds"),
+                    f"fault_tolerance.per_second[{index}].elapsed_seconds",
+                    result.path,
+                ),
+                _number(
+                    sample.get("accepted_requests"),
+                    (
+                        f"fault_tolerance.per_second[{index}]."
+                        "accepted_requests"
+                    ),
+                    result.path,
+                ),
+            )
+        )
+    return sorted(points)
+
+
 def fault_tolerance_markers(
     result: Result,
-) -> list[tuple[float, str, str]]:
+) -> list[tuple[float, str, str, str]]:
     faults = _nested(result.summary, "fault_tolerance", "faults")
     if faults is None:
         return []
@@ -584,7 +621,7 @@ def fault_tolerance_markers(
         "paymentservice": "red",
         "shippingservice": "orange",
     }
-    markers: list[tuple[float, str, str]] = []
+    markers: list[tuple[float, str, str, str]] = []
     for index, fault in enumerate(faults):
         if not isinstance(fault, dict):
             raise ResultError(
@@ -595,9 +632,9 @@ def fault_tolerance_markers(
         color = service_colors.get(service)
         if color is None:
             continue
-        for field_name, action in (
-            ("disabled_at_elapsed_seconds", "disabled"),
-            ("reenabled_at_elapsed_seconds", "enabled"),
+        for field_name, action, marker in (
+            ("disabled_at_elapsed_seconds", "onemogočen", "v"),
+            ("reenabled_at_elapsed_seconds", "omogočen", "^"),
         ):
             value = fault.get(field_name)
             if value is None:
@@ -613,9 +650,70 @@ def fault_tolerance_markers(
                     f"{field_name} must not be negative"
                 )
             markers.append(
-                (elapsed_seconds, f"{service} {action}", color)
+                (elapsed_seconds, f"{service} {action}", color, marker)
             )
     return markers
+
+
+def fault_tolerance_submission_end(result: Result) -> float | None:
+    samples = _nested(result.summary, "fault_tolerance", "per_second")
+    if isinstance(samples, list):
+        drain_starts = [
+            _number(
+                sample.get("elapsed_seconds"),
+                f"fault_tolerance.per_second[{index}].elapsed_seconds",
+                result.path,
+            )
+            for index, sample in enumerate(samples)
+            if isinstance(sample, dict) and sample.get("phase") == "drain"
+        ]
+        if drain_starts:
+            submission_end = min(drain_starts)
+            if submission_end <= 0:
+                raise ResultError(
+                    f"{result.path}: fault-tolerance submission duration "
+                    "must be positive"
+                )
+            return submission_end
+
+    warmup_seconds = _number(
+        result.summary.get("warmup_seconds", 0),
+        "warmup_seconds",
+        result.path,
+    )
+    if warmup_seconds < 0:
+        raise ResultError(f"{result.path}: warmup_seconds must not be negative")
+
+    duration: float | None = None
+    for field_name in (
+        "steady_seconds",
+        "configured_steady_seconds",
+        "duration_seconds",
+    ):
+        value = result.summary.get(field_name)
+        if value is not None:
+            duration = _number(value, field_name, result.path)
+            break
+    if duration is None:
+        plan_duration = _nested(
+            result.summary,
+            "fault_tolerance",
+            "plan",
+            "duration_seconds",
+        )
+        if plan_duration is not None:
+            duration = _number(
+                plan_duration,
+                "fault_tolerance.plan.duration_seconds",
+                result.path,
+            )
+    if duration is None:
+        return None
+    if duration <= 0:
+        raise ResultError(
+            f"{result.path}: fault-tolerance submission duration must be positive"
+        )
+    return warmup_seconds + duration
 
 
 def _axis_limit(maximum: float, *, headroom: float = 1.0) -> float:
@@ -637,7 +735,9 @@ def write_png_chart(
     error_bars: list[tuple[float, float]] | None = None,
     deviation_band: list[tuple[float, float]] | None = None,
     vertical_lines: list[tuple[float, str, str]] | None = None,
+    event_markers: list[tuple[float, str, str, str]] | None = None,
     colors: list[str | None] | None = None,
+    x_limit: float | None = None,
 ) -> None:
     _write_png_series_chart(
         destination,
@@ -650,8 +750,10 @@ def write_png_chart(
             [deviation_band] if deviation_band is not None else None
         ),
         vertical_lines=vertical_lines,
+        event_markers=event_markers,
         show_legend=False,
         colors=colors,
+        x_limit=x_limit,
     )
 
 
@@ -666,6 +768,8 @@ def write_png_multi_series_chart(
     line_styles: list[str] | None = None,
     error_bars: list[list[tuple[float, float]]] | None = None,
     deviation_bands: list[list[tuple[float, float]] | None] | None = None,
+    vertical_lines: list[tuple[float, str, str]] | None = None,
+    event_markers: list[tuple[float, str, str, str]] | None = None,
     x_limit: float | None = None,
 ) -> None:
     _write_png_series_chart(
@@ -678,6 +782,8 @@ def write_png_multi_series_chart(
         line_styles=line_styles,
         error_bars=error_bars,
         deviation_bands=deviation_bands,
+        vertical_lines=vertical_lines,
+        event_markers=event_markers,
         x_limit=x_limit,
         show_legend=True,
     )
@@ -701,6 +807,7 @@ def _write_png_series_chart(
     error_bars: list[list[tuple[float, float]]] | None = None,
     deviation_bands: list[list[tuple[float, float]] | None] | None = None,
     vertical_lines: list[tuple[float, str, str]] | None = None,
+    event_markers: list[tuple[float, str, str, str]] | None = None,
     colors: list[str | None] | None = None,
     line_styles: list[str] | None = None,
     x_limit: float | None = None,
@@ -771,11 +878,26 @@ def _write_png_series_chart(
             f"cannot create {destination}: vertical lines must be finite "
             "and non-negative"
         )
+    if event_markers is not None and any(
+        position < 0
+        or not math.isfinite(position)
+        or marker not in {"v", "^"}
+        for position, _, _, marker in event_markers
+    ):
+        raise ResultError(
+            f"cannot create {destination}: event markers must have finite, "
+            "non-negative positions and use up or down triangles"
+        )
 
     maximum_x = max(point[0] for point in all_points)
     if vertical_lines:
         maximum_x = max(
             maximum_x, max(position for position, _, _ in vertical_lines)
+        )
+    if event_markers:
+        maximum_x = max(
+            maximum_x,
+            max(position for position, _, _, _ in event_markers),
         )
     if x_limit is not None and (
         not math.isfinite(x_limit) or x_limit <= 0 or x_limit < maximum_x
@@ -882,7 +1004,21 @@ def _write_png_series_chart(
                 label=label,
                 zorder=2,
             )
-    if show_legend or vertical_lines:
+    if event_markers:
+        marker_y_positions = [step / 16 for step in range(17)]
+        for position, label, color, marker in event_markers:
+            axes.scatter(
+                [position] * len(marker_y_positions),
+                marker_y_positions,
+                color=color,
+                marker=marker,
+                s=36,
+                label=label,
+                transform=axes.get_xaxis_transform(),
+                clip_on=False,
+                zorder=4,
+            )
+    if show_legend or vertical_lines or event_markers:
         axes.legend(loc="best")
 
     figure.savefig(
@@ -1303,16 +1439,32 @@ def write_average_saturation_graphs(
 
 def write_fault_tolerance_graphs(result: Result) -> list[Path]:
     successful, queued = fault_tolerance_points(result)
+    accepted = fault_tolerance_accepted_points(result)
     markers = fault_tolerance_markers(result)
+    submission_end = fault_tolerance_submission_end(result)
+    if submission_end is not None:
+        successful = [
+            point for point in successful if point[0] < submission_end
+        ]
+        accepted = [point for point in accepted if point[0] < submission_end]
+        queued = [point for point in queued if point[0] < submission_end]
+        markers = [
+            marker for marker in markers if marker[0] <= submission_end
+        ]
     base = result.path.with_suffix("")
     successful_path = base.with_name(f"{base.name}_successful_requests.png")
-    write_png_chart(
+    write_png_multi_series_chart(
         successful_path,
-        successful,
-        title=f"{result.path.stem}: successfully processed requests",
-        x_label="Elapsed time (s)",
-        y_label="Successful requests/s",
-        vertical_lines=markers,
+        [
+            ("Obdelana naročila", successful),
+            ("Sprejeta naročila", accepted),
+        ],
+        title="",
+        x_label="Čas (s)",
+        y_label="Število naročil",
+        event_markers=markers,
+        colors=["#1f77b4", "#2ca02c"],
+        x_limit=submission_end,
     )
     outputs = [successful_path]
     if queued:
@@ -1320,10 +1472,12 @@ def write_fault_tolerance_graphs(result: Result) -> list[Path]:
         write_png_chart(
             queued_path,
             queued,
-            title=f"{result.path.stem}: queued NATS events",
-            x_label="Elapsed time (s)",
-            y_label="Queued events",
-            vertical_lines=markers,
+            title="",
+            x_label="Čas (s)",
+            y_label="Št. čakajočih dogodkov",
+            event_markers=markers,
+            colors=["#1f77b4"],
+            x_limit=submission_end,
         )
         outputs.append(queued_path)
     return outputs
@@ -1351,6 +1505,7 @@ def collect_closed_measurements(results: list[Result]) -> dict[int, ClosedMeasur
         group.submitted += submitted
         group.completed += completed
         group.runs += 1
+        group.completed_values.append(completed)
         p95_value = _nested(business, "checkout_to_outcome", "p95_ms")
         if p95_value is not None:
             group.p95_values.append(
@@ -1797,6 +1952,40 @@ def write_closed_table(
     destination.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def _closed_latency_points(
+    groups: dict[int, ClosedMeasurements],
+) -> tuple[list[tuple[float, float]], list[tuple[float, float]]]:
+    points: list[tuple[float, float]] = []
+    deviations: list[tuple[float, float]] = []
+    for users, group in sorted(groups.items()):
+        if not group.p95_values:
+            continue
+        points.append(
+            (float(users), statistics.median(group.p95_values))
+        )
+        deviations.append(
+            (float(users), statistics.pstdev(group.p95_values))
+        )
+    return points, deviations
+
+
+def _closed_completed_points(
+    groups: dict[int, ClosedMeasurements],
+) -> tuple[list[tuple[float, float]], list[tuple[float, float]]]:
+    points: list[tuple[float, float]] = []
+    deviations: list[tuple[float, float]] = []
+    for users, group in sorted(groups.items()):
+        if not group.completed_values:
+            continue
+        points.append(
+            (float(users), statistics.mean(group.completed_values))
+        )
+        deviations.append(
+            (float(users), statistics.pstdev(group.completed_values))
+        )
+    return points, deviations
+
+
 def write_closed_graphs(
     folder: Path,
     results: list[Result],
@@ -1805,17 +1994,7 @@ def write_closed_graphs(
     infer_end: bool = False,
 ) -> list[Path]:
     outputs: list[Path] = []
-    latency_points: list[tuple[float, float]] = []
-    latency_errors: list[tuple[float, float]] = []
-    for users, group in sorted(groups.items()):
-        if not group.p95_values:
-            continue
-        latency_points.append(
-            (float(users), statistics.median(group.p95_values))
-        )
-        latency_errors.append(
-            (float(users), statistics.pstdev(group.p95_values))
-        )
+    latency_points, latency_errors = _closed_latency_points(groups)
     if latency_points:
         latency_path = folder / "closed_p95_latency.png"
         write_png_chart(
@@ -1827,6 +2006,19 @@ def write_closed_graphs(
             error_bars=latency_errors,
         )
         outputs.append(latency_path)
+
+    completed_points, completed_errors = _closed_completed_points(groups)
+    if completed_points:
+        completed_path = folder / "closed_completed_orders.png"
+        write_png_chart(
+            completed_path,
+            completed_points,
+            title="",
+            x_label="Št. sočasnih uporabnikov",
+            y_label="Št. zaključenih naročil",
+            error_bars=completed_errors,
+        )
+        outputs.append(completed_path)
 
     waiting_by_users, waiting_deviations, waiting_end_seconds = (
         _collect_closed_nats_waiting_statistics(
@@ -1851,6 +2043,74 @@ def write_closed_graphs(
         )
         outputs.append(waiting_path)
     return outputs
+
+
+def write_closed_comparison_graphs(
+    folder: Path,
+    groups: dict[int, ClosedMeasurements],
+    comparison_folder: Path,
+) -> list[Path]:
+    comparison_results = [
+        result
+        for result in find_results(comparison_folder)
+        if result.summary.get("workload") == "closed"
+    ]
+    if not comparison_results:
+        raise ResultError(
+            f"{comparison_folder}: --closed-compare folder must contain "
+            "closed-loop results"
+        )
+
+    current_points, current_deviations = _closed_latency_points(groups)
+    comparison_groups = collect_closed_measurements(comparison_results)
+    comparison_points, comparison_deviations = _closed_latency_points(
+        comparison_groups
+    )
+    if not current_points or not comparison_points:
+        raise ResultError(
+            "--closed-compare requires P95 latency measurements in both "
+            "folders"
+        )
+
+    latency_destination = folder / "closed_p95_latency_comparison.png"
+    write_png_multi_series_chart(
+        latency_destination,
+        [
+            ("Prvotna aplikacija", current_points),
+            ("Predelana aplikacija", comparison_points),
+        ],
+        title="",
+        x_label="Št. sočasnih uporabnikov",
+        y_label="P95 trajanje naročila (ms)",
+        error_bars=[current_deviations, comparison_deviations],
+        colors=["#1f77b4", "#2ca02c"],
+    )
+
+    current_completed, current_completed_deviations = (
+        _closed_completed_points(groups)
+    )
+    comparison_completed, comparison_completed_deviations = (
+        _closed_completed_points(comparison_groups)
+    )
+    completed_destination = (
+        folder / "closed_completed_orders_comparison.png"
+    )
+    write_png_multi_series_chart(
+        completed_destination,
+        [
+            ("Prvotna aplikacija", current_completed),
+            ("Predelana aplikacija", comparison_completed),
+        ],
+        title="",
+        x_label="Št. sočasnih uporabnikov",
+        y_label="Št. zaključenih naročil",
+        error_bars=[
+            current_completed_deviations,
+            comparison_completed_deviations,
+        ],
+        colors=["#1f77b4", "#2ca02c"],
+    )
+    return [latency_destination, completed_destination]
 
 
 def write_resource_usage_tables(
@@ -1895,6 +2155,7 @@ def process_folder(
     saturation_limit: float | None = None,
     closed_infer_end: bool = False,
     saturation_add_accepted: bool = False,
+    closed_compare: Path | None = None,
 ) -> list[Path]:
     results = find_results(folder)
     for result in results:
@@ -1924,6 +2185,17 @@ def process_folder(
                 closed_measurements,
                 infer_end=closed_infer_end,
             )
+        )
+        if closed_compare is not None:
+            outputs.extend(
+                write_closed_comparison_graphs(
+                    folder, closed_measurements, closed_compare
+                )
+            )
+    elif closed_compare is not None:
+        raise ResultError(
+            "--closed-compare requires the current folder to contain "
+            "closed-loop results"
         )
 
     saturation_results = [
@@ -1980,6 +2252,15 @@ def parser() -> argparse.ArgumentParser:
         ),
     )
     argument_parser.add_argument(
+        "--closed-compare",
+        type=Path,
+        metavar="RESULTS_FOLDER",
+        help=(
+            "compare closed-loop P95 latency with measurements from another "
+            "results folder"
+        ),
+    )
+    argument_parser.add_argument(
         "--saturation-add-accepted",
         action="store_true",
         help=(
@@ -1997,6 +2278,7 @@ def main(arguments: list[str] | None = None) -> int:
             options.saturation_limit,
             options.closed_infer_end,
             options.saturation_add_accepted,
+            options.closed_compare,
         )
     except ResultError as error:
         print(error, file=sys.stderr)

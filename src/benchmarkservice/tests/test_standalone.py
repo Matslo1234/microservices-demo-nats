@@ -70,7 +70,7 @@ class StandaloneTest(unittest.TestCase):
         self.assertEqual(
             "https://metrics.example/snapshot", config.metrics_url
         )
-        self.assertEqual(3, config.worker_count)
+        self.assertEqual(5, config.worker_count)
         self.assertEqual(
             config.metrics_url, config.for_worker(2).metrics_url
         )

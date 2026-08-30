@@ -19,6 +19,7 @@ patches:
           --port 6379 \
           --appendonly yes \
           --appendfsync always \
+          --auto-aof-rewrite-percentage 0 \
           --save "" \
           --cluster-enabled yes \
           --cluster-config-file /data/nodes.conf \
@@ -42,6 +43,7 @@ patches:
           --port 6379 \
           --appendonly yes \
           --appendfsync always \
+          --auto-aof-rewrite-percentage 0 \
           --save "" \
           --cluster-enabled yes \
           --cluster-config-file /data/nodes.conf \

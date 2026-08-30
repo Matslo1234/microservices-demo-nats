@@ -123,7 +123,7 @@ class BenchmarkConfigTest(unittest.TestCase):
         )
         self.assertIsNone(config.metrics_url)
 
-    def test_open_workload_is_split_at_100_requests_per_second(self):
+    def test_open_workload_is_split_at_50_requests_per_second(self):
         config = BenchmarkConfig.from_request(
             {**self.URLS, "workload": "open", "arrival_rate": 250},
             "NATS",
@@ -133,16 +133,16 @@ class BenchmarkConfigTest(unittest.TestCase):
             config.for_worker(index) for index in range(config.worker_count)
         ]
 
-        self.assertEqual(3, config.worker_count)
+        self.assertEqual(5, config.worker_count)
         self.assertAlmostEqual(
             250, sum(worker.arrival_rate for worker in workers)
         )
         self.assertEqual(
-            [100.0, 100.0, 50.0],
+            [50.0, 50.0, 50.0, 50.0, 50.0],
             [worker.arrival_rate for worker in workers],
         )
         self.assertTrue(
-            all(worker.arrival_rate <= 100 for worker in workers)
+            all(worker.arrival_rate <= 50 for worker in workers)
         )
         self.assertTrue(workers[0].collect_resources)
         self.assertFalse(workers[1].collect_resources)
@@ -181,9 +181,9 @@ class BenchmarkConfigTest(unittest.TestCase):
             "NATS",
         )
 
-        self.assertEqual(3, config.worker_count)
+        self.assertEqual(5, config.worker_count)
         self.assertEqual(
-            [100.0, 100.0, 50.0],
+            [50.0, 50.0, 50.0, 50.0, 50.0],
             [
                 config.for_worker(index).arrival_rate
                 for index in range(config.worker_count)
@@ -192,7 +192,7 @@ class BenchmarkConfigTest(unittest.TestCase):
 
     def test_threshold_values_keep_a_single_worker(self):
         open_config = BenchmarkConfig.from_request(
-            {**self.URLS, "workload": "open", "arrival_rate": 100},
+            {**self.URLS, "workload": "open", "arrival_rate": 50},
             "GRPC",
         )
         closed_config = BenchmarkConfig.from_request(
@@ -217,9 +217,9 @@ class BenchmarkConfigTest(unittest.TestCase):
 
         self.assertEqual(12, config.saturation_step_count)
         self.assertEqual(120, config.saturation_effective_max_rate)
-        self.assertEqual(2, config.worker_count)
+        self.assertEqual(3, config.worker_count)
         self.assertEqual(
-            [120, 120],
+            [120, 120, 120],
             [
                 config.for_worker(index).saturation_effective_max_rate
                 for index in range(config.worker_count)
@@ -263,7 +263,7 @@ class BenchmarkConfigTest(unittest.TestCase):
 
         self.assertEqual(75, config.saturation_start_rate)
         self.assertEqual(105, config.saturation_effective_max_rate)
-        self.assertEqual(2, config.worker_count)
+        self.assertEqual(3, config.worker_count)
 
         with self.assertRaisesRegex(
             ConfigError,

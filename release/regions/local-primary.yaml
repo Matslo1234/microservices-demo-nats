@@ -2948,7 +2948,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-benchmarkservice
-        image: matslo123/benchmarkservice:v0.4.0@sha256:58ea489d8d2db6094d5e60d75d7fc03cc1de1484d5107ba6caef2fea5e654222
+        image: matslo123/benchmarkservice:v0.4.0@sha256:4e686acd6319fa47abba2cf5773bd605ef5fe6e7078b62800c2518f97e58c278
         livenessProbe:
           httpGet:
             path: /healthz
@@ -4351,7 +4351,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-storefrontprojectionservice
-        image: matslo123/storefrontprojectionservice:v0.4.0@sha256:cf6fdfe30ede8ecf44102322e973380579fe02676fcf74fcfb849983f91a7234
+        image: matslo123/storefrontprojectionservice:v0.4.0@sha256:93c4edaf83e90d60a67e95668a5b3e76ac40958c419faded9fa2da6f8594ce68
         livenessProbe:
           failureThreshold: 6
           httpGet:

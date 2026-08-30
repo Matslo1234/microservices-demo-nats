@@ -8,7 +8,7 @@ import unittest
 import zipfile
 
 from config import ConfigError
-from control import BenchmarkManager, RunConflict
+from control import BenchmarkManager, RunConflict, summary_overview
 from kubernetes_jobs import JobNotFound
 from shared_store import RecordNotFound, RevisionConflict, StoredRecord
 
@@ -102,6 +102,35 @@ class BenchmarkControlTest(unittest.TestCase):
             **values,
         }
 
+    def test_summary_overview_excludes_unbounded_detail(self):
+        summary = {
+            "application_type": "NATS",
+            "workload": "saturation",
+            "worker_count": 2,
+            "business": {"completed": 123},
+            "capacity": {"sustainable": True},
+            "resources": {"per_second": [{"elapsed_seconds": 1}]},
+            "nats": {"consumer_pending": {"series": [1, 2, 3]}},
+            "saturation": {"rungs": [{"per_second": [1, 2, 3]}]},
+            "fault_tolerance": {"per_second": [1, 2, 3]},
+            "outstanding_orders": {"series": [1, 2, 3]},
+        }
+
+        overview = summary_overview(summary)
+
+        self.assertEqual(
+            {
+                "application_type": "NATS",
+                "workload": "saturation",
+                "worker_count": 2,
+                "business": {"completed": 123},
+                "capacity": {"sustainable": True},
+            },
+            overview,
+        )
+        overview["business"]["completed"] = 0
+        self.assertEqual(123, summary["business"]["completed"])
+
     def test_concurrent_api_replicas_submit_only_one_job(self):
         store, jobs = MemoryStore(), FakeJobs()
         managers = [self.manager(store, jobs), self.manager(store, jobs)]
@@ -150,8 +179,8 @@ class BenchmarkControlTest(unittest.TestCase):
             self.request(workload="open", arrival_rate=250)
         )
 
-        self.assertEqual([3], jobs.worker_counts)
-        self.assertEqual(3, result["status"]["worker_count"])
+        self.assertEqual([5], jobs.worker_counts)
+        self.assertEqual(5, result["status"]["worker_count"])
 
     def test_fault_tolerance_requires_the_external_controller(self):
         store, jobs = MemoryStore(), FakeJobs()

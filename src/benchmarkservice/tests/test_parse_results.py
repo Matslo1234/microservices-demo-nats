@@ -25,6 +25,7 @@ from parse_results import (
     saturation_latency_timeout_points,
     saturation_points,
     write_average_saturation_graphs,
+    write_fault_tolerance_graphs,
     write_png_chart,
     write_png_multi_series_chart,
     write_resource_usage_tables,
@@ -55,6 +56,7 @@ class ParseResultsTest(unittest.TestCase):
                     folder / "closed_results.tex",
                     folder / "resource-usage.tex",
                     folder / "closed_p95_latency.png",
+                    folder / "closed_completed_orders.png",
                 ],
                 outputs,
             )
@@ -63,6 +65,67 @@ class ParseResultsTest(unittest.TestCase):
             self.assertIn(r"10 & 5 & 100.00\% & 50.000 & 0.000", table)
             self.assertIn(r"1500 & 20 & 75.00\% & 200.000 & 100.000", table)
             self.assert_png(folder / "closed_p95_latency.png")
+            self.assert_png(folder / "closed_completed_orders.png")
+
+    def test_writes_closed_latency_comparison_graph(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            folder = root / "current"
+            comparison = root / "comparison"
+            folder.mkdir()
+            comparison.mkdir()
+            self._write_result(
+                folder / "run-a.json", "closed", 10, 10, 8, 100
+            )
+            self._write_result(
+                folder / "run-b.json", "closed", 10, 10, 10, 120
+            )
+            self._write_result(
+                comparison / "run-a.json", "closed", 10, 20, 14, 200
+            )
+            self._write_result(
+                comparison / "run-b.json", "closed", 10, 20, 18, 240
+            )
+
+            with mock.patch(
+                "parse_results.write_png_multi_series_chart",
+                wraps=write_png_multi_series_chart,
+            ) as write_chart:
+                outputs = process_folder(
+                    folder, closed_compare=comparison
+                )
+
+            comparison_path = folder / "closed_p95_latency_comparison.png"
+            completed_path = (
+                folder / "closed_completed_orders_comparison.png"
+            )
+            self.assertIn(comparison_path, outputs)
+            self.assertIn(completed_path, outputs)
+            self.assert_png(comparison_path)
+            self.assert_png(completed_path)
+            latency_call, completed_call = write_chart.call_args_list
+            self.assertEqual(
+                [
+                    ("Prvotna aplikacija", [(10.0, 110.0)]),
+                    ("Predelana aplikacija", [(10.0, 220.0)]),
+                ],
+                latency_call.args[1],
+            )
+            self.assertEqual(
+                [[(10.0, 10.0)], [(10.0, 20.0)]],
+                latency_call.kwargs["error_bars"],
+            )
+            self.assertEqual(
+                [
+                    ("Prvotna aplikacija", [(10.0, 9.0)]),
+                    ("Predelana aplikacija", [(10.0, 16.0)]),
+                ],
+                completed_call.args[1],
+            )
+            self.assertEqual(
+                [[(10.0, 1.0)], [(10.0, 2.0)]],
+                completed_call.kwargs["error_bars"],
+            )
 
     def test_writes_closed_nats_waiting_series_per_user_count(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -471,12 +534,20 @@ class ParseResultsTest(unittest.TestCase):
                     "--saturation-limit",
                     "15.5",
                     "--closed-infer-end",
+                    "--closed-compare",
+                    "comparison-results",
                     "--saturation-add-accepted",
                 ]
             )
 
         self.assertEqual(0, exit_code)
-        process.assert_called_once_with(Path("results"), 15.5, True, True)
+        process.assert_called_once_with(
+            Path("results"),
+            15.5,
+            True,
+            True,
+            Path("comparison-results"),
+        )
 
     def test_process_folder_applies_saturation_limit_to_graphs(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -558,7 +629,7 @@ class ParseResultsTest(unittest.TestCase):
             mock.patch(
                 "parse_results.write_png_multi_series_chart"
             ) as write_multi_series,
-            mock.patch("parse_results.write_png_chart") as write_chart,
+            mock.patch("parse_results.write_png_chart"),
         ):
             outputs = write_average_saturation_graphs(Path("results"), results)
 
@@ -1056,6 +1127,44 @@ class ParseResultsTest(unittest.TestCase):
             for output in outputs:
                 self.assert_png(output)
 
+    def test_fault_tolerance_graph_includes_accepted_orders(self) -> None:
+        result = Result(
+            Path("fault-summary.json"),
+            self._fault_tolerance_summary("NATS"),
+        )
+
+        with (
+            mock.patch(
+                "parse_results.write_png_multi_series_chart"
+            ) as write_multi_series,
+            mock.patch("parse_results.write_png_chart") as write_chart,
+        ):
+            write_fault_tolerance_graphs(result)
+
+        successful_call = write_multi_series.call_args
+        self.assertEqual(
+            [
+                (
+                    "Uspešno obdelana naročila",
+                    [(0.0, 10.0), (1.0, 7.0)],
+                ),
+                ("Sprejeta naročila", [(0.0, 12.0), (1.0, 9.0)]),
+            ],
+            successful_call.args[1],
+        )
+        self.assertEqual(
+            ["#1f77b4", "#2ca02c"], successful_call.kwargs["colors"]
+        )
+        self.assertEqual(
+            fault_tolerance_markers(result),
+            successful_call.kwargs["event_markers"],
+        )
+        self.assertEqual(2.0, successful_call.kwargs["x_limit"])
+        self.assertEqual(
+            [(1.0, 4.0)], write_chart.call_args.args[1]
+        )
+        self.assertEqual(2.0, write_chart.call_args.kwargs["x_limit"])
+
     def test_fault_tolerance_markers_use_service_colors(self) -> None:
         summary = self._fault_tolerance_summary("NATS")
 
@@ -1065,13 +1174,43 @@ class ParseResultsTest(unittest.TestCase):
 
         self.assertEqual(
             [
-                (0.2, "paymentservice disabled", "red"),
-                (0.4, "paymentservice enabled", "red"),
-                (0.6, "shippingservice disabled", "orange"),
-                (0.8, "shippingservice enabled", "orange"),
+                (0.2, "paymentservice onemogočen", "red", "v"),
+                (0.4, "paymentservice omogočen", "red", "^"),
+                (0.6, "shippingservice onemogočen", "orange", "v"),
+                (0.8, "shippingservice omogočen", "orange", "^"),
             ],
             markers,
         )
+
+    def test_chart_draws_directional_event_marker_columns(self) -> None:
+        with (
+            mock.patch("parse_results.Figure") as figure_constructor,
+            mock.patch("parse_results.FigureCanvasAgg"),
+        ):
+            axes = figure_constructor.return_value.subplots.return_value
+
+            write_png_chart(
+                Path("chart.png"),
+                [(0.0, 1.0), (3.0, 2.0)],
+                title="Chart",
+                y_label="Values",
+                event_markers=[
+                    (1.0, "disabled", "red", "v"),
+                    (2.0, "enabled", "red", "^"),
+                ],
+            )
+
+        disabled, enabled = axes.scatter.call_args_list
+        expected_y_positions = [step / 16 for step in range(17)]
+        self.assertEqual(
+            ([1.0] * 17, expected_y_positions), disabled.args
+        )
+        self.assertEqual("v", disabled.kwargs["marker"])
+        self.assertEqual(
+            ([2.0] * 17, expected_y_positions), enabled.args
+        )
+        self.assertEqual("^", enabled.kwargs["marker"])
+        axes.axvline.assert_not_called()
 
     def test_rejects_folder_without_result_summaries(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1254,6 +1393,8 @@ class ParseResultsTest(unittest.TestCase):
         return {
             "application_type": application_type,
             "workload": "fault_tolerance",
+            "warmup_seconds": 0,
+            "steady_seconds": 2,
             "business": {"submitted": 20, "completed": 17},
             "fault_tolerance": {
                 "faults": [
@@ -1271,13 +1412,22 @@ class ParseResultsTest(unittest.TestCase):
                 "per_second": [
                     {
                         "elapsed_seconds": 0,
+                        "accepted_requests": 12,
                         "successfully_processed": 10,
                         "nats_waiting_events": None,
                     },
                     {
                         "elapsed_seconds": 1,
+                        "accepted_requests": 9,
                         "successfully_processed": 7,
                         "nats_waiting_events": 4,
+                    },
+                    {
+                        "elapsed_seconds": 2,
+                        "phase": "drain",
+                        "accepted_requests": 0,
+                        "successfully_processed": 3,
+                        "nats_waiting_events": 2,
                     },
                 ]
             },

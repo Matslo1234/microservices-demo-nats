@@ -23,6 +23,39 @@ from shared_store import (
 
 ACTIVE_STATES = {"submitted", "starting", "running", "stopping"}
 TERMINAL_STATES = {"completed", "failed", "stopped", "interrupted"}
+
+
+SUMMARY_OVERVIEW_FIELDS = (
+    "application_type",
+    "workload",
+    "worker_count",
+    "users",
+    "arrival_rate",
+    "warmup_seconds",
+    "steady_seconds",
+    "configured_steady_seconds",
+    "drain_seconds",
+    "business",
+    "capacity",
+)
+
+
+def summary_overview(summary: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Return the bounded run summary kept in the JetStream KV record.
+
+    Detailed resource, NATS, fault-tolerance, saturation, and per-second data
+    remains available in the summary.json Object Store artifact. Keeping those
+    growing sections out of KV prevents long runs from exceeding max_payload.
+    """
+    if summary is None:
+        return None
+    return {
+        field: copy.deepcopy(summary[field])
+        for field in SUMMARY_OVERVIEW_FIELDS
+        if field in summary
+    }
+
+
 RUN_PREFIX = "run."
 LEASE_KEY = "lease.active"
 SCHEMA_VERSION = 1

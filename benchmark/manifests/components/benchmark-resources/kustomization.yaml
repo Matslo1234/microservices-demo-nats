@@ -8,6 +8,34 @@ patches:
     group: apps
     version: v1
     kind: Deployment
+    name: checkoutservice
+  patch: |-
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: checkoutservice
+    spec:
+      template:
+        spec:
+          affinity:
+            nodeAffinity:
+              preferredDuringSchedulingIgnoredDuringExecution:
+              - weight: 100
+                preference:
+                  matchExpressions:
+                  - key: eks.amazonaws.com/nodegroup
+                    operator: In
+                    values:
+                    - checkout-node
+          tolerations:
+          - key: dedicated
+            operator: Equal
+            value: checkoutservice
+            effect: NoSchedule
+- target:
+    group: apps
+    version: v1
+    kind: Deployment
     name: currencyservice|productcatalogservice
   patch: |-
     apiVersion: apps/v1

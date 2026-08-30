@@ -84,7 +84,7 @@ retain `failure_code`, `safe_message`, `failure_message`, and
 `failure_received_at`; notification and cart-clear failures have their own
 receipt-time fields.
 
-Open-loop, saturation, and fault-tolerance runs use one worker for every 100
+Open-loop, saturation, and fault-tolerance runs use one worker for every 50
 requested orders/s. Closed-loop runs use one worker for every 1,000 users, and
 divide the requested user spawn rate evenly across those workers. Worker start
 times and saturation rung decisions are synchronized. Worker zero samples
@@ -201,6 +201,14 @@ python src/benchmarkservice/standalone.py \
   --saturation-max-rate 1000 \
   --output ./benchmark-results
 ```
+
+### Preferred checkout nodes
+
+Every benchmark prefers the EKS node group `checkout-node` for checkoutservice
+and tolerates `dedicated=checkoutservice:NoSchedule`. Its replicas also prefer
+different hostnames. These are scheduling preferences rather than requirements,
+so the same manifests remain deployable on a single-node cluster and on
+clusters without that node group.
 
 When the original GRPC application is deployed separately instead of through
 `benchmark/benchmark-original-app.yaml`, deploy its metrics gateway with:
