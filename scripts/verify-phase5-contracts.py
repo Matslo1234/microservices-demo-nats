@@ -77,7 +77,7 @@ forbid(server_path, payment_server, "JSON.stringify(call.request)")
 shipping_path = ROOT / "src" / "shippingservice"
 shipping = "\n".join(item.read_text() for item in shipping_path.glob("*.go"))
 require(shipping_path, shipping,
-        "shipping-commands-v1", "calculate-order-quote", "create-shipment", "cancel-shipment",
+        "shipping-order-quotes-v1", "shipping-create-shipments-v1", "shipping-cancel-shipments-v1", "calculate-order-quote", "create-shipment", "cancel-shipment",
         "SHIPPING_FAILURE_MODE", "SHIPPING_PROVIDER_SECRET", "newShippingProvider")
 forbid(shipping_path, shipping,
        "openShippingProviderStore", "shippingProviderStore", "SHIPPING_STORE_PATH",

@@ -24,11 +24,13 @@ import (
 )
 
 const (
-	shippingOrderQuoteSlot          = "shipping.order-quote"
-	shippingCreateShipmentSlot      = "shipping.create-shipment"
-	shippingCancelShipmentSlot      = "shipping.cancel-shipment"
-	shippingCartQuoteCommandSubject = "boutique.cmd.shipping.calculate-cart-quote.v1"
-	shippingCreateShipmentSubject   = "boutique.cmd.shipping.create-shipment.v1"
+	shippingOrderQuoteSlot           = "shipping.order-quote"
+	shippingCreateShipmentSlot       = "shipping.create-shipment"
+	shippingCancelShipmentSlot       = "shipping.cancel-shipment"
+	shippingCartQuoteCommandSubject  = "boutique.cmd.shipping.calculate-cart-quote.v1"
+	shippingOrderQuoteCommandSubject = "boutique.cmd.shipping.calculate-order-quote.v1"
+	shippingCreateShipmentSubject    = "boutique.cmd.shipping.create-shipment.v1"
+	shippingCancelShipmentSubject    = "boutique.cmd.shipping.cancel-shipment.v1"
 )
 
 type shippingOutcome struct {
@@ -167,7 +169,7 @@ func buildShippingOutcome(
 			return shippingOutcome{}, errors.New("shipping cart quote user does not match the envelope aggregate")
 		}
 		return buildShippingCartOutcome(envelope, command.Cart)
-	case "boutique.cmd.shipping.calculate-order-quote.v1":
+	case shippingOrderQuoteCommandSubject:
 		command := &commandsv1.ShippingCalculateOrderQuoteCommand{}
 		if err := envelope.Data.UnmarshalTo(command); err != nil {
 			return shippingOutcome{}, err
@@ -261,7 +263,7 @@ func buildShippingOutcome(
 				TrackingId: provider.trackingID(command.IdempotencyKey),
 			},
 		)
-	case "boutique.cmd.shipping.cancel-shipment.v1":
+	case shippingCancelShipmentSubject:
 		command := &commandsv1.ShippingCancelShipmentCommand{}
 		if err := envelope.Data.UnmarshalTo(command); err != nil {
 			return shippingOutcome{}, err

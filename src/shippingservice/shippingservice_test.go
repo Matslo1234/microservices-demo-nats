@@ -66,8 +66,8 @@ func (stub *shippingJetStreamStub) UpdateConsumer(stream string, config *nats.Co
 func TestShippingCreatesConsumersBeforeBinding(t *testing.T) {
 	tests := []shippingConsumerDefinition{
 		shippingCartConsumerDefinition(),
-		shippingCommandConsumerDefinition(),
 	}
+	tests = append(tests, shippingCommandConsumerDefinitions()...)
 	for _, definition := range tests {
 		t.Run(definition.durable, func(t *testing.T) {
 			stub := &shippingJetStreamStub{infoErr: nats.ErrConsumerNotFound}
@@ -385,7 +385,7 @@ func TestShippingProcessesStreamBeforeFetchBatchCloses(t *testing.T) {
 	go func() {
 		processShippingStream(
 			messages,
-			shippingCommandBatchSize,
+			32,
 			1,
 			func(*nats.Msg) { close(processed) },
 		)

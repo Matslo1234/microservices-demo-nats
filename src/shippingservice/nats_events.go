@@ -27,17 +27,15 @@ import (
 )
 
 const (
-	shippingCartConsumer      = "shipping-cart-quotes-v1"
-	shippingQuoteSubject      = "boutique.evt.shipping.cart-quote-updated.v1"
-	shippingCartBatchSize     = 32
-	shippingCartWorkers       = 32
-	shippingCommandConsumer   = "shipping-commands-v1"
-	shippingCartMaxPending    = 1000
-	shippingCommandBatchSize  = 256
-	shippingCommandMaxPending = 512
-	// Preserve headroom for the 300 order/s benchmark with two fixed replicas,
-	// including when delayed shipments temporarily occupy worker lanes.
-	shippingCommandWorkers = 96
+	shippingCartConsumer           = "shipping-cart-quotes-v1"
+	shippingQuoteSubject           = "boutique.evt.shipping.cart-quote-updated.v1"
+	shippingCartBatchSize          = 32
+	shippingCartWorkers            = 32
+	shippingCartMaxPending         = 1000
+	legacyShippingCommandConsumer  = "shipping-commands-v1"
+	shippingOrderQuoteConsumer     = "shipping-order-quotes-v1"
+	shippingCreateShipmentConsumer = "shipping-create-shipments-v1"
+	shippingCancelShipmentConsumer = "shipping-cancel-shipments-v1"
 )
 
 type shippingConsumerDefinition struct {
@@ -45,6 +43,9 @@ type shippingConsumerDefinition struct {
 	durable       string
 	filterSubject string
 	maxPending    int
+	batchSize     int
+	workers       int
+	queueDepth    int
 }
 
 func shippingCartConsumerDefinition() shippingConsumerDefinition {
@@ -54,29 +55,42 @@ func shippingCartConsumerDefinition() shippingConsumerDefinition {
 	}
 }
 
-func shippingCommandConsumerDefinition() shippingConsumerDefinition {
-	return shippingConsumerDefinition{
-		stream: "BOUTIQUE_COMMANDS", durable: shippingCommandConsumer,
-		filterSubject: "boutique.cmd.shipping.>", maxPending: shippingCommandMaxPending,
+func shippingCommandConsumerDefinitions() []shippingConsumerDefinition {
+	return []shippingConsumerDefinition{
+		{
+			stream: "BOUTIQUE_COMMANDS", durable: shippingOrderQuoteConsumer,
+			filterSubject: shippingOrderQuoteCommandSubject,
+			maxPending:    1024, batchSize: 512, workers: 32, queueDepth: 512,
+		},
+		{
+			stream: "BOUTIQUE_COMMANDS", durable: shippingCreateShipmentConsumer,
+			filterSubject: shippingCreateShipmentSubject,
+			maxPending:    2048, batchSize: 512, workers: 96, queueDepth: 1024,
+		},
+		{
+			stream: "BOUTIQUE_COMMANDS", durable: shippingCancelShipmentConsumer,
+			filterSubject: shippingCancelShipmentSubject,
+			maxPending:    256, batchSize: 128, workers: 16, queueDepth: 128,
+		},
 	}
 }
 
 type shippingEventWorker struct {
-	nc                  *nats.Conn
-	js                  nats.JetStreamContext
-	subscription        *nats.Subscription
-	commandSubscription *nats.Subscription
-	provider            *shippingProvider
-	failureMode         string
-	processingTime      time.Duration
-	publishTimeout      time.Duration
-	stop                chan struct{}
-	failed              chan error
-	ready               atomic.Bool
-	lifecycleFailed     atomic.Bool
-	wg                  sync.WaitGroup
-	failureOnce         sync.Once
-	closeOnce           sync.Once
+	nc                   *nats.Conn
+	js                   nats.JetStreamContext
+	subscription         *nats.Subscription
+	commandSubscriptions []*nats.Subscription
+	provider             *shippingProvider
+	failureMode          string
+	processingTime       time.Duration
+	publishTimeout       time.Duration
+	stop                 chan struct{}
+	failed               chan error
+	ready                atomic.Bool
+	lifecycleFailed      atomic.Bool
+	wg                   sync.WaitGroup
+	failureOnce          sync.Once
+	closeOnce            sync.Once
 }
 
 func startShippingEvents() (*shippingEventWorker, error) {
@@ -167,34 +181,45 @@ func startShippingEvents() (*shippingEventWorker, error) {
 		nc.Close()
 		return nil, fmt.Errorf("bind shipping cart consumer: %w", err)
 	}
-	commandConsumer := shippingCommandConsumerDefinition()
-	if err := worker.ensureConsumer(commandConsumer); err != nil {
+	commandConsumers := shippingCommandConsumerDefinitions()
+	if deleteErr := worker.js.DeleteConsumer("BOUTIQUE_COMMANDS", legacyShippingCommandConsumer); deleteErr != nil &&
+		!errors.Is(deleteErr, nats.ErrConsumerNotFound) {
 		nc.Close()
-		return nil, fmt.Errorf("ensure shipping command consumer: %w", err)
+		return nil, fmt.Errorf("delete legacy shipping command consumer: %w", deleteErr)
 	}
-	worker.commandSubscription, err = worker.js.PullSubscribe(
-		commandConsumer.filterSubject,
-		commandConsumer.durable,
-		nats.Bind(commandConsumer.stream, commandConsumer.durable),
-	)
-	if err != nil {
-		nc.Close()
-		return nil, fmt.Errorf("bind shipping command consumer: %w", err)
+	for _, commandConsumer := range commandConsumers {
+		if err := worker.ensureConsumer(commandConsumer); err != nil {
+			nc.Close()
+			return nil, fmt.Errorf("ensure shipping command consumer %s: %w", commandConsumer.durable, err)
+		}
+		subscription, subscribeErr := worker.js.PullSubscribe(
+			commandConsumer.filterSubject,
+			commandConsumer.durable,
+			nats.Bind(commandConsumer.stream, commandConsumer.durable),
+		)
+		if subscribeErr != nil {
+			nc.Close()
+			return nil, fmt.Errorf("bind shipping command consumer %s: %w", commandConsumer.durable, subscribeErr)
+		}
+		worker.commandSubscriptions = append(worker.commandSubscriptions, subscription)
 	}
 	worker.ready.Store(true)
-	worker.wg.Add(2)
+	worker.wg.Add(1 + len(commandConsumers))
 	go func() {
 		defer worker.wg.Done()
 		if runErr := worker.run(); runErr != nil {
 			worker.reportFailure(fmt.Errorf("shipping cart consumer: %w", runErr))
 		}
 	}()
-	go func() {
-		defer worker.wg.Done()
-		if runErr := worker.runCommands(); runErr != nil {
-			worker.reportFailure(fmt.Errorf("shipping command consumer: %w", runErr))
-		}
-	}()
+	for index, commandConsumer := range commandConsumers {
+		subscription := worker.commandSubscriptions[index]
+		go func() {
+			defer worker.wg.Done()
+			if runErr := worker.runCommands(subscription, commandConsumer); runErr != nil {
+				worker.reportFailure(fmt.Errorf("shipping command consumer %s: %w", commandConsumer.durable, runErr))
+			}
+		}()
+	}
 	return worker, nil
 }
 
@@ -264,15 +289,31 @@ func shippingConsumerSetupRace(err error) bool {
 		strings.Contains(message, "stream sequence")
 }
 
-func (worker *shippingEventWorker) runCommands() error {
+func (worker *shippingEventWorker) runCommands(subscription *nats.Subscription, definition shippingConsumerDefinition) error {
+	jobs := make(chan *nats.Msg, definition.queueDepth)
+	var processors sync.WaitGroup
+	processors.Add(definition.workers)
+	for range definition.workers {
+		go func() {
+			defer processors.Done()
+			for message := range jobs {
+				worker.processCommandMessage(message)
+			}
+		}()
+	}
+	defer func() {
+		close(jobs)
+		processors.Wait()
+	}()
+
 	for {
 		select {
 		case <-worker.stop:
 			return nil
 		default:
 		}
-		batch, err := worker.commandSubscription.FetchBatch(
-			shippingCommandBatchSize,
+		batch, err := subscription.FetchBatch(
+			definition.batchSize,
 			nats.MaxWait(time.Second),
 		)
 		if err != nil {
@@ -281,12 +322,13 @@ func (worker *shippingEventWorker) runCommands() error {
 			}
 			continue
 		}
-		processShippingStream(
-			batch.Messages(),
-			shippingCommandBatchSize,
-			shippingCommandWorkers,
-			worker.processCommandMessage,
-		)
+		for message := range batch.Messages() {
+			select {
+			case jobs <- message:
+			case <-worker.stop:
+				return nil
+			}
+		}
 		if err := batch.Error(); err != nil {
 			if shippingConsumerTerminal(err) {
 				return err
@@ -560,8 +602,8 @@ func (worker *shippingEventWorker) Close() {
 		if worker.subscription != nil {
 			_ = worker.subscription.Unsubscribe()
 		}
-		if worker.commandSubscription != nil {
-			_ = worker.commandSubscription.Unsubscribe()
+		for _, subscription := range worker.commandSubscriptions {
+			_ = subscription.Unsubscribe()
 		}
 		worker.wg.Wait()
 		_ = worker.nc.Drain()

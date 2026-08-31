@@ -369,7 +369,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-adservice
-        image: matslo123/adservice:v0.4.0@sha256:77dd56dfaf5a0007e6eb569644a82184e1c046ef5afe72d79d0d518fa5118653
+        image: matslo123/adservice:v0.4.0@sha256:3b307f7e2af68f8771807b3ca0dc80b75d341e1fd3464f96f7e8d8db5c2ae425
         livenessProbe:
           httpGet:
             path: /healthz
@@ -1701,7 +1701,7 @@ spec:
         - name: NATS_REQUIRED
           value: "true"
         - name: NATS_REQUIRED_SUBSCRIPTIONS
-          value: shipping-cart-quotes-v1,shipping-commands-v1
+          value: shipping-cart-quotes-v1,shipping-order-quotes-v1,shipping-create-shipments-v1,shipping-cancel-shipments-v1
         envFrom:
         - configMapRef:
             name: nats-client-config
@@ -1709,7 +1709,7 @@ spec:
             name: nats-credentials-shippingservice
         - secretRef:
             name: global-application-secrets
-        image: matslo123/shippingservice:v0.4.0@sha256:320e4406169b36efd8c8dc4668753d1f082545ff6591abb0e329388de7ff22ef
+        image: matslo123/shippingservice:v0.4.0@sha256:3ae7c7a3dc550a4e6f8d6fd9edcc312ce244b801cdf1405bc49cb5c507e8ed1b
         livenessProbe:
           failureThreshold: 6
           httpGet:

@@ -65,7 +65,7 @@ spec:
         - name: NATS_REQUIRED
           value: "true"
         - name: NATS_REQUIRED_SUBSCRIPTIONS
-          value: "shipping-cart-quotes-v1,shipping-commands-v1"
+          value: "shipping-cart-quotes-v1,shipping-order-quotes-v1,shipping-create-shipments-v1,shipping-cancel-shipments-v1"
         envFrom:
         - configMapRef:
             name: nats-client-config
