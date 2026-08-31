@@ -27,6 +27,7 @@ REQUIRED = {
     "nats_cluster_role", "nats_mode", "gateway_endpoints",
     "gateway_source_cidrs", "remote_gateways", "stream_owner_region",
     "storefront_event_stream", "storefront_projection_durable",
+    "storefront_personalization_stream", "storefront_personalization_durable",
     "storefront_products_bucket", "storefront_carts_bucket",
     "storefront_context_bucket", "storefront_orders_bucket",
     "storefront_operations_bucket", "benchmark_runs_bucket",
@@ -116,6 +117,17 @@ def validate(regions: list[dict[str, object]]) -> dict[str, dict[str, object]]:
         if not DURABLE.fullmatch(durable) or region_id not in durable or durable in durables:
             fail(f"invalid, unscoped, or duplicate projection durable {durable!r}")
         durables.add(durable)
+        personalization_durable = str(item["storefront_personalization_durable"])
+        if (
+            not DURABLE.fullmatch(personalization_durable)
+            or region_id not in personalization_durable
+            or personalization_durable in durables
+        ):
+            fail(
+                "invalid, unscoped, or duplicate personalization durable "
+                f"{personalization_durable!r}"
+            )
+        durables.add(personalization_durable)
         for field in ASSET_FIELDS:
             asset = str(item[field])
             if not ASSET.fullmatch(asset) or not asset.endswith("_" + expected_key):
@@ -136,6 +148,14 @@ def validate(regions: list[dict[str, object]]) -> dict[str, dict[str, object]]:
     event_streams = {str(item["storefront_event_stream"]) for item in indexed.values()}
     if len(event_streams) != 1:
         fail("every region must use the same global storefront event stream")
+    personalization_streams = {
+        str(item["storefront_personalization_stream"])
+        for item in indexed.values()
+    }
+    if len(personalization_streams) != 1:
+        fail("every region must use the same global personalization stream")
+    if event_streams == personalization_streams:
+        fail("critical storefront events and personalization must use distinct streams")
     for region_id, item in indexed.items():
         if item["stream_owner_region"] != primary_region:
             fail(

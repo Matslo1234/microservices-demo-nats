@@ -353,7 +353,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-adservice
-        image: matslo123/adservice:v0.4.0@sha256:5f54fe06f3bfa41a788cc943ed4afe5ab527c97aca5a89b0ab3ba4a7d6c86f80
+        image: matslo123/adservice:v0.4.0@sha256:77dd56dfaf5a0007e6eb569644a82184e1c046ef5afe72d79d0d518fa5118653
         livenessProbe:
           httpGet:
             path: /healthz
@@ -818,7 +818,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-currencyservice
-        image: matslo123/currencyservice:v0.4.0@sha256:aeccde52544263ceb7169be694250312e267a01104dc3dd3d68611975bd47cb8
+        image: matslo123/currencyservice:v0.4.0@sha256:e4409286b69c8ccd3c287cce8d2ef0e0790f309be88e5353756e28bbffba9436
         livenessProbe:
           httpGet:
             path: /healthz
@@ -1333,7 +1333,7 @@ spec:
             name: nats-credentials-paymentservice
         - secretRef:
             name: global-application-secrets
-        image: matslo123/paymentservice:v0.4.0@sha256:755e13249749163500bdb54898c5f23973e2012dde0b89e2b533bde45522ffaf
+        image: matslo123/paymentservice:v0.4.0@sha256:1ca91a6ed90cd8381172b9941d75c6d9d38fa9a53da82c4548cd1954a7125c23
         livenessProbe:
           failureThreshold: 6
           httpGet:
@@ -1560,7 +1560,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-recommendationservice
-        image: matslo123/recommendationservice:v0.4.0@sha256:0ebcff3ff9ea157368213b9c696c4ec156f1ec365354b1506d03879eec120a2f
+        image: matslo123/recommendationservice:v0.4.0@sha256:3472c3ff064c23e7e9960e5700e6f25c1395acc9421ff6e6f09f3046e707a4a3
         livenessProbe:
           failureThreshold: 6
           httpGet:
@@ -1771,7 +1771,7 @@ spec:
         - name: NATS_REQUIRED
           value: "true"
         - name: NATS_REQUIRED_SUBSCRIPTIONS
-          value: storefront-projection-local-v1,boutique.qry.storefront.home.v1,boutique.qry.storefront.product.v1,boutique.qry.storefront.cart.v1,boutique.qry.storefront.checkout.v1,boutique.qry.storefront.currencies.v1,boutique.qry.storefront.product-meta.v1,boutique.qry.storefront.operation.v1,boutique.qry.storefront.order.v1
+          value: storefront-projection-local-v1,storefront-personalization-local-v1,boutique.qry.storefront.home.v1,boutique.qry.storefront.product.v1,boutique.qry.storefront.cart.v1,boutique.qry.storefront.checkout.v1,boutique.qry.storefront.currencies.v1,boutique.qry.storefront.product-meta.v1,boutique.qry.storefront.operation.v1,boutique.qry.storefront.order.v1
         - name: GOMEMLIMIT
           value: 1GiB
         - name: STOREFRONT_QUERY_CONCURRENCY
@@ -1793,7 +1793,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-storefrontprojectionservice
-        image: matslo123/storefrontprojectionservice:v0.4.0@sha256:10ac114b78e34cacd57b38aa33e9ffb13a2cef5a8bba0abd4e3dfa2762991631
+        image: matslo123/storefrontprojectionservice:v0.4.0@sha256:0733af933ce5f6745606cde5bface6b88b539ab51760a4b89995eb317e8ceb9d
         livenessProbe:
           failureThreshold: 6
           httpGet:

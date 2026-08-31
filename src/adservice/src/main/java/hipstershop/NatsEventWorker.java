@@ -56,6 +56,7 @@ final class NatsEventWorker implements AutoCloseable {
   private static final Logger logger = LogManager.getLogger(NatsEventWorker.class);
   private static final String PAGE_SUBJECT = "boutique.evt.storefront.page-viewed.v1";
   private static final String RESULT_SUBJECT = "boutique.evt.ad.selection-generated.v1";
+  private static final String PERSONALIZATION_STREAM = "BOUTIQUE_PERSONALIZATION";
   private static final String DURABLE = "ad-page-views-v1";
   private static final String CONFIG_REVISION = "static-ads-v1";
   private static final ThreadLocal<MessageDigest> SHA_256 =
@@ -163,7 +164,7 @@ final class NatsEventWorker implements AutoCloseable {
                 .maxDeliver(10)
                 .build();
         PullSubscribeOptions subscribeOptions =
-            PullSubscribeOptions.builder().stream("BOUTIQUE_EVENTS")
+            PullSubscribeOptions.builder().stream(PERSONALIZATION_STREAM)
                 .durable(DURABLE)
                 .configuration(consumer)
                 .build();

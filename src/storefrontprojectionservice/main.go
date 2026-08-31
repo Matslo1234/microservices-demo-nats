@@ -198,18 +198,20 @@ type queryServiceRuntime struct {
 }
 
 type projectionRuntime struct {
-	nc                *nats.Conn
-	projector         *projector
-	subscription      *nats.Subscription
-	subscriptionMu    sync.RWMutex
-	projectionReady   atomic.Bool
-	consumerHealthy   atomic.Bool
-	queryMu           sync.RWMutex
-	queryServices     map[string]*queryServiceRuntime
-	queryStopped      chan string
-	rebuilding        bool
-	stop              chan struct{}
-	closeOnce         sync.Once
+	nc                          *nats.Conn
+	personalizationNC           *nats.Conn
+	projector                   *projector
+	subscription                *nats.Subscription
+	personalizationSubscription *nats.Subscription
+	subscriptionMu              sync.RWMutex
+	projectionReady             atomic.Bool
+	consumerHealthy             atomic.Bool
+	queryMu                     sync.RWMutex
+	queryServices               map[string]*queryServiceRuntime
+	queryStopped                chan string
+	rebuilding                  bool
+	stop                        chan struct{}
+	closeOnce                   sync.Once
 }
 
 func initializeProjectionRuntime() (*projectionRuntime, error) {
@@ -227,16 +229,42 @@ func initializeProjectionRuntime() (*projectionRuntime, error) {
 		return nil, err
 	}
 	projector.publishLive = nc.Publish
-	subscription, rebuilding, err := projector.subscribe()
+	criticalConsumer := projector.criticalConsumer()
+	subscription, rebuilding, err := projector.subscribe(criticalConsumer)
 	if err != nil {
 		projector.close()
 		nc.Close()
 		return nil, err
 	}
+	personalizationNC, err := connectNATSConnection(config, "personalization-projection")
+	if err != nil {
+		_ = subscription.Unsubscribe()
+		projector.close()
+		nc.Close()
+		return nil, err
+	}
+	personalizationJS, err := personalizationNC.JetStream()
+	if err != nil {
+		personalizationNC.Close()
+		_ = subscription.Unsubscribe()
+		projector.close()
+		nc.Close()
+		return nil, fmt.Errorf("create personalization JetStream context: %w", err)
+	}
+	personalizationConsumer := projector.personalizationConsumer(personalizationJS)
+	personalizationSubscription, _, err := projector.subscribe(personalizationConsumer)
+	if err != nil {
+		personalizationNC.Close()
+		_ = subscription.Unsubscribe()
+		projector.close()
+		nc.Close()
+		return nil, err
+	}
 	runtime := &projectionRuntime{
-		nc: nc, projector: projector, subscription: subscription,
-		queryServices: make(map[string]*queryServiceRuntime),
-		queryStopped:  make(chan string, 8), rebuilding: rebuilding,
+		nc: nc, personalizationNC: personalizationNC, projector: projector, subscription: subscription,
+		personalizationSubscription: personalizationSubscription,
+		queryServices:               make(map[string]*queryServiceRuntime),
+		queryStopped:                make(chan string, 8), rebuilding: rebuilding,
 		stop: make(chan struct{}),
 	}
 	nc.SetDisconnectErrHandler(func(_ *nats.Conn, disconnectErr error) {
@@ -252,6 +280,12 @@ func initializeProjectionRuntime() (*projectionRuntime, error) {
 			}
 			runtime.projectionReady.Store(true)
 		}()
+	})
+	personalizationNC.SetDisconnectErrHandler(func(_ *nats.Conn, disconnectErr error) {
+		log.Printf("NATS personalization projection disconnected: %v", disconnectErr)
+	})
+	personalizationNC.SetReconnectHandler(func(_ *nats.Conn) {
+		log.Printf("NATS personalization projection reconnected")
 	})
 	for _, role := range []string{browseQueryRole, trackingQueryRole} {
 		queryConnection, err := connectNATSConnection(config, "queries-"+role)
@@ -271,7 +305,8 @@ func initializeProjectionRuntime() (*projectionRuntime, error) {
 		}
 	}
 	runtime.consumerHealthy.Store(true)
-	go runtime.superviseProjectionConsumer(subscription)
+	go runtime.superviseProjectionConsumer(subscription, criticalConsumer)
+	go runtime.superviseProjectionConsumer(personalizationSubscription, personalizationConsumer)
 	if err := projector.waitForInitialReplay(config.catchupTimeout); err != nil {
 		runtime.close()
 		return nil, err
@@ -329,9 +364,13 @@ func queryRepairBackoff(failures int) time.Duration {
 	return delay
 }
 
-func (runtime *projectionRuntime) setSubscription(subscription *nats.Subscription) {
+func (runtime *projectionRuntime) setConsumerSubscription(consumer projectionConsumer, subscription *nats.Subscription) {
 	runtime.subscriptionMu.Lock()
-	runtime.subscription = subscription
+	if consumer.critical {
+		runtime.subscription = subscription
+	} else {
+		runtime.personalizationSubscription = subscription
+	}
 	runtime.subscriptionMu.Unlock()
 }
 
@@ -341,21 +380,21 @@ func (runtime *projectionRuntime) currentSubscription() *nats.Subscription {
 	return runtime.subscription
 }
 
-func (runtime *projectionRuntime) superviseProjectionConsumer(initial *nats.Subscription) {
+func (runtime *projectionRuntime) superviseProjectionConsumer(initial *nats.Subscription, consumer projectionConsumer) {
 	subscription := initial
 	needsCatchup := false
 	for {
-		runtime.setSubscription(subscription)
-		if !needsCatchup {
+		runtime.setConsumerSubscription(consumer, subscription)
+		if consumer.critical && !needsCatchup {
 			runtime.consumerHealthy.Store(true)
 		}
 		runDone := make(chan error, 1)
 		go func(current *nats.Subscription) {
-			runDone <- runtime.projector.run(current, runtime.stop)
+			runDone <- runtime.projector.run(current, runtime.stop, consumer)
 		}(subscription)
 
 		var runErr error
-		if needsCatchup {
+		if consumer.critical && needsCatchup {
 			catchupDone := make(chan error, 1)
 			go func() {
 				catchupDone <- runtime.projector.waitForInitialReplay(runtime.projector.config.catchupTimeout)
@@ -372,7 +411,7 @@ func (runtime *projectionRuntime) superviseProjectionConsumer(initial *nats.Subs
 				} else {
 					runtime.consumerHealthy.Store(true)
 					runtime.projectionReady.Store(runtime.nc.IsConnected())
-					log.Printf("projection consumer recovered durable=%q", runtime.projector.config.durable)
+					log.Printf("projection consumer recovered durable=%q", consumer.durable)
 					select {
 					case <-runtime.stop:
 						return
@@ -388,14 +427,16 @@ func (runtime *projectionRuntime) superviseProjectionConsumer(initial *nats.Subs
 			}
 		}
 
-		runtime.consumerHealthy.Store(false)
-		runtime.projectionReady.Store(false)
+		if consumer.critical {
+			runtime.consumerHealthy.Store(false)
+			runtime.projectionReady.Store(false)
+		}
 		select {
 		case <-runtime.stop:
 			return
 		default:
 		}
-		log.Printf("projection consumer interrupted durable=%q error=%v; rebinding", runtime.projector.config.durable, runErr)
+		log.Printf("projection consumer interrupted durable=%q error=%v; rebinding", consumer.durable, runErr)
 		for {
 			timer := time.NewTimer(time.Second)
 			select {
@@ -404,13 +445,13 @@ func (runtime *projectionRuntime) superviseProjectionConsumer(initial *nats.Subs
 				return
 			case <-timer.C:
 			}
-			next, _, err := runtime.projector.subscribe()
+			next, _, err := runtime.projector.subscribe(consumer)
 			if err != nil {
-				log.Printf("projection consumer rebind failed durable=%q error=%v", runtime.projector.config.durable, err)
+				log.Printf("projection consumer rebind failed durable=%q error=%v", consumer.durable, err)
 				continue
 			}
 			subscription = next
-			needsCatchup = true
+			needsCatchup = consumer.critical
 			break
 		}
 	}
@@ -475,6 +516,12 @@ func (runtime *projectionRuntime) close() {
 		if subscription := runtime.currentSubscription(); subscription != nil {
 			_ = subscription.Unsubscribe()
 		}
+		runtime.subscriptionMu.RLock()
+		personalizationSubscription := runtime.personalizationSubscription
+		runtime.subscriptionMu.RUnlock()
+		if personalizationSubscription != nil {
+			_ = personalizationSubscription.Unsubscribe()
+		}
 		runtime.queryMu.RLock()
 		queryRuntimes := make([]*queryServiceRuntime, 0, len(runtime.queryServices))
 		for _, queryRuntime := range runtime.queryServices {
@@ -495,6 +542,11 @@ func (runtime *projectionRuntime) close() {
 		}
 		if runtime.projector != nil {
 			runtime.projector.close()
+		}
+		if runtime.personalizationNC != nil && !runtime.personalizationNC.IsClosed() {
+			if err := runtime.personalizationNC.Drain(); err != nil {
+				log.Printf("NATS personalization projection drain failed: %v", err)
+			}
 		}
 		if runtime.nc != nil && !runtime.nc.IsClosed() {
 			if err := runtime.nc.Drain(); err != nil {

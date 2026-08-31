@@ -37,6 +37,13 @@
         "ack_wait_seconds": 30,
         "max_deliver": 10,
         "minimum_record_retention_seconds": 2851200
+      },
+      {
+        "name": "BOUTIQUE_PERSONALIZATION",
+        "max_age_seconds": 3600,
+        "ack_wait_seconds": 30,
+        "max_deliver": 10,
+        "minimum_record_retention_seconds": 90000
       }
     ]
   },

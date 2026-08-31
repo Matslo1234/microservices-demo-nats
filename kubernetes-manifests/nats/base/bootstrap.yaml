@@ -122,7 +122,17 @@ data:
     {
       "name": "BOUTIQUE_EVENTS",
       "description": "Replayable Online Boutique integration events",
-      "subjects": ["boutique.evt.>"],
+      "subjects": [
+        "boutique.evt.catalog.>",
+        "boutique.evt.currency.>",
+        "boutique.evt.cart.>",
+        "boutique.evt.shipping.>",
+        "boutique.evt.payment.>",
+        "boutique.evt.order.>",
+        "boutique.evt.notification.>",
+        "boutique.evt.storefront.operation-accepted.v1",
+        "boutique.evt.ops.>"
+      ],
       "retention": "limits",
       "max_consumers": -1,
       "max_msgs": 5000000,
@@ -133,6 +143,29 @@ data:
       "storage": "file",
       "discard": "old",
       "num_replicas": __NATS_JETSTREAM_REPLICAS__,
+      "duplicate_window": 120000000000,
+      "allow_direct": true,
+      "placement": {"cluster": "__GLOBAL_ASSET_CLUSTER__"}
+    }
+  BOUTIQUE_PERSONALIZATION.json: |
+    {
+      "name": "BOUTIQUE_PERSONALIZATION",
+      "description": "Short-lived best-effort storefront personalization events",
+      "subjects": [
+        "boutique.evt.storefront.page-viewed.v1",
+        "boutique.evt.recommendation.>",
+        "boutique.evt.ad.>"
+      ],
+      "retention": "limits",
+      "max_consumers": -1,
+      "max_msgs": 500000,
+      "max_bytes": 268435456,
+      "max_age": 3600000000000,
+      "max_msgs_per_subject": -1,
+      "max_msg_size": 262144,
+      "storage": "file",
+      "discard": "old",
+      "num_replicas": 1,
       "duplicate_window": 120000000000,
       "allow_direct": true,
       "placement": {"cluster": "__GLOBAL_ASSET_CLUSTER__"}
@@ -230,6 +263,7 @@ spec:
           - {key: bootstrap.sh, path: bootstrap.sh}
           - {key: BOUTIQUE_COMMANDS.json, path: streams/BOUTIQUE_COMMANDS.json}
           - {key: BOUTIQUE_EVENTS.json, path: streams/BOUTIQUE_EVENTS.json}
+          - {key: BOUTIQUE_PERSONALIZATION.json, path: streams/BOUTIQUE_PERSONALIZATION.json}
           - {key: BOUTIQUE_DLQ.json, path: streams/BOUTIQUE_DLQ.json}
           - {key: BOUTIQUE_ADVISORIES.json, path: streams/BOUTIQUE_ADVISORIES.json}
       - name: ca

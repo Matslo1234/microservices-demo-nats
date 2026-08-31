@@ -1,9 +1,18 @@
 # storefrontprojectionservice
 
 This service builds region-local storefront read models from
-`BOUTIQUE_EVENTS` and serves bounded Core NATS request/reply queries. JetStream
+critical domain events from `BOUTIQUE_EVENTS` and serves bounded Core NATS
+request/reply queries. Recommendation and ad results are consumed separately
+from the short-lived, single-replica `BOUTIQUE_PERSONALIZATION` stream.
+JetStream
 KV remains the authoritative projection store; process-local caches are
 disposable accelerators rebuilt from KV watches or reads.
+
+The critical and personalization projections use distinct NATS connections,
+durables, and worker pools. Readiness and initial replay wait only for the
+critical projection.
+Personalization uses eight lanes with at most 256 unacknowledged messages, so
+its backlog cannot occupy the critical durable or its 128 projection lanes.
 
 ## Query isolation and admission
 

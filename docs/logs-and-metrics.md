@@ -244,6 +244,12 @@ outputs. Diagnose order throughput with the checkout consumers above and the
 independent completed-order observer instead of the aggregate application
 consumer-pending sum.
 
+Page-view, recommendation-result, and ad-result queues belong to the
+single-replica `BOUTIQUE_PERSONALIZATION` stream. They are intentionally absent
+from the benchmark's critical `BOUTIQUE_COMMANDS`/`BOUTIQUE_EVENTS` saturation
+sum. Inspect them independently when diagnosing personalization freshness; they
+must not be interpreted as order-workflow backlog.
+
 `ad-page-views-v1` likewise acknowledges page views older than
 `AD_PAGE_VIEW_MAX_AGE` (default `5s`) and same-batch-superseded views without
 publishing obsolete ad selections. Under sustained load its pending count can

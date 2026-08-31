@@ -76,7 +76,9 @@ history, and compare-and-set, but direct reads do not guarantee read-your-writes
 in every clustered configuration.
 
 Domain-owner stores remain authoritative; `BOUTIQUE_EVENTS` is the durable
-integration log, not a substitute for order, cart, payment, or shipment state.
+critical integration log, not a substitute for order, cart, payment, or
+shipment state. Disposable page-view and personalization traffic uses the
+one-hour, single-replica `BOUTIQUE_PERSONALIZATION` stream.
 Owners must be able to republish versioned snapshots so a projection can recover
 even after older integration events have expired.
 
@@ -134,7 +136,8 @@ tests before deployment.
 | Asset | Subjects / keys | Retention | Recommended configuration |
 | --- | --- | --- | --- |
 | `BOUTIQUE_COMMANDS` | `boutique.cmd.>` | `WorkQueuePolicy` | File storage, 3 replicas, explicit ack, `DiscardNew`, maximum age longer than the longest tolerated outage |
-| `BOUTIQUE_EVENTS` | `boutique.evt.>` | `LimitsPolicy` | File storage, 3 replicas, explicit-ack durable consumers, retention long enough to rebuild projections |
+| `BOUTIQUE_EVENTS` | Critical `boutique.evt.{catalog,currency,cart,shipping,payment,order,notification,ops}.>` subjects plus `storefront.operation-accepted` | `LimitsPolicy` | File storage, 3 replicas, explicit-ack durable consumers, retention long enough to rebuild critical projections |
+| `BOUTIQUE_PERSONALIZATION` | Page-view, recommendation, and ad event subjects | `LimitsPolicy` | File storage, 1 replica, 1-hour maximum age, `DiscardOld`; never gates order readiness |
 | `BOUTIQUE_DLQ` | `boutique.dlq.>` | `LimitsPolicy` | File storage, 3 replicas, long retention and alerting |
 | `STOREFRONT_PRODUCTS` | Product ID | KV history 1+ | Product view and catalog revision |
 | `STOREFRONT_CARTS` | User/session ID | KV history 2+ | Full cart snapshot and cart version |
@@ -676,7 +679,9 @@ query the authoritative order projection before waiting for another update.
 ## Acceptance tests for the final architecture
 
 - Replaying retained `BOUTIQUE_EVENTS` plus current owner snapshots rebuilds
-  every storefront view to the same logical state.
+  every critical storefront view to the same logical state. Personalization
+  context is regenerated from new activity or the retained one-hour
+  `BOUTIQUE_PERSONALIZATION` window.
 - Publishing the same command/message ID repeatedly produces one state change
   and the same outcome.
 - Restarting a consumer after processing but before ack does not repeat an

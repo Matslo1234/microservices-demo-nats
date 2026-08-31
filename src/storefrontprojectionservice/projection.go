@@ -25,14 +25,16 @@ import (
 )
 
 const (
-	projectionFetchSize    = 1024
-	projectionParallelism  = 128
-	projectionMaxPending   = 4096
-	projectionMaxDeliver   = -1
-	projectionEventHistory = 32
+	projectionFetchSize                  = 1024
+	projectionParallelism                = 128
+	projectionMaxPending                 = 4096
+	projectionMaxDeliver                 = -1
+	projectionEventHistory               = 32
+	personalizationProjectionParallelism = 8
+	personalizationProjectionMaxPending  = 256
 )
 
-var projectionFilterSubjects = []string{
+var criticalProjectionFilterSubjects = []string{
 	"boutique.evt.catalog.product-upserted.v1",
 	"boutique.evt.catalog.product-removed.v1",
 	"boutique.evt.catalog.snapshot-completed.v1",
@@ -41,9 +43,6 @@ var projectionFilterSubjects = []string{
 	"boutique.evt.cart.cleared.v1",
 	"boutique.evt.cart.command-rejected.v1",
 	"boutique.evt.storefront.operation-accepted.v1",
-	"boutique.evt.recommendation.generated.v1",
-	"boutique.evt.recommendation.generation-failed.v1",
-	"boutique.evt.ad.selection-generated.v1",
 	"boutique.evt.shipping.cart-quote-updated.v1",
 	"boutique.evt.shipping.cart-quote-failed.v1",
 	"boutique.evt.order.submitted.v1",
@@ -55,6 +54,44 @@ var projectionFilterSubjects = []string{
 	"boutique.evt.order.step-timed-out.v1",
 	"boutique.evt.notification.order-confirmation-sent.v1",
 	"boutique.evt.notification.order-confirmation-failed.v1",
+}
+
+var personalizationProjectionFilterSubjects = []string{
+	"boutique.evt.recommendation.generated.v1",
+	"boutique.evt.recommendation.generation-failed.v1",
+	"boutique.evt.ad.selection-generated.v1",
+}
+
+var projectionFilterSubjects = append(
+	append([]string(nil), criticalProjectionFilterSubjects...),
+	personalizationProjectionFilterSubjects...,
+)
+
+type projectionConsumer struct {
+	js          nats.JetStreamContext
+	stream      string
+	durable     string
+	filters     []string
+	parallelism int
+	maxPending  int
+	critical    bool
+}
+
+func (p *projector) criticalConsumer() projectionConsumer {
+	return projectionConsumer{
+		js: p.js, stream: p.config.eventStream, durable: p.config.durable,
+		filters: criticalProjectionFilterSubjects, parallelism: projectionParallelism,
+		maxPending: projectionMaxPending, critical: true,
+	}
+}
+
+func (p *projector) personalizationConsumer(js nats.JetStreamContext) projectionConsumer {
+	return projectionConsumer{
+		js: js, stream: p.config.personalizationStream, durable: p.config.personalizationDurable,
+		filters:     personalizationProjectionFilterSubjects,
+		parallelism: personalizationProjectionParallelism,
+		maxPending:  personalizationProjectionMaxPending,
+	}
 }
 
 type projector struct {
@@ -183,18 +220,18 @@ func (p *projector) close() {
 	}
 }
 
-func (p *projector) subscribe() (*nats.Subscription, bool, error) {
+func (p *projector) subscribe(consumer projectionConsumer) (*nats.Subscription, bool, error) {
 	rebuilding := false
 	if _, err := p.products.Get(storefront.CatalogKey); errors.Is(err, nats.ErrKeyNotFound) {
 		rebuilding = true
 	}
-	if err := p.ensureProjectionConsumer(); err != nil {
+	if err := p.ensureProjectionConsumer(consumer); err != nil {
 		return nil, rebuilding, err
 	}
-	subscription, err := p.js.PullSubscribe(
+	subscription, err := consumer.js.PullSubscribe(
 		"",
-		p.config.durable,
-		nats.Bind(p.config.eventStream, p.config.durable),
+		consumer.durable,
+		nats.Bind(consumer.stream, consumer.durable),
 	)
 	if err != nil {
 		return nil, rebuilding, fmt.Errorf("bind projection consumer: %w", err)
@@ -202,20 +239,20 @@ func (p *projector) subscribe() (*nats.Subscription, bool, error) {
 	return subscription, rebuilding, nil
 }
 
-func (p *projector) ensureProjectionConsumer() error {
+func (p *projector) ensureProjectionConsumer(consumer projectionConsumer) error {
 	config := &nats.ConsumerConfig{
-		Durable:        p.config.durable,
+		Durable:        consumer.durable,
 		DeliverPolicy:  nats.DeliverAllPolicy,
 		AckPolicy:      nats.AckExplicitPolicy,
 		AckWait:        30 * time.Second,
 		MaxDeliver:     projectionMaxDeliver,
-		MaxAckPending:  projectionMaxPending,
-		FilterSubjects: append([]string(nil), projectionFilterSubjects...),
+		MaxAckPending:  consumer.maxPending,
+		FilterSubjects: append([]string(nil), consumer.filters...),
 	}
 	for attempt := 0; attempt < 20; attempt++ {
-		info, err := p.js.ConsumerInfo(p.config.eventStream, p.config.durable)
+		info, err := consumer.js.ConsumerInfo(consumer.stream, consumer.durable)
 		if errors.Is(err, nats.ErrConsumerNotFound) {
-			if _, addErr := p.js.AddConsumer(p.config.eventStream, config); addErr == nil {
+			if _, addErr := consumer.js.AddConsumer(consumer.stream, config); addErr == nil {
 				return nil
 			} else if isConsumerSetupRace(addErr) {
 				projectionBackoff(attempt)
@@ -227,8 +264,8 @@ func (p *projector) ensureProjectionConsumer() error {
 		if err != nil {
 			return fmt.Errorf("inspect projection consumer: %w", err)
 		}
-		if projectionFiltersMatch(info.Config.FilterSubject, info.Config.FilterSubjects) &&
-			info.Config.MaxAckPending == projectionMaxPending &&
+		if projectionFiltersMatch(info.Config.FilterSubject, info.Config.FilterSubjects, consumer.filters) &&
+			info.Config.MaxAckPending == consumer.maxPending &&
 			info.Config.AckPolicy == nats.AckExplicitPolicy &&
 			info.Config.AckWait == 30*time.Second &&
 			info.Config.MaxDeliver == projectionMaxDeliver &&
@@ -237,12 +274,12 @@ func (p *projector) ensureProjectionConsumer() error {
 		}
 		next := info.Config
 		next.FilterSubject = ""
-		next.FilterSubjects = append([]string(nil), projectionFilterSubjects...)
-		next.MaxAckPending = projectionMaxPending
+		next.FilterSubjects = append([]string(nil), consumer.filters...)
+		next.MaxAckPending = consumer.maxPending
 		next.AckPolicy = nats.AckExplicitPolicy
 		next.AckWait = 30 * time.Second
 		next.MaxDeliver = projectionMaxDeliver
-		if _, updateErr := p.js.UpdateConsumer(p.config.eventStream, &next); updateErr == nil {
+		if _, updateErr := consumer.js.UpdateConsumer(consumer.stream, &next); updateErr == nil {
 			return nil
 		} else if isConsumerSetupRace(updateErr) {
 			projectionBackoff(attempt)
@@ -265,8 +302,8 @@ func isConsumerSetupRace(err error) bool {
 		strings.Contains(message, "stream sequence")
 }
 
-func (p *projector) run(subscription *nats.Subscription, stop <-chan struct{}) error {
-	processor := newProjectionProcessor(p, stop)
+func (p *projector) run(subscription *nats.Subscription, stop <-chan struct{}, consumer projectionConsumer) error {
+	processor := newProjectionProcessorWithParallelism(p, stop, consumer.parallelism)
 	defer processor.close()
 	for {
 		select {
@@ -287,7 +324,9 @@ func (p *projector) run(subscription *nats.Subscription, stop <-chan struct{}) e
 		if !processor.dispatchStream(batch.Messages()) {
 			return nil
 		}
-		p.refreshConsumerState()
+		if consumer.critical {
+			_ = p.refreshConsumerState()
+		}
 		if err := batch.Error(); err != nil {
 			if projectionConsumerTerminal(err) {
 				return err
@@ -311,11 +350,15 @@ type projectionProcessor struct {
 }
 
 func newProjectionProcessor(p *projector, stop <-chan struct{}) *projectionProcessor {
-	queueDepth := projectionFetchSize/projectionParallelism + 1
+	return newProjectionProcessorWithParallelism(p, stop, projectionParallelism)
+}
+
+func newProjectionProcessorWithParallelism(p *projector, stop <-chan struct{}, parallelism int) *projectionProcessor {
+	queueDepth := projectionFetchSize/parallelism + 1
 	processor := &projectionProcessor{
 		projector: p,
 		stop:      stop,
-		lanes:     make([]chan projectionMessage, projectionParallelism),
+		lanes:     make([]chan projectionMessage, parallelism),
 	}
 	for index := range processor.lanes {
 		lane := make(chan projectionMessage, queueDepth)
@@ -454,12 +497,12 @@ func projectionConsumerTerminal(err error) bool {
 	return err != nil && !errors.Is(err, nats.ErrTimeout)
 }
 
-func projectionFiltersMatch(single string, multiple []string) bool {
-	if single != "" || len(multiple) != len(projectionFilterSubjects) {
+func projectionFiltersMatch(single string, multiple, filters []string) bool {
+	if single != "" || len(multiple) != len(filters) {
 		return false
 	}
-	wanted := make(map[string]struct{}, len(projectionFilterSubjects))
-	for _, subject := range projectionFilterSubjects {
+	wanted := make(map[string]struct{}, len(filters))
+	for _, subject := range filters {
 		wanted[subject] = struct{}{}
 	}
 	for _, subject := range multiple {

@@ -52,6 +52,7 @@ data:
     for stream in BOUTIQUE_COMMANDS BOUTIQUE_EVENTS BOUTIQUE_DLQ BOUTIQUE_ADVISORIES; do
       nats_admin stream info "${stream}" --json | grep -Eq "\"num_replicas\"[[:space:]]*:[[:space:]]*${NATS_JETSTREAM_REPLICAS}"
     done
+    nats_admin stream info BOUTIQUE_PERSONALIZATION --json | grep -Eq '"num_replicas"[[:space:]]*:[[:space:]]*1'
     echo "PASS: account and R${NATS_JETSTREAM_REPLICAS} streams are healthy"
 
     first_publish="$(nats_admin pub "${event_subject}" "${payload}" --jetstream \

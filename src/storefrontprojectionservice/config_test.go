@@ -18,19 +18,21 @@ func setValidProjectionEnvironment(t *testing.T) {
 		t.Setenv(name, "")
 	}
 	for name, value := range map[string]string{
-		"REGION_ID":                     "eu-central-1",
-		"REGION_KEY":                    "EU_CENTRAL_1",
-		"K8S_CLUSTER_NAME":              "boutique-eu1",
-		"NATS_CLUSTER_NAME":             "BOUTIQUE-eu-central-1",
-		"STREAM_OWNER_REGION":           "eu-central-1",
-		"STOREFRONT_EVENT_STREAM":       "BOUTIQUE_EVENTS",
-		"STOREFRONT_PROJECTION_DURABLE": "storefront-projection-eu-central-1-v1",
-		"STOREFRONT_PRODUCTS_BUCKET":    "STOREFRONT_PRODUCTS_EU_CENTRAL_1",
-		"STOREFRONT_CARTS_BUCKET":       "STOREFRONT_CARTS_EU_CENTRAL_1",
-		"STOREFRONT_CONTEXT_BUCKET":     "STOREFRONT_CONTEXT_EU_CENTRAL_1",
-		"STOREFRONT_ORDERS_BUCKET":      "STOREFRONT_ORDERS_EU_CENTRAL_1",
-		"STOREFRONT_OPERATIONS_BUCKET":  "STOREFRONT_OPERATIONS_EU_CENTRAL_1",
-		"LIVE_OPERATION_PREFIX":         "boutique.live.operation.eu-central-1.",
+		"REGION_ID":                          "eu-central-1",
+		"REGION_KEY":                         "EU_CENTRAL_1",
+		"K8S_CLUSTER_NAME":                   "boutique-eu1",
+		"NATS_CLUSTER_NAME":                  "BOUTIQUE-eu-central-1",
+		"STREAM_OWNER_REGION":                "eu-central-1",
+		"STOREFRONT_EVENT_STREAM":            "BOUTIQUE_EVENTS",
+		"STOREFRONT_PROJECTION_DURABLE":      "storefront-projection-eu-central-1-v1",
+		"STOREFRONT_PERSONALIZATION_STREAM":  "BOUTIQUE_PERSONALIZATION",
+		"STOREFRONT_PERSONALIZATION_DURABLE": "storefront-personalization-eu-central-1-v1",
+		"STOREFRONT_PRODUCTS_BUCKET":         "STOREFRONT_PRODUCTS_EU_CENTRAL_1",
+		"STOREFRONT_CARTS_BUCKET":            "STOREFRONT_CARTS_EU_CENTRAL_1",
+		"STOREFRONT_CONTEXT_BUCKET":          "STOREFRONT_CONTEXT_EU_CENTRAL_1",
+		"STOREFRONT_ORDERS_BUCKET":           "STOREFRONT_ORDERS_EU_CENTRAL_1",
+		"STOREFRONT_OPERATIONS_BUCKET":       "STOREFRONT_OPERATIONS_EU_CENTRAL_1",
+		"LIVE_OPERATION_PREFIX":              "boutique.live.operation.eu-central-1.",
 	} {
 		t.Setenv(name, value)
 	}
@@ -43,6 +45,7 @@ func TestLoadProjectionConfigAcceptsRegionQualifiedAssets(t *testing.T) {
 		t.Fatal(err)
 	}
 	if config.regionID != "eu-central-1" || config.eventStream != "BOUTIQUE_EVENTS" ||
+		config.personalizationStream != "BOUTIQUE_PERSONALIZATION" ||
 		config.productsBucket != "STOREFRONT_PRODUCTS_EU_CENTRAL_1" {
 		t.Fatalf("unexpected projection config: %+v", config)
 	}

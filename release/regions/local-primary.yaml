@@ -143,6 +143,8 @@ data:
   STOREFRONT_INITIAL_REPLAY_TIMEOUT: 10m
   STOREFRONT_OPERATIONS_BUCKET: STOREFRONT_OPERATIONS_LOCAL
   STOREFRONT_ORDERS_BUCKET: STOREFRONT_ORDERS_LOCAL
+  STOREFRONT_PERSONALIZATION_DURABLE: storefront-personalization-local-v1
+  STOREFRONT_PERSONALIZATION_STREAM: BOUTIQUE_PERSONALIZATION
   STOREFRONT_PRODUCTS_BUCKET: STOREFRONT_PRODUCTS_LOCAL
   STOREFRONT_PROJECTION_DURABLE: storefront-projection-local-v1
   STREAM_OWNER_REGION: local
@@ -229,7 +231,17 @@ data:
     {
       "name": "BOUTIQUE_EVENTS",
       "description": "Replayable Online Boutique integration events",
-      "subjects": ["boutique.evt.>"],
+      "subjects": [
+        "boutique.evt.catalog.>",
+        "boutique.evt.currency.>",
+        "boutique.evt.cart.>",
+        "boutique.evt.shipping.>",
+        "boutique.evt.payment.>",
+        "boutique.evt.order.>",
+        "boutique.evt.notification.>",
+        "boutique.evt.storefront.operation-accepted.v1",
+        "boutique.evt.ops.>"
+      ],
       "retention": "limits",
       "max_consumers": -1,
       "max_msgs": 5000000,
@@ -240,6 +252,29 @@ data:
       "storage": "file",
       "discard": "old",
       "num_replicas": __NATS_JETSTREAM_REPLICAS__,
+      "duplicate_window": 120000000000,
+      "allow_direct": true,
+      "placement": {"cluster": "__GLOBAL_ASSET_CLUSTER__"}
+    }
+  BOUTIQUE_PERSONALIZATION.json: |
+    {
+      "name": "BOUTIQUE_PERSONALIZATION",
+      "description": "Short-lived best-effort storefront personalization events",
+      "subjects": [
+        "boutique.evt.storefront.page-viewed.v1",
+        "boutique.evt.recommendation.>",
+        "boutique.evt.ad.>"
+      ],
+      "retention": "limits",
+      "max_consumers": -1,
+      "max_msgs": 500000,
+      "max_bytes": 268435456,
+      "max_age": 3600000000000,
+      "max_msgs_per_subject": -1,
+      "max_msg_size": 262144,
+      "storage": "file",
+      "discard": "old",
+      "num_replicas": 1,
       "duplicate_window": 120000000000,
       "allow_direct": true,
       "placement": {"cluster": "__GLOBAL_ASSET_CLUSTER__"}
@@ -561,6 +596,8 @@ data:
   STOREFRONT_EVENT_STREAM: BOUTIQUE_EVENTS
   STOREFRONT_OPERATIONS_BUCKET: STOREFRONT_OPERATIONS_LOCAL
   STOREFRONT_ORDERS_BUCKET: STOREFRONT_ORDERS_LOCAL
+  STOREFRONT_PERSONALIZATION_DURABLE: storefront-personalization-local-v1
+  STOREFRONT_PERSONALIZATION_STREAM: BOUTIQUE_PERSONALIZATION
   STOREFRONT_PRODUCTS_BUCKET: STOREFRONT_PRODUCTS_LOCAL
   STOREFRONT_PROJECTION_DURABLE: storefront-projection-local-v1
   STREAM_OWNER_REGION: local
@@ -2009,6 +2046,8 @@ spec:
             path: streams/BOUTIQUE_COMMANDS.json
           - key: BOUTIQUE_EVENTS.json
             path: streams/BOUTIQUE_EVENTS.json
+          - key: BOUTIQUE_PERSONALIZATION.json
+            path: streams/BOUTIQUE_PERSONALIZATION.json
           - key: BOUTIQUE_DLQ.json
             path: streams/BOUTIQUE_DLQ.json
           - key: BOUTIQUE_ADVISORIES.json
@@ -2479,6 +2518,8 @@ data:
   STOREFRONT_INITIAL_REPLAY_TIMEOUT: 10m
   STOREFRONT_OPERATIONS_BUCKET: STOREFRONT_OPERATIONS_LOCAL
   STOREFRONT_ORDERS_BUCKET: STOREFRONT_ORDERS_LOCAL
+  STOREFRONT_PERSONALIZATION_DURABLE: storefront-personalization-local-v1
+  STOREFRONT_PERSONALIZATION_STREAM: BOUTIQUE_PERSONALIZATION
   STOREFRONT_PRODUCTS_BUCKET: STOREFRONT_PRODUCTS_LOCAL
   STOREFRONT_PROJECTION_DURABLE: storefront-projection-local-v1
   STREAM_OWNER_REGION: local
@@ -2949,7 +2990,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-benchmarkservice
-        image: matslo123/benchmarkservice:v0.4.0@sha256:c18ae5f23585fd3fe864a1c0f08165cf337da5727bcb9c8b1892745b5ceb8ed5
+        image: matslo123/benchmarkservice:v0.4.0@sha256:4c679cab7671ee42167f4691b72e17c0be20fc566b34ae4ab5cc6cbb9b6fd2e8
         livenessProbe:
           httpGet:
             path: /healthz
@@ -3063,7 +3104,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-cartservice
-        image: matslo123/cartservice:v0.4.0@sha256:a981b8dd94d28910e3003aeb985ade8d1f3e9aa33f204d4a9323cd142870f648
+        image: matslo123/cartservice:v0.4.0@sha256:e6788b26d4c34a769250a2a51c6378d5e3c96cda6c9cbe979e07c464e538ed07
         livenessProbe:
           failureThreshold: 6
           httpGet:
@@ -3218,7 +3259,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-checkoutservice
-        image: matslo123/checkoutservice:v0.4.0@sha256:ee7b5fed8dcf83c447a67dfe46c33c6593983af1953e82492889199c4891550b
+        image: matslo123/checkoutservice:v0.4.0@sha256:45d687649369e1bca4f49200b4fc6115e61730db14aa74cd385999582d890e2a
         livenessProbe:
           httpGet:
             path: /healthz
@@ -3438,7 +3479,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-emailservice
-        image: matslo123/emailservice:v0.4.0@sha256:92c6ebe1fc527c6e5f46e6cb73cc5dc6db4ff392d05179ddcd29778447be5f59
+        image: matslo123/emailservice:v0.4.0@sha256:703b889cefab8f7b720fa4680a1009f0a63388a19c8d79bade47117b9eedff9e
         livenessProbe:
           httpGet:
             path: /healthz
@@ -3596,7 +3637,7 @@ spec:
             name: nats-credentials-frontend
         - secretRef:
             name: global-application-secrets
-        image: matslo123/frontend:v0.4.0@sha256:53a2861f3ef010cf28e847cdc4262afb8bc590c4602f0c74d8cfbf6951798b3b
+        image: matslo123/frontend:v0.4.0@sha256:f85e899837a9e0f8ccdd87fb9ca73c8bdf1f391401bc4dca665dcb257e797101
         livenessProbe:
           failureThreshold: 6
           httpGet:
@@ -4107,7 +4148,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-recommendationservice
-        image: matslo123/recommendationservice:v0.4.0@sha256:d8cccf9a19c5d62bf3e38d94728366c7933c1daeb138b6f6713c42277a5f760a
+        image: matslo123/recommendationservice:v0.4.0@sha256:0ebcff3ff9ea157368213b9c696c4ec156f1ec365354b1506d03879eec120a2f
         livenessProbe:
           failureThreshold: 6
           httpGet:
@@ -4328,9 +4369,9 @@ spec:
         - name: NATS_REQUIRED
           value: "true"
         - name: NATS_REQUIRED_SUBSCRIPTIONS
-          value: storefront-projection-local-v1,boutique.qry.storefront.home.v1,boutique.qry.storefront.product.v1,boutique.qry.storefront.cart.v1,boutique.qry.storefront.checkout.v1,boutique.qry.storefront.currencies.v1,boutique.qry.storefront.product-meta.v1,boutique.qry.storefront.operation.v1,boutique.qry.storefront.order.v1
+          value: storefront-projection-local-v1,storefront-personalization-local-v1,boutique.qry.storefront.home.v1,boutique.qry.storefront.product.v1,boutique.qry.storefront.cart.v1,boutique.qry.storefront.checkout.v1,boutique.qry.storefront.currencies.v1,boutique.qry.storefront.product-meta.v1,boutique.qry.storefront.operation.v1,boutique.qry.storefront.order.v1
         - name: GOMEMLIMIT
-          value: 400MiB
+          value: 1GiB
         - name: STOREFRONT_QUERY_CONCURRENCY
           value: "16"
         - name: STOREFRONT_QUERY_MAX_IN_FLIGHT
@@ -4352,7 +4393,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-storefrontprojectionservice
-        image: matslo123/storefrontprojectionservice:v0.4.0@sha256:4e4759eb22cca716397480086e74144c55e5d42e0d3e89394398e34c84c689fb
+        image: matslo123/storefrontprojectionservice:v0.4.0@sha256:10ac114b78e34cacd57b38aa33e9ffb13a2cef5a8bba0abd4e3dfa2762991631
         livenessProbe:
           failureThreshold: 6
           httpGet:

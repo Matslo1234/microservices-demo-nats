@@ -66,7 +66,8 @@ The architecture uses five interaction styles:
 | Style | Subjects / storage | Purpose |
 | --- | --- | --- |
 | Durable commands | `boutique.cmd.>` in `BOUTIQUE_COMMANDS` | Cart changes and the checkout/payment/shipping workflow |
-| Replayable facts | `boutique.evt.>` in `BOUTIQUE_EVENTS` | Owner snapshots, workflow results, notifications, and storefront inputs |
+| Replayable facts | Critical domain subjects in `BOUTIQUE_EVENTS` | Owner snapshots, workflow results, notifications, and durable storefront inputs |
+| Personalization | Page-view, recommendation, and ad subjects in `BOUTIQUE_PERSONALIZATION` | Best-effort inputs and results retained for one hour with one replica |
 | Bounded queries | `boutique.qry.>` over Core NATS | Reads from the storefront projection and payment tokenization |
 | Live notifications | `boutique.live.operation.<region-id>.<order-id>` over Core NATS | Best-effort order updates bridged only to browser SSE connections in the projector's region |
 | Dead-letter operations | `BOUTIQUE_ADVISORIES`, `BOUTIQUE_DLQ`, and `DLQ_CASES` | Durable max-delivery capture, restricted payload storage, administrator review, and replay |
@@ -86,8 +87,11 @@ described below.
 
 The frontend reads views through the logical `storefrontprojectionservice`; it
 does not query domain owners directly. Each `storefrontprojectionservice` pod
-both shares the durable event consumer that maintains the materialized views
-and serves Core NATS queries from those views. Keeping the complete read side in
+shares the critical durable event consumer that maintains the materialized
+views and serves Core NATS queries from those views. A second, independently
+connected durable consumes recommendation and ad results from
+`BOUTIQUE_PERSONALIZATION` with only eight processing lanes and 256 pending
+acknowledgements. Keeping the complete read side in
 one deployable service favors a clear ownership boundary over independent
 scaling of projection and query work.
 
@@ -155,9 +159,13 @@ and operation status in `STOREFRONT_PRODUCTS_<REGION_KEY>`,
 `STOREFRONT_CARTS_<REGION_KEY>`, `STOREFRONT_CONTEXT_<REGION_KEY>`,
 `STOREFRONT_ORDERS_<REGION_KEY>`, and
 `STOREFRONT_OPERATIONS_<REGION_KEY>`.
-These buckets are derived state and can be deleted and rebuilt by replaying
-`BOUTIQUE_EVENTS`. Domain owner snapshots provide the current catalog and
-currency baselines before consumers become ready.
+These buckets are derived state. Critical catalog, cart, operation, and order
+state can be rebuilt by replaying `BOUTIQUE_EVENTS`; recent recommendation and
+ad context can be repopulated from the one-hour `BOUTIQUE_PERSONALIZATION`
+window or regenerated from new activity. Domain owner snapshots provide the
+current catalog and currency baselines before consumers become ready. Service
+readiness and initial catch-up depend only on the critical consumer, so a
+personalization backlog cannot delay order projection readiness.
 
 Projection writes use a bounded per-replica revision cache. The common path
 attempts the authoritative KV compare-and-set with the cached revision. A
@@ -173,7 +181,7 @@ not participate in checkout correctness. Catalog inputs remain lossless and
 ordered, but high-rate page-view and cart triggers use bounded, freshness-first
 processing:
 
-- `recommendation-page-views-v1` is created with `DeliverPolicy.NEW`, so a new
+- `recommendation-page-views-v1` reads `BOUTIQUE_PERSONALIZATION` and is created with `DeliverPolicy.NEW`, so a new
   consumer does not replay historical browsing activity. Each fetched batch
   retains only the newest page view per session. Views older than
   `RECOMMENDATION_PAGE_VIEW_MAX_AGE` (default `5s`) and views superseded in the

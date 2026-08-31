@@ -21,26 +21,28 @@ var (
 )
 
 type projectionConfig struct {
-	regionID             string
-	regionKey            string
-	k8sClusterName       string
-	natsClusterName      string
-	streamOwnerRegion    string
-	eventStream          string
-	durable              string
-	productsBucket       string
-	cartsBucket          string
-	contextBucket        string
-	ordersBucket         string
-	operationsBucket     string
-	livePrefix           string
-	catchupTimeout       time.Duration
-	queryConcurrency     int
-	queryMaxInFlight     int
-	queryPendingMessages int
-	queryPendingBytes    int
-	cartCacheEntries     int
-	contextCacheEntries  int
+	regionID               string
+	regionKey              string
+	k8sClusterName         string
+	natsClusterName        string
+	streamOwnerRegion      string
+	eventStream            string
+	durable                string
+	personalizationStream  string
+	personalizationDurable string
+	productsBucket         string
+	cartsBucket            string
+	contextBucket          string
+	ordersBucket           string
+	operationsBucket       string
+	livePrefix             string
+	catchupTimeout         time.Duration
+	queryConcurrency       int
+	queryMaxInFlight       int
+	queryPendingMessages   int
+	queryPendingBytes      int
+	cartCacheEntries       int
+	contextCacheEntries    int
 }
 
 func requiredEnvironment(name string) (string, error) {
@@ -56,6 +58,7 @@ func loadProjectionConfig() (projectionConfig, error) {
 	for _, name := range []string{
 		"REGION_ID", "REGION_KEY", "K8S_CLUSTER_NAME", "NATS_CLUSTER_NAME", "STOREFRONT_EVENT_STREAM",
 		"STOREFRONT_PROJECTION_DURABLE", "STOREFRONT_PRODUCTS_BUCKET",
+		"STOREFRONT_PERSONALIZATION_STREAM", "STOREFRONT_PERSONALIZATION_DURABLE",
 		"STOREFRONT_CARTS_BUCKET", "STOREFRONT_CONTEXT_BUCKET",
 		"STOREFRONT_ORDERS_BUCKET", "STOREFRONT_OPERATIONS_BUCKET",
 		"LIVE_OPERATION_PREFIX",
@@ -80,20 +83,27 @@ func loadProjectionConfig() (projectionConfig, error) {
 		return projectionConfig{}, fmt.Errorf("NATS_CLUSTER_NAME must be a safe cluster name")
 	}
 	for _, name := range []string{
-		"STOREFRONT_EVENT_STREAM", "STOREFRONT_PRODUCTS_BUCKET",
+		"STOREFRONT_EVENT_STREAM", "STOREFRONT_PERSONALIZATION_STREAM", "STOREFRONT_PRODUCTS_BUCKET",
 		"STOREFRONT_CARTS_BUCKET", "STOREFRONT_CONTEXT_BUCKET",
 		"STOREFRONT_ORDERS_BUCKET", "STOREFRONT_OPERATIONS_BUCKET",
 	} {
 		if !assetNamePattern.MatchString(values[name]) {
 			return projectionConfig{}, fmt.Errorf("%s is not a safe NATS asset name", name)
 		}
-		if name != "STOREFRONT_EVENT_STREAM" && !strings.HasSuffix(values[name], "_"+wantedRegionKey) {
+		if name != "STOREFRONT_EVENT_STREAM" && name != "STOREFRONT_PERSONALIZATION_STREAM" && !strings.HasSuffix(values[name], "_"+wantedRegionKey) {
 			return projectionConfig{}, fmt.Errorf("%s must end in _%s", name, wantedRegionKey)
 		}
 	}
 	if !durableNamePattern.MatchString(values["STOREFRONT_PROJECTION_DURABLE"]) ||
 		!strings.Contains(values["STOREFRONT_PROJECTION_DURABLE"], values["REGION_ID"]) {
 		return projectionConfig{}, fmt.Errorf("STOREFRONT_PROJECTION_DURABLE must be safe and contain REGION_ID")
+	}
+	if !durableNamePattern.MatchString(values["STOREFRONT_PERSONALIZATION_DURABLE"]) ||
+		!strings.Contains(values["STOREFRONT_PERSONALIZATION_DURABLE"], values["REGION_ID"]) {
+		return projectionConfig{}, fmt.Errorf("STOREFRONT_PERSONALIZATION_DURABLE must be safe and contain REGION_ID")
+	}
+	if values["STOREFRONT_PERSONALIZATION_STREAM"] == values["STOREFRONT_EVENT_STREAM"] {
+		return projectionConfig{}, fmt.Errorf("personalization and critical projection streams must be distinct")
 	}
 	wantedPrefix := "boutique.live.operation." + values["REGION_ID"] + "."
 	if values["LIVE_OPERATION_PREFIX"] != wantedPrefix {
@@ -135,26 +145,28 @@ func loadProjectionConfig() (projectionConfig, error) {
 		return projectionConfig{}, fmt.Errorf("STREAM_OWNER_REGION must be a stable lower-case DNS label")
 	}
 	return projectionConfig{
-		regionID:             values["REGION_ID"],
-		regionKey:            values["REGION_KEY"],
-		k8sClusterName:       values["K8S_CLUSTER_NAME"],
-		natsClusterName:      values["NATS_CLUSTER_NAME"],
-		streamOwnerRegion:    ownerRegion,
-		eventStream:          values["STOREFRONT_EVENT_STREAM"],
-		durable:              values["STOREFRONT_PROJECTION_DURABLE"],
-		productsBucket:       values["STOREFRONT_PRODUCTS_BUCKET"],
-		cartsBucket:          values["STOREFRONT_CARTS_BUCKET"],
-		contextBucket:        values["STOREFRONT_CONTEXT_BUCKET"],
-		ordersBucket:         values["STOREFRONT_ORDERS_BUCKET"],
-		operationsBucket:     values["STOREFRONT_OPERATIONS_BUCKET"],
-		livePrefix:           values["LIVE_OPERATION_PREFIX"],
-		catchupTimeout:       catchupTimeout,
-		queryConcurrency:     queryConcurrency,
-		queryMaxInFlight:     queryMaxInFlight,
-		queryPendingMessages: queryPendingMessages,
-		queryPendingBytes:    queryPendingBytes,
-		cartCacheEntries:     cartCacheEntries,
-		contextCacheEntries:  contextCacheEntries,
+		regionID:               values["REGION_ID"],
+		regionKey:              values["REGION_KEY"],
+		k8sClusterName:         values["K8S_CLUSTER_NAME"],
+		natsClusterName:        values["NATS_CLUSTER_NAME"],
+		streamOwnerRegion:      ownerRegion,
+		eventStream:            values["STOREFRONT_EVENT_STREAM"],
+		durable:                values["STOREFRONT_PROJECTION_DURABLE"],
+		personalizationStream:  values["STOREFRONT_PERSONALIZATION_STREAM"],
+		personalizationDurable: values["STOREFRONT_PERSONALIZATION_DURABLE"],
+		productsBucket:         values["STOREFRONT_PRODUCTS_BUCKET"],
+		cartsBucket:            values["STOREFRONT_CARTS_BUCKET"],
+		contextBucket:          values["STOREFRONT_CONTEXT_BUCKET"],
+		ordersBucket:           values["STOREFRONT_ORDERS_BUCKET"],
+		operationsBucket:       values["STOREFRONT_OPERATIONS_BUCKET"],
+		livePrefix:             values["LIVE_OPERATION_PREFIX"],
+		catchupTimeout:         catchupTimeout,
+		queryConcurrency:       queryConcurrency,
+		queryMaxInFlight:       queryMaxInFlight,
+		queryPendingMessages:   queryPendingMessages,
+		queryPendingBytes:      queryPendingBytes,
+		cartCacheEntries:       cartCacheEntries,
+		contextCacheEntries:    contextCacheEntries,
 	}, nil
 }
 

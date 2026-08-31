@@ -43,20 +43,20 @@ SERVICES = (
     "storefrontprojectionservice",
 )
 DEFAULT_IMAGE_DIGESTS = {
-    "adservice": "5f54fe06f3bfa41a788cc943ed4afe5ab527c97aca5a89b0ab3ba4a7d6c86f80",
+    "adservice": "77dd56dfaf5a0007e6eb569644a82184e1c046ef5afe72d79d0d518fa5118653",
     "benchmarkservice": "4c679cab7671ee42167f4691b72e17c0be20fc566b34ae4ab5cc6cbb9b6fd2e8",
     "cartservice": "e6788b26d4c34a769250a2a51c6378d5e3c96cda6c9cbe979e07c464e538ed07",
     "checkoutservice": "45d687649369e1bca4f49200b4fc6115e61730db14aa74cd385999582d890e2a",
-    "currencyservice": "aeccde52544263ceb7169be694250312e267a01104dc3dd3d68611975bd47cb8",
+    "currencyservice": "e4409286b69c8ccd3c287cce8d2ef0e0790f309be88e5353756e28bbffba9436",
     "emailservice": "703b889cefab8f7b720fa4680a1009f0a63388a19c8d79bade47117b9eedff9e",
     "frontend": "f85e899837a9e0f8ccdd87fb9ca73c8bdf1f391401bc4dca665dcb257e797101",
     "loadgenerator": "c66a188ecf8bf7507bd3982a5fa50ae3e9497f3239248dd48b275fc2aee0adb3",
     "messageoperationsservice": "2b2334e684a9297e2bf6af8daf0e924b86daecb78f9ff578756e9bc34b8f7a45",
-    "paymentservice": "755e13249749163500bdb54898c5f23973e2012dde0b89e2b533bde45522ffaf",
+    "paymentservice": "1ca91a6ed90cd8381172b9941d75c6d9d38fa9a53da82c4548cd1954a7125c23",
     "productcatalogservice": "26d97784a6e105cf1586b2ff723772c583021491d5fa165ceaae6a3af12fe54d",
-    "recommendationservice": "0ebcff3ff9ea157368213b9c696c4ec156f1ec365354b1506d03879eec120a2f",
+    "recommendationservice": "3472c3ff064c23e7e9960e5700e6f25c1395acc9421ff6e6f09f3046e707a4a3",
     "shippingservice": "320e4406169b36efd8c8dc4668753d1f082545ff6591abb0e329388de7ff22ef",
-    "storefrontprojectionservice": "10ac114b78e34cacd57b38aa33e9ffb13a2cef5a8bba0abd4e3dfa2762991631",
+    "storefrontprojectionservice": "0733af933ce5f6745606cde5bface6b88b539ab51760a4b89995eb317e8ceb9d",
 }
 
 

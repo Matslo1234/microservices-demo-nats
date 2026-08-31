@@ -543,7 +543,13 @@ async def _consume(
             await asyncio.gather(*workers, return_exceptions=True)
 
 
-async def _durable(js, subject, durable, deliver_policy=DeliverPolicy.ALL):
+async def _durable(
+    js,
+    subject,
+    durable,
+    deliver_policy=DeliverPolicy.ALL,
+    stream="BOUTIQUE_EVENTS",
+):
     config = ConsumerConfig(
         durable_name=durable,
         deliver_policy=deliver_policy,
@@ -552,7 +558,9 @@ async def _durable(js, subject, durable, deliver_policy=DeliverPolicy.ALL):
         max_deliver=10,
         filter_subject=subject,
     )
-    return await js.pull_subscribe(subject, durable=durable, stream="BOUTIQUE_EVENTS", config=config)
+    return await js.pull_subscribe(
+        subject, durable=durable, stream=stream, config=config
+    )
 
 
 async def _run():
@@ -640,6 +648,7 @@ async def _run():
             PAGE_VIEW_SUBJECT,
             "recommendation-page-views-v1",
             deliver_policy=DeliverPolicy.NEW,
+            stream="BOUTIQUE_PERSONALIZATION",
         )
         consumers.extend([
             asyncio.create_task(_consume(

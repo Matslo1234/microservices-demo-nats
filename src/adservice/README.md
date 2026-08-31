@@ -4,9 +4,10 @@ The Ad service provides advertisement based on context keys. If no context keys 
 
 ## NATS page-view processing
 
-The `ad-page-views-v1` durable processes page views in batches of 32 with eight
-concurrent handlers by default. Within each batch it retains only the newest
-view per session. Views older than `AD_PAGE_VIEW_MAX_AGE` (default `5s`) and
+The `ad-page-views-v1` durable reads the short-lived, single-replica
+`BOUTIQUE_PERSONALIZATION` stream and processes page views in batches of 32
+with eight concurrent handlers by default. Within each batch it retains only
+the newest view per session. Views older than `AD_PAGE_VIEW_MAX_AGE` (default `5s`) and
 superseded views are acknowledged without generating obsolete ad selections.
 Malformed events retain the normal retry behavior.
 

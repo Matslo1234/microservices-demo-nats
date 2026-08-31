@@ -281,11 +281,18 @@ func TestProjectionSubjectFiltering(t *testing.T) {
 			t.Errorf("irrelevant subject %q is handled", subject)
 		}
 	}
-	if !projectionFiltersMatch("", projectionFilterSubjects) {
+	if !projectionFiltersMatch("", criticalProjectionFilterSubjects, criticalProjectionFilterSubjects) {
 		t.Fatal("configured projection filters do not match themselves")
 	}
-	if projectionFiltersMatch("boutique.evt.>", nil) {
+	if projectionFiltersMatch("boutique.evt.>", nil, criticalProjectionFilterSubjects) {
 		t.Fatal("legacy catch-all filter unexpectedly matches")
+	}
+	for _, subject := range personalizationProjectionFilterSubjects {
+		for _, critical := range criticalProjectionFilterSubjects {
+			if subject == critical {
+				t.Fatalf("personalization subject %q also blocks the critical projection consumer", subject)
+			}
+		}
 	}
 }
 

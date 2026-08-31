@@ -18,6 +18,8 @@
       "stream_owner_region": "local",
       "storefront_event_stream": "BOUTIQUE_EVENTS",
       "storefront_projection_durable": "storefront-projection-local-v1",
+      "storefront_personalization_stream": "BOUTIQUE_PERSONALIZATION",
+      "storefront_personalization_durable": "storefront-personalization-local-v1",
       "storefront_products_bucket": "STOREFRONT_PRODUCTS_LOCAL",
       "storefront_carts_bucket": "STOREFRONT_CARTS_LOCAL",
       "storefront_context_bucket": "STOREFRONT_CONTEXT_LOCAL",
