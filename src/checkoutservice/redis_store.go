@@ -37,6 +37,19 @@ const (
 
 var errStateStoreClosed = errors.New("checkout state store is closed")
 
+var redisGZIPWriterPool = sync.Pool{
+	New: func() any {
+		writer, err := gzip.NewWriterLevel(io.Discard, gzip.BestSpeed)
+		if err != nil {
+			panic(err)
+		}
+		return writer
+	},
+}
+
+var redisGZIPReaderPool sync.Pool
+var redisDecodeBufferPool = sync.Pool{New: func() any { return &bytes.Buffer{} }}
+
 type checkoutRedisClient interface {
 	stateless.UniversalRedisClient
 	MGet(ctx context.Context, keys ...string) *redis.SliceCmd
@@ -178,10 +191,12 @@ func encodeRedisJSON(value any) ([]byte, error) {
 		return nil, err
 	}
 	var encoded bytes.Buffer
-	writer, err := gzip.NewWriterLevel(&encoded, gzip.BestSpeed)
-	if err != nil {
-		return nil, err
-	}
+	writer := redisGZIPWriterPool.Get().(*gzip.Writer)
+	writer.Reset(&encoded)
+	defer func() {
+		writer.Reset(io.Discard)
+		redisGZIPWriterPool.Put(writer)
+	}()
 	if _, err := writer.Write(plain); err != nil {
 		_ = writer.Close()
 		return nil, err
@@ -193,19 +208,37 @@ func encodeRedisJSON(value any) ([]byte, error) {
 }
 
 func decodeRedisJSON(encoded []byte, target any) error {
-	reader, err := gzip.NewReader(bytes.NewReader(encoded))
-	if err != nil {
-		return err
+	var reader *gzip.Reader
+	if pooled := redisGZIPReaderPool.Get(); pooled != nil {
+		reader = pooled.(*gzip.Reader)
+		if err := reader.Reset(bytes.NewReader(encoded)); err != nil {
+			redisGZIPReaderPool.Put(reader)
+			return err
+		}
+	} else {
+		var err error
+		reader, err = gzip.NewReader(bytes.NewReader(encoded))
+		if err != nil {
+			return err
+		}
 	}
-	plain, readErr := io.ReadAll(reader)
+	plain := redisDecodeBufferPool.Get().(*bytes.Buffer)
+	plain.Reset()
+	_, readErr := plain.ReadFrom(reader)
 	closeErr := reader.Close()
+	redisGZIPReaderPool.Put(reader)
 	if readErr != nil {
+		redisDecodeBufferPool.Put(plain)
 		return readErr
 	}
 	if closeErr != nil {
+		redisDecodeBufferPool.Put(plain)
 		return closeErr
 	}
-	return json.Unmarshal(plain, target)
+	err := json.Unmarshal(plain.Bytes(), target)
+	plain.Reset()
+	redisDecodeBufferPool.Put(plain)
+	return err
 }
 
 const commitOrderScript = `
@@ -233,7 +266,7 @@ elseif ARGV[8] == "remove" then
   redis.call("ZREM", KEYS[5], ARGV[10])
   redis.call("DEL", KEYS[6])
 end
-return {0, tonumber(ARGV[3]), ARGV[6]}
+return {0, tonumber(ARGV[3]), ""}
 `
 
 func (store *stateStore) ApplyOrder(
@@ -268,7 +301,7 @@ func (store *stateStore) ApplyOrder(
 	inputKey := digest(input.MessageId)
 
 	for attempt := 0; attempt < redisTransactionRetries; attempt++ {
-		state, expected, accepted, err := store.loadOrderWorkspace(orderID, at, base)
+		state, expected, accepted, err := store.loadOrderWorkspace(orderID, at, base, true)
 		if err != nil {
 			return transitionOutcome{}, err
 		}
@@ -349,8 +382,9 @@ func (store *stateStore) ApplyOrder(
 			time.Sleep(stateless.Backoff(attempt, time.Millisecond, 50*time.Millisecond))
 			continue
 		}
-		results := []resultMessage{}
-		if len(stored) > 0 {
+		results := state.Results
+		if status == 1 && len(stored) > 0 {
+			results = []resultMessage{}
 			if err := decodeRedisJSON(stored, &results); err != nil {
 				return transitionOutcome{}, fmt.Errorf("decode checkout result journal: %w", err)
 			}
@@ -369,7 +403,7 @@ func newDeadlineRecord(saga *orderSaga) deadlineRecord {
 	}
 }
 
-func (store *stateStore) loadOrderWorkspace(orderID string, at time.Time, base *persistedState) (*persistedState, uint64, *acceptedOrderRecord, error) {
+func (store *stateStore) loadOrderWorkspace(orderID string, at time.Time, base *persistedState, hydrateAccepted bool) (*persistedState, uint64, *acceptedOrderRecord, error) {
 	state := newPersistedState(at)
 	if base != nil {
 		state.CatalogRevision = base.CatalogRevision
@@ -418,13 +452,16 @@ func (store *stateStore) loadOrderWorkspace(orderID string, at time.Time, base *
 			return nil, 0, nil, fmt.Errorf("decode checkout saga: %w", err)
 		}
 		state.Orders[orderID] = saga
+		if hydrateAccepted {
+			hydrateAccepted = saga.Stage == stageWaitingQuote
+		}
 	}
 	var accepted *acceptedOrderRecord
 	encoded, err = redisBytes(values[2])
 	if err != nil {
 		return nil, 0, nil, err
 	}
-	if len(encoded) > 0 {
+	if len(encoded) > 0 && hydrateAccepted {
 		accepted = &acceptedOrderRecord{}
 		if err := decodeRedisJSON(encoded, accepted); err != nil {
 			return nil, 0, nil, fmt.Errorf("decode accepted order: %w", err)
@@ -647,7 +684,7 @@ func (store *stateStore) loadJSONBatch(loads []redisJSONLoad) error {
 }
 
 func (store *stateStore) LoadOrder(orderID string) (*orderSaga, error) {
-	state, _, _, err := store.loadOrderWorkspace(orderID, time.Unix(1, 0), nil)
+	state, _, _, err := store.loadOrderWorkspace(orderID, time.Unix(1, 0), nil, false)
 	if err != nil {
 		return nil, err
 	}
@@ -655,7 +692,17 @@ func (store *stateStore) LoadOrder(orderID string) (*orderSaga, error) {
 }
 
 func (store *stateStore) LoadAcceptedOrder(orderID string) (*acceptedOrderRecord, error) {
-	_, _, accepted, err := store.loadOrderWorkspace(orderID, time.Unix(1, 0), nil)
+	value, err := store.client.Get(context.Background(), store.orderBase(orderID)+":accepted").Bytes()
+	if errors.Is(err, redis.Nil) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	accepted := &acceptedOrderRecord{}
+	if err := decodeRedisJSON(value, accepted); err != nil {
+		return nil, fmt.Errorf("decode accepted order: %w", err)
+	}
 	return accepted, err
 }
 

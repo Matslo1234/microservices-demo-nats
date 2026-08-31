@@ -1693,7 +1693,10 @@ def saturation_summary(
             "rungs": [],
         }
 
-    rungs: list[dict[str, Any]] = []
+    business_by_rung: dict[int, dict[str, Any]] = {}
+    resources_by_rung: dict[int, dict[str, Any]] = {}
+    nats_by_rung: dict[int, dict[str, Any]] = {}
+    outstanding_by_rung: dict[int, dict[str, Any]] = {}
     for decision in decisions:
         rung_number = int(decision["rung"])
         started = float(decision["started_elapsed_seconds"])
@@ -1743,17 +1746,48 @@ def saturation_summary(
                 "reason": "not applicable to GRPC application",
             }
         )
-        rungs.append(
-            {
-                **decision,
-                "business": business,
-                "outstanding_orders": outstanding_summary(
-                    rung_outstanding_records
-                ),
-                "resources": resources,
-                "nats": nats,
-            }
+        business_by_rung[rung_number] = business
+        resources_by_rung[rung_number] = resources
+        nats_by_rung[rung_number] = nats
+        outstanding_by_rung[rung_number] = outstanding_summary(
+            rung_outstanding_records
         )
+
+    return assemble_saturation_summary(
+        config,
+        decisions,
+        business_by_rung,
+        resources_by_rung,
+        nats_by_rung,
+        outstanding_by_rung,
+    )
+
+
+def assemble_saturation_summary(
+    config: BenchmarkConfig,
+    decisions: list[dict[str, Any]],
+    business_by_rung: dict[int, dict[str, Any]],
+    resources_by_rung: dict[int, dict[str, Any]],
+    nats_by_rung: dict[int, dict[str, Any]],
+    outstanding_by_rung: dict[int, dict[str, Any]],
+) -> dict[str, Any]:
+    """Assemble already-reduced rung data without retaining raw records."""
+    if not decisions:
+        return {
+            "available": False,
+            "reason": "no saturation rung decisions were recorded",
+            "rungs": [],
+        }
+    rungs = [
+        {
+            **decision,
+            "business": business_by_rung[int(decision["rung"])],
+            "outstanding_orders": outstanding_by_rung[int(decision["rung"])],
+            "resources": resources_by_rung[int(decision["rung"])],
+            "nats": nats_by_rung[int(decision["rung"])],
+        }
+        for decision in decisions
+    ]
 
     final = rungs[-1]
     first_saturated_index = next(
@@ -1870,13 +1904,28 @@ def build_report(run_directory: Path) -> dict[str, Any]:
         else float(config.duration_seconds)
     )
 
-    # Load large record sets in stages for ordinary runs.  Saturation and
-    # fault-tolerance reports correlate the sets and therefore retain them
-    # until their specialized report has been built.
-    correlated_report = config.workload in {"saturation", "fault_tolerance"}
+    # Load large record sets in stages. Saturation reduces each set to compact
+    # per-rung summaries before loading the next one; only fault-tolerance
+    # needs all three raw sets simultaneously.
+    correlated_report = config.workload == "fault_tolerance"
+    saturation_business: dict[int, dict[str, Any]] = {}
+    saturation_resources: dict[int, dict[str, Any]] = {}
+    saturation_nats: dict[int, dict[str, Any]] = {}
+    saturation_outstanding: dict[int, dict[str, Any]] = {}
     business_records = read_json_lines(run_directory / "business.jsonl")
     business = business_summary(business_records, measured_duration)
     write_business_csv(business_records, run_directory / "business.csv")
+    if config.workload == "saturation":
+        for decision in saturation_decisions:
+            rung = int(decision["rung"])
+            saturation_business[rung] = business_summary(
+                [
+                    record
+                    for record in business_records
+                    if record.get("context", {}).get("saturation_rung") == rung
+                ],
+                float(decision["duration_seconds"]),
+            )
     if not correlated_report:
         del business_records
 
@@ -1898,11 +1947,62 @@ def build_report(run_directory: Path) -> dict[str, Any]:
         if config.application_type == "NATS"
         else {"available": False, "reason": "not applicable to GRPC application"}
     )
+    if config.workload == "saturation":
+        for decision in saturation_decisions:
+            rung = int(decision["rung"])
+            started = float(decision["started_elapsed_seconds"])
+            ended = float(decision["ended_elapsed_seconds"])
+            rung_resources = resource_summary(
+                source_records_for_window(
+                    resource_records, "kubernetes", started, ended
+                ),
+                allow_single_sample=True,
+            )
+            add_per_order_resource_metrics(
+                rung_resources, saturation_business[rung]["completed"]
+            )
+            saturation_resources[rung] = rung_resources
+            saturation_nats[rung] = (
+                nats_summary(
+                    source_records_for_window(
+                        resource_records, "nats", started, ended
+                    ),
+                    raft_records=source_records_for_window(
+                        resource_records, "nats_raft", started, ended
+                    ),
+                    health_records=[
+                        record
+                        for record in resource_records
+                        if started
+                        <= float(record.get("elapsed_seconds", -1))
+                        <= ended
+                    ],
+                )
+                if config.application_type == "NATS"
+                else {
+                    "available": False,
+                    "reason": "not applicable to GRPC application",
+                }
+            )
     if not correlated_report:
         del resource_records
 
     outstanding_records = read_json_lines(run_directory / "outstanding.jsonl")
     outstanding = outstanding_summary(outstanding_records)
+    if config.workload == "saturation":
+        for decision in saturation_decisions:
+            rung = int(decision["rung"])
+            started = float(decision["started_elapsed_seconds"])
+            ended = float(decision["ended_elapsed_seconds"])
+            saturation_outstanding[rung] = outstanding_summary(
+                [
+                    record
+                    for record in outstanding_records
+                    if started
+                    <= float(record.get("elapsed_seconds", -1))
+                    <= ended
+                ]
+            )
     if not correlated_report:
         del outstanding_records
     summary = {
@@ -1925,12 +2025,13 @@ def build_report(run_directory: Path) -> dict[str, Any]:
         summary["users"] = config.users
     if config.workload == "saturation":
         summary["configured_steady_seconds"] = config.duration_seconds
-        summary["saturation"] = saturation_summary(
+        summary["saturation"] = assemble_saturation_summary(
             config,
             saturation_decisions,
-            business_records,
-            resource_records,
-            outstanding_records,
+            saturation_business,
+            saturation_resources,
+            saturation_nats,
+            saturation_outstanding,
         )
     if config.workload == "fault_tolerance":
         fault_records = read_json_lines(run_directory / "faults.jsonl")

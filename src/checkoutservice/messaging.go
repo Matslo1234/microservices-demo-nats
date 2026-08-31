@@ -85,6 +85,18 @@ type checkoutStreamMessage struct {
 	err      error
 }
 
+type checkoutStreamWork struct {
+	message checkoutStreamMessage
+	done    *sync.WaitGroup
+}
+
+type checkoutStreamProcessor struct {
+	worker  *checkoutWorker
+	handler checkoutMessageHandler
+	lanes   []chan checkoutStreamWork
+	running sync.WaitGroup
+}
+
 type checkoutMetrics struct {
 	transitions             atomic.Uint64
 	duplicates              atomic.Uint64
@@ -425,6 +437,8 @@ func (worker *checkoutWorker) consume(
 	fetchSize int,
 	parallelism int,
 ) error {
+	processor := newCheckoutStreamProcessor(worker, handler, fetchSize, parallelism)
+	defer processor.Close()
 	for {
 		select {
 		case <-worker.stop:
@@ -438,13 +452,58 @@ func (worker *checkoutWorker) consume(
 			}
 			continue
 		}
-		worker.processStream(batch.Messages(), handler, fetchSize, parallelism)
+		processor.Process(batch.Messages())
 		if err := batch.Error(); err != nil {
 			if checkoutConsumerTerminal(err) {
 				return err
 			}
 		}
 	}
+}
+
+func newCheckoutStreamProcessor(
+	worker *checkoutWorker,
+	handler checkoutMessageHandler,
+	queueSize int,
+	parallelism int,
+) *checkoutStreamProcessor {
+	if parallelism < 1 {
+		parallelism = 1
+	}
+	processor := &checkoutStreamProcessor{
+		worker: worker, handler: handler, lanes: make([]chan checkoutStreamWork, parallelism),
+	}
+	for index := range processor.lanes {
+		lane := make(chan checkoutStreamWork, queueSize)
+		processor.lanes[index] = lane
+		processor.running.Add(1)
+		go func() {
+			defer processor.running.Done()
+			for work := range lane {
+				processor.worker.processMessage(work.message, processor.handler)
+				work.done.Done()
+			}
+		}()
+	}
+	return processor
+}
+
+func (processor *checkoutStreamProcessor) Process(messages <-chan *nats.Msg) {
+	var completed sync.WaitGroup
+	for message := range messages {
+		decoded := decodeCheckoutStreamMessage(message)
+		completed.Add(1)
+		lane := checkoutMessageLane(decoded.envelope, len(processor.lanes))
+		processor.lanes[lane] <- checkoutStreamWork{message: decoded, done: &completed}
+	}
+	completed.Wait()
+}
+
+func (processor *checkoutStreamProcessor) Close() {
+	for _, lane := range processor.lanes {
+		close(lane)
+	}
+	processor.running.Wait()
 }
 
 func checkoutConsumerTerminal(err error) bool {
@@ -465,38 +524,9 @@ func (worker *checkoutWorker) processStream(
 	fetchSize int,
 	parallelism int,
 ) {
-	if parallelism <= 1 {
-		for message := range messages {
-			worker.processMessage(decodeCheckoutStreamMessage(message), handler)
-		}
-		return
-	}
-
-	// Replicated Redis and JetStream commits spend most of their time waiting
-	// for I/O. Dispatch each message as soon as FetchBatch yields it while
-	// retaining stream order for every individual aggregate.
-	lanes := make([]chan checkoutStreamMessage, parallelism)
-	var running sync.WaitGroup
-	for index := range lanes {
-		lane := make(chan checkoutStreamMessage, fetchSize)
-		lanes[index] = lane
-		running.Add(1)
-		go func(messages <-chan checkoutStreamMessage) {
-			defer running.Done()
-			for message := range messages {
-				worker.processMessage(message, handler)
-			}
-		}(lane)
-	}
-	for message := range messages {
-		decoded := decodeCheckoutStreamMessage(message)
-		lane := checkoutMessageLane(decoded.envelope, len(lanes))
-		lanes[lane] <- decoded
-	}
-	for _, lane := range lanes {
-		close(lane)
-	}
-	running.Wait()
+	processor := newCheckoutStreamProcessor(worker, handler, fetchSize, parallelism)
+	processor.Process(messages)
+	processor.Close()
 }
 
 func decodeCheckoutStreamMessage(message *nats.Msg) checkoutStreamMessage {

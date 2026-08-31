@@ -592,7 +592,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-benchmarkservice
-        image: matslo123/benchmarkservice:v0.4.0@sha256:43122dafd72a27162f6fb2b31d0a85d26a445c30e8a97ee537ea8e5f6e925425
+        image: matslo123/benchmarkservice:v0.4.0@sha256:4c679cab7671ee42167f4691b72e17c0be20fc566b34ae4ab5cc6cbb9b6fd2e8
         livenessProbe:
           httpGet:
             path: /healthz
@@ -858,7 +858,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-checkoutservice
-        image: matslo123/checkoutservice:v0.4.0@sha256:ee7b5fed8dcf83c447a67dfe46c33c6593983af1953e82492889199c4891550b
+        image: matslo123/checkoutservice:v0.4.0@sha256:45d687649369e1bca4f49200b4fc6115e61730db14aa74cd385999582d890e2a
         livenessProbe:
           httpGet:
             path: /healthz
@@ -3220,7 +3220,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-benchmarkservice
-        image: matslo123/benchmarkservice:v0.4.0@sha256:43122dafd72a27162f6fb2b31d0a85d26a445c30e8a97ee537ea8e5f6e925425
+        image: matslo123/benchmarkservice:v0.4.0@sha256:4c679cab7671ee42167f4691b72e17c0be20fc566b34ae4ab5cc6cbb9b6fd2e8
         imagePullPolicy: IfNotPresent
         livenessProbe:
           httpGet:
