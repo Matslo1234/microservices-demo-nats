@@ -106,6 +106,10 @@ func (admission *queryAdmission) release() {
 
 type queryHandler func(queryRequest) (queryResponse, error)
 
+type decodedProjectionReader interface {
+	decodedValue(string, func([]byte) (any, error)) (any, uint64, error)
+}
+
 func (p *projector) registerQueries(nc *nats.Conn, role string, stopped chan<- string) (micro.Service, int, error) {
 	endpointPending := make(map[string]*atomic.Int64)
 	var endpointPendingMutex sync.RWMutex
@@ -321,28 +325,14 @@ func (p *projector) homeQuery(request queryRequest) (queryResponse, error) {
 		response.CatalogRevision = max(response.CatalogRevision, product.CatalogRevision)
 		response.UpdatedAt = latest(response.UpdatedAt, product.UpdatedAt)
 	}
-	var cart *storefront.CartView
-	var cartErr error
-	var ad *hipstershop.Ad
-	var adStale []string
-	var wait sync.WaitGroup
-	wait.Add(2)
-	go func() {
-		defer wait.Done()
-		cart, cartErr = p.cartViewCached(request.UserID)
-	}()
-	go func() {
-		defer wait.Done()
-		ad = p.currentAdCached(request.UserID, &adStale)
-	}()
-	wait.Wait()
+	cart, cartErr := p.cartViewCached(request.UserID)
+	ad := p.currentAdCached(request.UserID, &response.Stale)
 	if cartErr != nil {
 		return queryResponse{}, cartErr
 	}
 	response.CartSize, response.CartVersion = cartSize(cart.Cart), cart.Cart.GetCartVersion()
 	response.UpdatedAt = latest(response.UpdatedAt, cart.UpdatedAt)
 	response.Ad = ad
-	response.Stale = append(response.Stale, adStale...)
 	return response, nil
 }
 
@@ -363,28 +353,12 @@ func (p *projector) productQuery(request queryRequest) (queryResponse, error) {
 	if err != nil {
 		return queryResponse{}, err
 	}
-	var cart *storefront.CartView
-	var cartErr error
-	var recommendations []*hipstershop.Product
-	var ad *hipstershop.Ad
 	var recommendationStale, adStale []string
-	var wait sync.WaitGroup
-	wait.Add(3)
-	go func() {
-		defer wait.Done()
-		cart, cartErr = p.cartViewCached(request.UserID)
-	}()
-	go func() {
-		defer wait.Done()
-		recommendations = p.currentRecommendationsCached(
-			request.UserID, request.ProductID, &recommendationStale,
-		)
-	}()
-	go func() {
-		defer wait.Done()
-		ad = p.currentAdCached(request.UserID, &adStale)
-	}()
-	wait.Wait()
+	cart, cartErr := p.cartViewCached(request.UserID)
+	recommendations := p.currentRecommendationsCached(
+		request.UserID, request.ProductID, &recommendationStale,
+	)
+	ad := p.currentAdCached(request.UserID, &adStale)
 	if cartErr != nil {
 		return queryResponse{}, cartErr
 	}
@@ -682,6 +656,25 @@ func latest(values ...time.Time) time.Time {
 }
 
 func (p *projector) allProducts(only []string) ([]storefront.ProductView, error) {
+	if len(only) == 0 && p.catalog != nil {
+		generation := p.catalog.Generation()
+		p.catalogSnapshotMu.Lock()
+		defer p.catalogSnapshotMu.Unlock()
+		if p.catalogSnapshot != nil && p.catalogSnapshotGeneration == generation {
+			return p.catalogSnapshot, nil
+		}
+		products, err := p.readProducts(nil)
+		if err != nil {
+			return nil, err
+		}
+		p.catalogSnapshot = products
+		p.catalogSnapshotGeneration = generation
+		return products, nil
+	}
+	return p.readProducts(only)
+}
+
+func (p *projector) readProducts(only []string) ([]storefront.ProductView, error) {
 	wanted := make(map[string]bool, len(only))
 	for _, id := range only {
 		wanted[id] = true
@@ -725,6 +718,22 @@ func getJSON[T any](bucket projectionReader, key string) (*T, error) {
 }
 
 func getJSONWithRevision[T any](bucket projectionReader, key string) (*T, uint64, error) {
+	if decoded, ok := bucket.(decodedProjectionReader); ok {
+		value, revision, err := decoded.decodedValue(key, func(data []byte) (any, error) {
+			var value T
+			if err := json.Unmarshal(data, &value); err != nil {
+				return nil, err
+			}
+			if preparable, ok := any(&value).(interface{ Prepare() }); ok {
+				preparable.Prepare()
+			}
+			return &value, nil
+		})
+		if err != nil {
+			return nil, 0, err
+		}
+		return value.(*T), revision, nil
+	}
 	entry, err := bucket.Get(key)
 	if err != nil {
 		return nil, 0, err

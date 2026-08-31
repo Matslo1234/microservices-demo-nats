@@ -59,12 +59,14 @@ type Rate struct {
 
 type CurrencyView struct {
 	ProjectionMetadata
-	BaseCurrencyCode string    `json:"base_currency_code"`
-	Rates            []Rate    `json:"rates"`
-	EffectiveSeconds int64     `json:"effective_seconds"`
-	EffectiveNanos   int32     `json:"effective_nanos"`
-	RateRevision     uint64    `json:"rate_revision"`
-	UpdatedAt        time.Time `json:"updated_at"`
+	BaseCurrencyCode    string    `json:"base_currency_code"`
+	Rates               []Rate    `json:"rates"`
+	EffectiveSeconds    int64     `json:"effective_seconds"`
+	EffectiveNanos      int32     `json:"effective_nanos"`
+	RateRevision        uint64    `json:"rate_revision"`
+	UpdatedAt           time.Time `json:"updated_at"`
+	supportedCurrencies []string
+	ratesByCode         map[string]float64
 }
 
 type CartView struct {
@@ -154,6 +156,9 @@ func OperationKey(operationID string) string { return "operation." + operationID
 func OrderKey(orderID string) string { return "order." + orderID }
 
 func (view CurrencyView) SupportedCurrencies() []string {
+	if view.supportedCurrencies != nil {
+		return view.supportedCurrencies
+	}
 	codes := make([]string, 0, len(view.Rates))
 	for _, rate := range view.Rates {
 		codes = append(codes, rate.CurrencyCode)
@@ -162,18 +167,35 @@ func (view CurrencyView) SupportedCurrencies() []string {
 	return codes
 }
 
+// Prepare builds immutable indexes used by the query hot path. It must be
+// called before a CurrencyView is published to concurrent readers.
+func (view *CurrencyView) Prepare() {
+	view.supportedCurrencies = make([]string, 0, len(view.Rates))
+	view.ratesByCode = make(map[string]float64, len(view.Rates))
+	for _, rate := range view.Rates {
+		view.supportedCurrencies = append(view.supportedCurrencies, rate.CurrencyCode)
+		view.ratesByCode[rate.CurrencyCode] = rate.UnitsPerBase
+	}
+	sort.Strings(view.supportedCurrencies)
+}
+
 func (view CurrencyView) Convert(from *commonv1.Money, toCode string) *commonv1.Money {
 	var fromRate, toRate float64
 	var fromOK, toOK bool
-	for _, rate := range view.Rates {
-		if rate.CurrencyCode == from.CurrencyCode {
-			fromRate, fromOK = rate.UnitsPerBase, true
-		}
-		if rate.CurrencyCode == toCode {
-			toRate, toOK = rate.UnitsPerBase, true
-		}
-		if fromOK && toOK {
-			break
+	if view.ratesByCode != nil {
+		fromRate, fromOK = view.ratesByCode[from.CurrencyCode]
+		toRate, toOK = view.ratesByCode[toCode]
+	} else {
+		for _, rate := range view.Rates {
+			if rate.CurrencyCode == from.CurrencyCode {
+				fromRate, fromOK = rate.UnitsPerBase, true
+			}
+			if rate.CurrencyCode == toCode {
+				toRate, toOK = rate.UnitsPerBase, true
+			}
+			if fromOK && toOK {
+				break
+			}
 		}
 	}
 	if !fromOK || !toOK || fromRate == 0 {

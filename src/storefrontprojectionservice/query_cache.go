@@ -4,6 +4,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"sort"
@@ -28,12 +29,19 @@ type projectionReadCache struct {
 	watcher    nats.KeyWatcher
 	maxEntries int
 
-	mu        sync.RWMutex
-	entries   map[string]cachedProjectionEntry
-	revisions map[string]uint64
-	once      sync.Once
-	hits      atomic.Uint64
-	misses    atomic.Uint64
+	mu         sync.RWMutex
+	entries    map[string]cachedProjectionEntry
+	revisions  map[string]uint64
+	decoded    map[string]decodedProjectionEntry
+	generation atomic.Uint64
+	once       sync.Once
+	hits       atomic.Uint64
+	misses     atomic.Uint64
+}
+
+type decodedProjectionEntry struct {
+	revision uint64
+	value    any
 }
 
 type cachedProjectionEntry struct {
@@ -48,6 +56,10 @@ type cachedProjectionEntry struct {
 
 type cachedOnlyProjectionReader struct {
 	cache *projectionReadCache
+}
+
+func (reader cachedOnlyProjectionReader) decodedValue(key string, decode func([]byte) (any, error)) (any, uint64, error) {
+	return reader.cache.decodedCachedValue(key, decode)
 }
 
 func (reader cachedOnlyProjectionReader) Get(key string) (nats.KeyValueEntry, error) {
@@ -79,6 +91,7 @@ func newBoundedProjectionReadCache(source projectionWatchReader, maxEntries int)
 		source: source, watcher: watcher, maxEntries: maxEntries,
 		entries:   make(map[string]cachedProjectionEntry),
 		revisions: make(map[string]uint64),
+		decoded:   make(map[string]decodedProjectionEntry),
 	}
 
 	updates, watcherErrors := watcher.Updates(), watcher.Error()
@@ -151,6 +164,8 @@ func (cache *projectionReadCache) apply(entry nats.KeyValueEntry) {
 	cache.revisions[entry.Key()] = entry.Revision()
 	if entry.Operation() == nats.KeyValueDelete || entry.Operation() == nats.KeyValuePurge {
 		delete(cache.entries, entry.Key())
+		delete(cache.decoded, entry.Key())
+		cache.generation.Add(1)
 		return
 	}
 	if _, exists := cache.entries[entry.Key()]; !exists &&
@@ -158,11 +173,71 @@ func (cache *projectionReadCache) apply(entry nats.KeyValueEntry) {
 		for key := range cache.entries {
 			delete(cache.entries, key)
 			delete(cache.revisions, key)
+			delete(cache.decoded, key)
 			break
 		}
 	}
 	cache.entries[entry.Key()] = copyProjectionEntry(entry)
+	delete(cache.decoded, entry.Key())
+	cache.generation.Add(1)
 }
+
+// decodedValue memoizes the immutable decoded representation for the current
+// KV revision. Updates invalidate it while holding the same lock, so callers
+// cannot pair a decoded value with a different revision.
+func (cache *projectionReadCache) decodedValue(key string, decode func([]byte) (any, error)) (any, uint64, error) {
+	value, revision, err := cache.decodedCachedValue(key, decode)
+	if !errors.Is(err, nats.ErrKeyNotFound) {
+		return value, revision, err
+	}
+	authoritative, err := cache.source.Get(key)
+	if err != nil {
+		return nil, 0, err
+	}
+	cache.apply(authoritative)
+	value, err = decode(authoritative.Value())
+	if err != nil {
+		return nil, 0, err
+	}
+	cache.mu.Lock()
+	if current, ok := cache.entries[key]; ok && current.revision == authoritative.Revision() {
+		cache.decoded[key] = decodedProjectionEntry{revision: authoritative.Revision(), value: value}
+	}
+	cache.mu.Unlock()
+	return value, authoritative.Revision(), nil
+}
+
+func (cache *projectionReadCache) decodedCachedValue(key string, decode func([]byte) (any, error)) (any, uint64, error) {
+	cache.mu.RLock()
+	entry, ok := cache.entries[key]
+	if ok {
+		if decoded, found := cache.decoded[key]; found && decoded.revision == entry.revision {
+			cache.mu.RUnlock()
+			cache.hits.Add(1)
+			return decoded.value, entry.revision, nil
+		}
+	}
+	cache.mu.RUnlock()
+	if !ok {
+		cache.misses.Add(1)
+		return nil, 0, nats.ErrKeyNotFound
+	}
+
+	value, err := decode(entry.value)
+	if err != nil {
+		return nil, 0, err
+	}
+	cache.mu.Lock()
+	current, currentOK := cache.entries[key]
+	if currentOK && current.revision == entry.revision {
+		cache.decoded[key] = decodedProjectionEntry{revision: entry.revision, value: value}
+	}
+	cache.mu.Unlock()
+	cache.hits.Add(1)
+	return value, entry.revision, nil
+}
+
+func (cache *projectionReadCache) Generation() uint64 { return cache.generation.Load() }
 
 func copyProjectionEntry(entry nats.KeyValueEntry) cachedProjectionEntry {
 	return cachedProjectionEntry{

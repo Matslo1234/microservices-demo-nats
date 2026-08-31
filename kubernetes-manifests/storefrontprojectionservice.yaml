@@ -50,7 +50,7 @@ spec:
         - name: NATS_REQUIRED_SUBSCRIPTIONS
           value: "storefront-projection-local-v1,boutique.qry.storefront.home.v1,boutique.qry.storefront.product.v1,boutique.qry.storefront.cart.v1,boutique.qry.storefront.checkout.v1,boutique.qry.storefront.currencies.v1,boutique.qry.storefront.product-meta.v1,boutique.qry.storefront.operation.v1,boutique.qry.storefront.order.v1"
         - name: GOMEMLIMIT
-          value: "400MiB"
+          value: "1GiB"
         - name: STOREFRONT_QUERY_CONCURRENCY
           value: "16"
         - name: STOREFRONT_QUERY_MAX_IN_FLIGHT

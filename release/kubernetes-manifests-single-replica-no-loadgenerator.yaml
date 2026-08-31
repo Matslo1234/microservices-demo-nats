@@ -1793,7 +1793,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-storefrontprojectionservice
-        image: matslo123/storefrontprojectionservice:v0.4.0@sha256:4e4759eb22cca716397480086e74144c55e5d42e0d3e89394398e34c84c689fb
+        image: matslo123/storefrontprojectionservice:v0.4.0@sha256:8724b68f04d6cc1b3dc91ff7ff14af262f546e061fd6b32338e13c5b47cf00d6
         livenessProbe:
           failureThreshold: 6
           httpGet:

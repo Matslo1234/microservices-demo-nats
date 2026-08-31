@@ -58,22 +58,25 @@ var projectionFilterSubjects = []string{
 }
 
 type projector struct {
-	js              nats.JetStreamContext
-	config          projectionConfig
-	products        projectionKV
-	catalog         *projectionReadCache
-	carts           projectionKV
-	cartCache       *projectionReadCache
-	context         projectionKV
-	contextCache    *projectionReadCache
-	operations      projectionKV
-	orders          projectionKV
-	productWrites   projectionKV
-	cartWrites      projectionKV
-	contextWrites   projectionKV
-	operationWrites projectionKV
-	orderWrites     projectionKV
-	publishLive     func(string, []byte) error
+	js                        nats.JetStreamContext
+	config                    projectionConfig
+	products                  projectionKV
+	catalog                   *projectionReadCache
+	carts                     projectionKV
+	cartCache                 *projectionReadCache
+	context                   projectionKV
+	contextCache              *projectionReadCache
+	operations                projectionKV
+	orders                    projectionKV
+	productWrites             projectionKV
+	cartWrites                projectionKV
+	contextWrites             projectionKV
+	operationWrites           projectionKV
+	orderWrites               projectionKV
+	publishLive               func(string, []byte) error
+	catalogSnapshotMu         sync.Mutex
+	catalogSnapshotGeneration uint64
+	catalogSnapshot           []storefront.ProductView
 
 	kvConflictRetries  atomic.Uint64
 	staleEventSkips    atomic.Uint64
