@@ -114,7 +114,7 @@ func newProjector(js nats.JetStreamContext, config projectionConfig) (*projector
 		catalog.Close()
 		return nil, fmt.Errorf("open cart KV: %w", err)
 	}
-	cartCache, err := newBoundedProjectionReadCache(carts, config.cartCacheEntries)
+	cartCache, err := newExpiringProjectionReadCache(carts, config.cartCacheEntries, cartCacheTTL, nil)
 	if err != nil {
 		catalog.Close()
 		return nil, fmt.Errorf("initialize cart query cache: %w", err)
@@ -125,7 +125,7 @@ func newProjector(js nats.JetStreamContext, config projectionConfig) (*projector
 		cartCache.Close()
 		return nil, fmt.Errorf("open context KV: %w", err)
 	}
-	contextCache, err := newBoundedProjectionReadCache(context, config.contextCacheEntries)
+	contextCache, err := newExpiringProjectionReadCache(context, config.contextCacheEntries, 0, projectionExpiresAt)
 	if err != nil {
 		catalog.Close()
 		cartCache.Close()

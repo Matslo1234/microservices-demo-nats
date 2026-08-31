@@ -1858,11 +1858,6 @@ def source_records_for_window(
 def build_report(run_directory: Path) -> dict[str, Any]:
     with (run_directory / "config.json").open(encoding="utf-8") as source:
         config = BenchmarkConfig.from_dict(json.load(source))
-    business_records = read_json_lines(run_directory / "business.jsonl")
-    resource_records = read_json_lines(run_directory / "resources.jsonl")
-    outstanding_records = read_json_lines(run_directory / "outstanding.jsonl")
-    fault_records = read_json_lines(run_directory / "faults.jsonl")
-    fault_plan = read_json_object(run_directory / "fault-plan.json")
     saturation_decisions = read_json_lines(
         run_directory / "saturation.jsonl"
     )
@@ -1874,7 +1869,18 @@ def build_report(run_directory: Path) -> dict[str, Any]:
         if config.workload == "saturation" and saturation_decisions
         else float(config.duration_seconds)
     )
+
+    # Load large record sets in stages for ordinary runs.  Saturation and
+    # fault-tolerance reports correlate the sets and therefore retain them
+    # until their specialized report has been built.
+    correlated_report = config.workload in {"saturation", "fault_tolerance"}
+    business_records = read_json_lines(run_directory / "business.jsonl")
     business = business_summary(business_records, measured_duration)
+    write_business_csv(business_records, run_directory / "business.csv")
+    if not correlated_report:
+        del business_records
+
+    resource_records = read_json_lines(run_directory / "resources.jsonl")
     resources = resource_summary(
         resource_records,
         allow_single_sample=config.workload == "saturation",
@@ -1892,7 +1898,13 @@ def build_report(run_directory: Path) -> dict[str, Any]:
         if config.application_type == "NATS"
         else {"available": False, "reason": "not applicable to GRPC application"}
     )
+    if not correlated_report:
+        del resource_records
+
+    outstanding_records = read_json_lines(run_directory / "outstanding.jsonl")
     outstanding = outstanding_summary(outstanding_records)
+    if not correlated_report:
+        del outstanding_records
     summary = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "application_type": config.application_type,
@@ -1921,6 +1933,8 @@ def build_report(run_directory: Path) -> dict[str, Any]:
             outstanding_records,
         )
     if config.workload == "fault_tolerance":
+        fault_records = read_json_lines(run_directory / "faults.jsonl")
+        fault_plan = read_json_object(run_directory / "fault-plan.json")
         summary["arrival_rate"] = config.arrival_rate
         summary["fault_tolerance"] = fault_tolerance_summary(
             config,
@@ -1936,7 +1950,6 @@ def build_report(run_directory: Path) -> dict[str, Any]:
     with (run_directory / "summary.json").open("w", encoding="utf-8") as target:
         json.dump(summary, target, indent=2, sort_keys=True)
         target.write("\n")
-    write_business_csv(business_records, run_directory / "business.csv")
     if config.workload == "fault_tolerance":
         write_fault_tolerance_csv(
             summary["fault_tolerance"],

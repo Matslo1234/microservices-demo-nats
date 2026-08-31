@@ -4,6 +4,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -14,6 +15,8 @@ import (
 
 	"github.com/nats-io/nats.go"
 )
+
+const cartCacheTTL = 10 * time.Minute
 
 type projectionWatchReader interface {
 	projectionReader
@@ -28,15 +31,34 @@ type projectionReadCache struct {
 	source     projectionReader
 	watcher    nats.KeyWatcher
 	maxEntries int
+	idleTTL    time.Duration
+	expiresAt  func([]byte) time.Time
 
-	mu         sync.RWMutex
-	entries    map[string]cachedProjectionEntry
-	revisions  map[string]uint64
-	decoded    map[string]decodedProjectionEntry
-	generation atomic.Uint64
-	once       sync.Once
-	hits       atomic.Uint64
-	misses     atomic.Uint64
+	mu          sync.RWMutex
+	entries     map[string]cachedProjectionEntry
+	revisions   map[string]uint64
+	decoded     map[string]decodedProjectionEntry
+	expirations map[string]*cacheExpiration
+	generation  atomic.Uint64
+	once        sync.Once
+	sweepStop   chan struct{}
+	sweepDone   chan struct{}
+	hits        atomic.Uint64
+	misses      atomic.Uint64
+}
+
+type cacheExpiration struct {
+	deadline atomic.Int64
+}
+
+func projectionExpiresAt(value []byte) time.Time {
+	var expiry struct {
+		ExpiresAt time.Time `json:"expires_at"`
+	}
+	if err := json.Unmarshal(value, &expiry); err != nil {
+		return time.Time{}
+	}
+	return expiry.ExpiresAt
 }
 
 type decodedProjectionEntry struct {
@@ -83,15 +105,28 @@ func newProjectionReadCache(source projectionWatchReader) (*projectionReadCache,
 }
 
 func newBoundedProjectionReadCache(source projectionWatchReader, maxEntries int) (*projectionReadCache, error) {
+	return newExpiringProjectionReadCache(source, maxEntries, 0, nil)
+}
+
+func newExpiringProjectionReadCache(
+	source projectionWatchReader,
+	maxEntries int,
+	idleTTL time.Duration,
+	expiresAt func([]byte) time.Time,
+) (*projectionReadCache, error) {
 	watcher, err := source.WatchAll()
 	if err != nil {
 		return nil, err
 	}
 	cache := &projectionReadCache{
 		source: source, watcher: watcher, maxEntries: maxEntries,
-		entries:   make(map[string]cachedProjectionEntry),
-		revisions: make(map[string]uint64),
-		decoded:   make(map[string]decodedProjectionEntry),
+		idleTTL: idleTTL, expiresAt: expiresAt,
+		entries: make(map[string]cachedProjectionEntry), revisions: make(map[string]uint64),
+		decoded: make(map[string]decodedProjectionEntry), expirations: make(map[string]*cacheExpiration),
+	}
+	if idleTTL > 0 || expiresAt != nil {
+		cache.sweepStop = make(chan struct{})
+		cache.sweepDone = make(chan struct{})
 	}
 
 	updates, watcherErrors := watcher.Updates(), watcher.Error()
@@ -112,6 +147,9 @@ func newBoundedProjectionReadCache(source projectionWatchReader, maxEntries int)
 				default:
 				}
 				go cache.follow(updates, watcherErrors)
+				if cache.sweepStop != nil {
+					go cache.sweep()
+				}
 				return cache, nil
 			}
 			cache.apply(entry)
@@ -125,6 +163,37 @@ func newBoundedProjectionReadCache(source projectionWatchReader, maxEntries int)
 				return nil, watchErr
 			}
 		}
+	}
+}
+
+func (cache *projectionReadCache) sweep() {
+	defer close(cache.sweepDone)
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case now := <-ticker.C:
+			cache.sweepExpired(now)
+		case <-cache.sweepStop:
+			return
+		}
+	}
+}
+
+func (cache *projectionReadCache) sweepExpired(now time.Time) {
+	nowUnix := now.UnixNano()
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	for key, expiration := range cache.expirations {
+		deadline := expiration.deadline.Load()
+		if deadline == 0 || deadline > nowUnix {
+			continue
+		}
+		delete(cache.entries, key)
+		delete(cache.revisions, key)
+		delete(cache.decoded, key)
+		delete(cache.expirations, key)
+		cache.generation.Add(1)
 	}
 }
 
@@ -155,6 +224,12 @@ func (cache *projectionReadCache) follow(
 }
 
 func (cache *projectionReadCache) apply(entry nats.KeyValueEntry) {
+	deadline := time.Time{}
+	if cache.idleTTL > 0 {
+		deadline = time.Now().Add(cache.idleTTL)
+	} else if cache.expiresAt != nil {
+		deadline = cache.expiresAt(entry.Value())
+	}
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
 	if revision, exists := cache.revisions[entry.Key()]; exists &&
@@ -165,6 +240,7 @@ func (cache *projectionReadCache) apply(entry nats.KeyValueEntry) {
 	if entry.Operation() == nats.KeyValueDelete || entry.Operation() == nats.KeyValuePurge {
 		delete(cache.entries, entry.Key())
 		delete(cache.decoded, entry.Key())
+		delete(cache.expirations, entry.Key())
 		cache.generation.Add(1)
 		return
 	}
@@ -174,11 +250,19 @@ func (cache *projectionReadCache) apply(entry nats.KeyValueEntry) {
 			delete(cache.entries, key)
 			delete(cache.revisions, key)
 			delete(cache.decoded, key)
+			delete(cache.expirations, key)
 			break
 		}
 	}
 	cache.entries[entry.Key()] = copyProjectionEntry(entry)
 	delete(cache.decoded, entry.Key())
+	if deadline.IsZero() {
+		delete(cache.expirations, entry.Key())
+	} else {
+		expiration := &cacheExpiration{}
+		expiration.deadline.Store(deadline.UnixNano())
+		cache.expirations[entry.Key()] = expiration
+	}
 	cache.generation.Add(1)
 }
 
@@ -210,9 +294,11 @@ func (cache *projectionReadCache) decodedValue(key string, decode func([]byte) (
 func (cache *projectionReadCache) decodedCachedValue(key string, decode func([]byte) (any, error)) (any, uint64, error) {
 	cache.mu.RLock()
 	entry, ok := cache.entries[key]
+	expiration := cache.expirations[key]
 	if ok {
 		if decoded, found := cache.decoded[key]; found && decoded.revision == entry.revision {
 			cache.mu.RUnlock()
+			cache.refresh(expiration)
 			cache.hits.Add(1)
 			return decoded.value, entry.revision, nil
 		}
@@ -234,7 +320,14 @@ func (cache *projectionReadCache) decodedCachedValue(key string, decode func([]b
 	}
 	cache.mu.Unlock()
 	cache.hits.Add(1)
+	cache.refresh(expiration)
 	return value, entry.revision, nil
+}
+
+func (cache *projectionReadCache) refresh(expiration *cacheExpiration) {
+	if expiration != nil && cache.idleTTL > 0 {
+		expiration.deadline.Store(time.Now().Add(cache.idleTTL).UnixNano())
+	}
 }
 
 func (cache *projectionReadCache) Generation() uint64 { return cache.generation.Load() }
@@ -251,8 +344,10 @@ func copyProjectionEntry(entry nats.KeyValueEntry) cachedProjectionEntry {
 func (cache *projectionReadCache) Get(key string) (nats.KeyValueEntry, error) {
 	cache.mu.RLock()
 	entry, ok := cache.entries[key]
+	expiration := cache.expirations[key]
 	cache.mu.RUnlock()
 	if ok {
+		cache.refresh(expiration)
 		cache.hits.Add(1)
 		return entry, nil
 	}
@@ -275,11 +370,13 @@ func (cache *projectionReadCache) Get(key string) (nats.KeyValueEntry, error) {
 func (cache *projectionReadCache) Cached(key string) (nats.KeyValueEntry, error) {
 	cache.mu.RLock()
 	entry, ok := cache.entries[key]
+	expiration := cache.expirations[key]
 	cache.mu.RUnlock()
 	if !ok {
 		cache.misses.Add(1)
 		return nil, nats.ErrKeyNotFound
 	}
+	cache.refresh(expiration)
 	cache.hits.Add(1)
 	return entry, nil
 }
@@ -300,6 +397,10 @@ func (cache *projectionReadCache) Keys(...nats.WatchOpt) ([]string, error) {
 
 func (cache *projectionReadCache) Close() {
 	cache.once.Do(func() {
+		if cache.sweepStop != nil {
+			close(cache.sweepStop)
+			<-cache.sweepDone
+		}
 		if err := cache.watcher.Stop(); err != nil &&
 			err != nats.ErrBadSubscription &&
 			err != nats.ErrConnectionClosed {

@@ -5,7 +5,9 @@ from pathlib import Path
 
 from parallel import (
     archive_directory,
+    archive_directory_to_file,
     extract_archive,
+    extract_archive_file,
     merge_worker_outputs,
 )
 
@@ -98,6 +100,25 @@ class ParallelWorkerTest(unittest.TestCase):
             )
 
             extract_archive(archive_directory(source), destination)
+
+            self.assertEqual(
+                '{"ok":true}',
+                (destination / "result.json").read_text(encoding="utf-8"),
+            )
+
+    def test_worker_file_archive_round_trip(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            archive = root / "result.zip"
+            destination = root / "destination"
+            source.mkdir()
+            (source / "result.json").write_text(
+                '{"ok":true}', encoding="utf-8"
+            )
+
+            archive_directory_to_file(source, archive)
+            extract_archive_file(archive, destination)
 
             self.assertEqual(
                 '{"ok":true}',

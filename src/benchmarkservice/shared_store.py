@@ -291,6 +291,18 @@ class NatsSharedStore:
     def put_object(self, name: str, data: bytes) -> None:
         self._call(self._put_object(name, data))
 
+    async def _put_object_file(self, name: str, path: os.PathLike[str]) -> None:
+        with open(path, "rb") as source:
+            async def put() -> Any:
+                source.seek(0)
+                return await self._objects.put(name, source)
+
+            await self._with_recovery(put)
+
+    def put_object_file(self, name: str, path: os.PathLike[str]) -> None:
+        """Upload a file without constructing an equally large bytes object."""
+        self._call(self._put_object_file(name, path))
+
     async def _get_object(self, name: str) -> bytes:
         async def get() -> Any:
             try:
@@ -303,6 +315,32 @@ class NatsSharedStore:
 
     def get_object(self, name: str) -> bytes:
         return self._call(self._get_object(name))
+
+    async def _get_object_file(
+        self, name: str, path: os.PathLike[str]
+    ) -> None:
+        async def get(target: Any) -> Any:
+            try:
+                target.seek(0)
+                target.truncate()
+                return await self._objects.get(name, writeinto=target)
+            except self._errors["object_not_found"] as error:
+                raise RecordNotFound(name) from error
+
+        temporary = os.fspath(path) + ".tmp"
+        try:
+            with open(temporary, "wb") as target:
+                await self._with_recovery(lambda: get(target))
+            os.replace(temporary, path)
+        finally:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
+
+    def get_object_file(self, name: str, path: os.PathLike[str]) -> None:
+        """Download an object incrementally into a file."""
+        self._call(self._get_object_file(name, path))
 
     async def _delete_object(self, name: str) -> None:
         async def delete() -> None:

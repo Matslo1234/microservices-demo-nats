@@ -3,10 +3,12 @@
 
 from __future__ import annotations
 
+import heapq
 import io
 import json
 import shutil
 import zipfile
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -47,6 +49,16 @@ def archive_directory(directory: Path) -> bytes:
     return output.getvalue()
 
 
+def archive_directory_to_file(directory: Path, destination: Path) -> None:
+    """Archive a worker directory without retaining the ZIP in memory."""
+    with zipfile.ZipFile(
+        destination, "w", compression=zipfile.ZIP_DEFLATED
+    ) as archive:
+        for path in sorted(directory.rglob("*")):
+            if path.is_file() and path != destination:
+                archive.write(path, path.relative_to(directory))
+
+
 def extract_archive(data: bytes, destination: Path) -> None:
     destination.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(io.BytesIO(data)) as archive:
@@ -59,10 +71,22 @@ def extract_archive(data: bytes, destination: Path) -> None:
         archive.extractall(destination)
 
 
-def _read_records(path: Path) -> list[dict[str, Any]]:
+def extract_archive_file(source: Path, destination: Path) -> None:
+    """Extract a worker archive directly from disk."""
+    destination.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(source) as archive:
+        for member in archive.infolist():
+            path = Path(member.filename)
+            if path.is_absolute() or ".." in path.parts:
+                raise ValueError(
+                    f"worker archive contains unsafe path {member.filename!r}"
+                )
+        archive.extractall(destination)
+
+
+def _read_records(path: Path) -> Iterator[dict[str, Any]]:
     if not path.exists():
-        return []
-    records: list[dict[str, Any]] = []
+        return
     with path.open(encoding="utf-8") as source:
         for line_number, line in enumerate(source, 1):
             if not line.strip():
@@ -76,11 +100,10 @@ def _read_records(path: Path) -> list[dict[str, Any]]:
                     continue
                 raise
             if isinstance(value, dict):
-                records.append(value)
-    return records
+                yield value
 
 
-def _write_records(path: Path, records: list[dict[str, Any]]) -> None:
+def _write_records(path: Path, records: Iterator[dict[str, Any]]) -> None:
     with path.open("w", encoding="utf-8") as target:
         for record in records:
             target.write(json.dumps(record, sort_keys=True) + "\n")
@@ -93,32 +116,37 @@ def _timestamp(record: dict[str, Any]) -> float:
 def merge_worker_outputs(
     run_directory: Path, worker_directories: list[Path]
 ) -> list[dict[str, Any]]:
-    business = sorted(
-        (
-            record
+    business = heapq.merge(
+        *(
+            _read_records(directory / "business.jsonl")
             for directory in worker_directories
-            for record in _read_records(directory / "business.jsonl")
         ),
         key=_timestamp,
     )
     _write_records(run_directory / "business.jsonl", business)
 
-    outstanding = sorted(
-        (
-            record
+    outstanding = heapq.merge(
+        *(
+            _read_records(directory / "outstanding.jsonl")
             for directory in worker_directories
-            for record in _read_records(directory / "outstanding.jsonl")
         ),
         key=_timestamp,
     )
     total_outstanding = 0
-    for record in outstanding:
-        if record.get("event") == "accepted":
-            total_outstanding += 1
-        else:
-            total_outstanding = max(0, total_outstanding - 1)
-        record["outstanding"] = total_outstanding
-    _write_records(run_directory / "outstanding.jsonl", outstanding)
+
+    def rebase_outstanding() -> Iterator[dict[str, Any]]:
+        nonlocal total_outstanding
+        for record in outstanding:
+            if record.get("event") == "accepted":
+                total_outstanding += 1
+            else:
+                total_outstanding = max(0, total_outstanding - 1)
+            record["outstanding"] = total_outstanding
+            yield record
+
+    _write_records(
+        run_directory / "outstanding.jsonl", rebase_outstanding()
+    )
 
     for shared_artifact in ("resources.jsonl", "saturation.jsonl"):
         source = worker_directories[0] / shared_artifact
@@ -140,7 +168,8 @@ def merge_worker_outputs(
             )
             log_path = directory / "runner.log"
             if log_path.exists():
-                combined_log.write(log_path.read_bytes())
+                with log_path.open("rb") as worker_log:
+                    shutil.copyfileobj(worker_log, combined_log)
             combined_log.write(b"\n")
 
             for csv_path in sorted(directory.glob("locust_*.csv")):

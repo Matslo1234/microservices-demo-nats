@@ -23,8 +23,8 @@ from control import (
     utc_now,
 )
 from parallel import (
-    archive_directory,
-    extract_archive,
+    archive_directory_to_file,
+    extract_archive_file,
     merge_worker_outputs,
     ready_object,
     result_object,
@@ -193,6 +193,25 @@ def wait_for_object(
             stop_requested.wait(0.5)
 
 
+def wait_for_object_file(
+    store: NatsSharedStore,
+    name: str,
+    destination: Path,
+    stop_requested: threading.Event,
+    deadline: float,
+) -> None:
+    while True:
+        if stop_requested.is_set():
+            raise InterruptedError("benchmark stop was requested")
+        try:
+            store.get_object_file(name, destination)
+            return
+        except RecordNotFound:
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f"timed out waiting for {name}")
+            stop_requested.wait(0.5)
+
+
 def coordinate_start(
     store: NatsSharedStore,
     worker_index: int,
@@ -298,12 +317,11 @@ def upload_artifacts(
         if not path.is_file():
             continue
         object_name = f"{RUN_ID}/{path.name}"
-        data = path.read_bytes()
-        store.put_object(object_name, data)
+        store.put_object_file(object_name, path)
         artifacts[path.name] = {
             "object": object_name,
             "content_type": content_type(path),
-            "size": len(data),
+            "size": path.stat().st_size,
         }
         if path.name == f"{RUN_ID}.zip":
             artifacts["artifacts.zip"] = dict(artifacts[path.name])
@@ -443,10 +461,12 @@ def main() -> int:
             },
         )
         if worker_count > 1:
-            store.put_object(
-                result_object(RUN_ID, worker_index),
-                archive_directory(worker_directory),
+            worker_archive = run_directory / f"worker-{worker_index:04d}.zip"
+            archive_directory_to_file(worker_directory, worker_archive)
+            store.put_object_file(
+                result_object(RUN_ID, worker_index), worker_archive
             )
+            worker_archive.unlink()
         if not coordinator:
             # The coordinator owns run finalization. Returning success keeps a
             # recorded Locust failure from aborting the Indexed Job before the
@@ -466,13 +486,13 @@ def main() -> int:
             for index in range(worker_count):
                 directory = run_directory / f"worker-{index:04d}"
                 if index != worker_index:
-                    data = wait_for_object(
-                        store,
-                        result_object(RUN_ID, index),
-                        stop_requested,
-                        deadline,
+                    archive = run_directory / f"worker-{index:04d}.zip"
+                    wait_for_object_file(
+                        store, result_object(RUN_ID, index), archive,
+                        stop_requested, deadline,
                     )
-                    extract_archive(data, directory)
+                    extract_archive_file(archive, directory)
+                    archive.unlink()
                 worker_directories.append(directory)
             statuses = merge_worker_outputs(
                 run_directory, worker_directories
@@ -580,10 +600,14 @@ def main() -> int:
                         else None,
                     },
                 )
-                store.put_object(
-                    result_object(RUN_ID, worker_index),
-                    archive_directory(worker_directory),
+                worker_archive = (
+                    run_directory / f"worker-{worker_index:04d}.zip"
                 )
+                archive_directory_to_file(worker_directory, worker_archive)
+                store.put_object_file(
+                    result_object(RUN_ID, worker_index), worker_archive
+                )
+                worker_archive.unlink()
                 print(
                     f"benchmark worker failed: {error}",
                     file=sys.stderr,

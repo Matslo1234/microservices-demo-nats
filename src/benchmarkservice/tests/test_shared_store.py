@@ -2,6 +2,8 @@
 # Licensed under the Apache License, Version 2.0 (the "License");
 
 import unittest
+import tempfile
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from nats.errors import TimeoutError as NatsTimeoutError
@@ -46,6 +48,31 @@ class NatsSharedStoreRecoveryTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(7, record.revision)
         self.assertEqual(2, ensure.await_count)
         invalidate.assert_awaited_once()
+
+    async def test_object_file_transfer_uses_file_streams(self):
+        self.store._objects = AsyncMock()
+
+        async def call(operation):
+            return await operation()
+
+        async def download(name, writeinto):
+            self.assertEqual("result", name)
+            writeinto.write(b"downloaded")
+
+        self.store._with_recovery = call
+        self.store._objects.get.side_effect = download
+
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "source.zip"
+            destination = Path(temporary) / "destination.zip"
+            source.write_bytes(b"uploaded")
+
+            await self.store._put_object_file("result", source)
+            upload = self.store._objects.put.await_args.args[1]
+            self.assertTrue(hasattr(upload, "readinto"))
+
+            await self.store._get_object_file("result", destination)
+            self.assertEqual(b"downloaded", destination.read_bytes())
 
 
 if __name__ == "__main__":
