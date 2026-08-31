@@ -32,20 +32,21 @@ const (
 )
 
 var queryNamesByRole = map[string][]string{
-	browseQueryRole:   {"home", "product", "cart", "currencies", "product-meta"},
+	browseQueryRole:   {"home", "product", "cart", "checkout", "currencies", "product-meta"},
 	trackingQueryRole: {"operation", "order"},
 }
 
 type queryRequest struct {
-	ProductID     string   `json:"product_id"`
-	UserID        string   `json:"user_id"`
-	ProductIDs    []string `json:"product_ids"`
-	CurrencyCode  string   `json:"currency_code"`
-	OperationID   string   `json:"operation_id"`
-	OrderID       string   `json:"order_id"`
-	CorrelationID string   `json:"correlation_id"`
-	Traceparent   string   `json:"traceparent,omitempty"`
-	Tracestate    string   `json:"tracestate,omitempty"`
+	ProductID      string   `json:"product_id"`
+	UserID         string   `json:"user_id"`
+	ProductIDs     []string `json:"product_ids"`
+	CurrencyCode   string   `json:"currency_code"`
+	OperationID    string   `json:"operation_id"`
+	OrderID        string   `json:"order_id"`
+	MinCartVersion uint64   `json:"min_cart_version"`
+	CorrelationID  string   `json:"correlation_id"`
+	Traceparent    string   `json:"traceparent,omitempty"`
+	Tracestate     string   `json:"tracestate,omitempty"`
 }
 
 type localizedProduct struct {
@@ -249,6 +250,7 @@ func (p *projector) queryHandlers(role string) (map[string]queryHandler, error) 
 		"home":         p.homeQuery,
 		"product":      p.productQuery,
 		"cart":         p.cartQuery,
+		"checkout":     p.checkoutQuery,
 		"currencies":   p.currenciesQuery,
 		"product-meta": p.productMetaQuery,
 		"operation":    p.operationQuery,
@@ -399,11 +401,29 @@ func (p *projector) productQuery(request queryRequest) (queryResponse, error) {
 }
 
 func (p *projector) cartQuery(request queryRequest) (queryResponse, error) {
+	return p.cartQueryFrom(request, p.cartView)
+}
+
+// checkoutQuery uses the watch-fed cart cache on the order-admission path.
+// A caller that has already observed a cart version can require at least that
+// version; a lagging or cold cache falls back to the authoritative KV bucket.
+func (p *projector) checkoutQuery(request queryRequest) (queryResponse, error) {
+	return p.cartQueryFrom(request, func(userID string) (*storefront.CartView, error) {
+		cart, err := p.cachedCartIfPresent(userID)
+		if err == nil && cart.Cart.GetCartVersion() >= request.MinCartVersion {
+			return cart, nil
+		}
+		return p.cartView(userID)
+	})
+}
+
+func (p *projector) cartQueryFrom(request queryRequest,
+	readCart func(string) (*storefront.CartView, error)) (queryResponse, error) {
 	rates, err := p.currencyView(request.CurrencyCode)
 	if err != nil {
 		return queryResponse{}, err
 	}
-	cart, err := p.cartView(request.UserID)
+	cart, err := readCart(request.UserID)
 	if err != nil {
 		return queryResponse{}, err
 	}
@@ -505,6 +525,23 @@ func (p *projector) cartViewCached(userID string) (*storefront.CartView, error) 
 		return p.cartView(userID)
 	}
 	return p.cartViewFrom(cachedOnlyProjectionReader{cache: p.cartCache}, userID)
+}
+
+// cachedCartIfPresent preserves a cache miss so checkout can distinguish it
+// from an authoritative missing cart. cartViewCached intentionally retains
+// empty-cart semantics for latency-tolerant browse queries.
+func (p *projector) cachedCartIfPresent(userID string) (*storefront.CartView, error) {
+	if p.cartCache == nil {
+		return nil, nats.ErrKeyNotFound
+	}
+	cart, revision, err := getJSONWithRevision[storefront.CartView](
+		cachedOnlyProjectionReader{cache: p.cartCache}, userID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	p.observeQueryRevision(revision)
+	return cart, nil
 }
 
 func (p *projector) cartViewFrom(reader projectionReader, userID string) (*storefront.CartView, error) {

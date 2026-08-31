@@ -300,6 +300,7 @@ func (fe *frontendServer) viewCartHandler(w http.ResponseWriter, r *http.Request
 		"cart_size":        view.CartSize,
 		"shipping_cost":    shippingCost,
 		"shipping_pending": view.ShippingPending,
+		"cart_version":     view.CartVersion,
 		"show_currency":    true,
 		"total_cost":       totalPrice,
 		"items":            view.Items,
@@ -350,23 +351,50 @@ func (fe *frontendServer) placeOrderHandler(w http.ResponseWriter, r *http.Reque
 	}
 	log = log.WithField("correlation_id", orderID)
 	telemetry.SetCorrelationID(r.Context(), orderID)
-	view, err := fe.storefrontQuery(r.Context(), "cart", storefrontQueryRequest{
-		UserID: sessionID(r), CurrencyCode: currentCurrency(r), CorrelationID: orderID,
-	})
-	if err != nil {
-		renderStorefrontError(log, r, w, errors.Wrap(err, "could not retrieve checkout snapshot"))
+	minimumCartVersion, _ := strconv.ParseUint(r.FormValue("cart_version"), 10, 64)
+	type cartResult struct {
+		view *storefrontQueryResponse
+		err  error
+	}
+	type tokenResult struct {
+		token string
+		err   error
+	}
+	prepareContext, cancelPrepare := context.WithCancel(r.Context())
+	defer cancelPrepare()
+	cartReady, tokenReady := make(chan cartResult, 1), make(chan tokenResult, 1)
+	go func() {
+		view, queryErr := fe.storefrontQuery(prepareContext, "checkout", storefrontQueryRequest{
+			UserID: sessionID(r), CurrencyCode: currentCurrency(r), CorrelationID: orderID,
+			MinCartVersion: minimumCartVersion,
+		})
+		cartReady <- cartResult{view: view, err: queryErr}
+	}()
+	card := paymentCard{Number: payload.CcNumber, ExpirationMonth: int32(payload.CcMonth), ExpirationYear: int32(payload.CcYear), CVV: int32(payload.CcCVV)}
+	go func() {
+		token, tokenErr := fe.tokenizePayment(prepareContext, orderID, card)
+		tokenReady <- tokenResult{token: token, err: tokenErr}
+	}()
+	cartPreparation := <-cartReady
+	if cartPreparation.err != nil {
+		cancelPrepare()
+		<-tokenReady
+		renderStorefrontError(log, r, w, errors.Wrap(cartPreparation.err, "could not retrieve checkout snapshot"))
 		return
 	}
+	view := cartPreparation.view
 	if len(view.Items) == 0 {
+		cancelPrepare()
+		<-tokenReady
 		renderHTTPError(log, r, w, errors.New("cannot check out an empty cart"), http.StatusConflict)
 		return
 	}
-	card := paymentCard{Number: payload.CcNumber, ExpirationMonth: int32(payload.CcMonth), ExpirationYear: int32(payload.CcYear), CVV: int32(payload.CcCVV)}
-	token, err := fe.tokenizePayment(r.Context(), orderID, card)
-	if err != nil {
-		renderHTTPError(log, r, w, errors.Wrap(err, "payment tokenization failed"), http.StatusUnprocessableEntity)
+	tokenPreparation := <-tokenReady
+	if tokenPreparation.err != nil {
+		renderHTTPError(log, r, w, errors.Wrap(tokenPreparation.err, "payment tokenization failed"), http.StatusUnprocessableEntity)
 		return
 	}
+	token := tokenPreparation.token
 	address := &commonv1.PostalAddress{StreetAddress: payload.StreetAddress, City: payload.City, State: payload.State,
 		ZipCode: int32(payload.ZipCode), Country: payload.Country}
 	if err := fe.publishOrder(r.Context(), orderID, sessionID(r), payload.Email, currentCurrency(r), address, token,

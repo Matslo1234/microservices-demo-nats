@@ -49,14 +49,14 @@ DEFAULT_IMAGE_DIGESTS = {
     "checkoutservice": "ee7b5fed8dcf83c447a67dfe46c33c6593983af1953e82492889199c4891550b",
     "currencyservice": "aeccde52544263ceb7169be694250312e267a01104dc3dd3d68611975bd47cb8",
     "emailservice": "92c6ebe1fc527c6e5f46e6cb73cc5dc6db4ff392d05179ddcd29778447be5f59",
-    "frontend": "91926f976936706a21c9aed6bbfbe923b4430a0aa803892088c6e877a9e08b45",
+    "frontend": "53a2861f3ef010cf28e847cdc4262afb8bc590c4602f0c74d8cfbf6951798b3b",
     "loadgenerator": "c66a188ecf8bf7507bd3982a5fa50ae3e9497f3239248dd48b275fc2aee0adb3",
     "messageoperationsservice": "2b2334e684a9297e2bf6af8daf0e924b86daecb78f9ff578756e9bc34b8f7a45",
     "paymentservice": "755e13249749163500bdb54898c5f23973e2012dde0b89e2b533bde45522ffaf",
     "productcatalogservice": "26d97784a6e105cf1586b2ff723772c583021491d5fa165ceaae6a3af12fe54d",
     "recommendationservice": "d8cccf9a19c5d62bf3e38d94728366c7933c1daeb138b6f6713c42277a5f760a",
     "shippingservice": "320e4406169b36efd8c8dc4668753d1f082545ff6591abb0e329388de7ff22ef",
-    "storefrontprojectionservice": "93c4edaf83e90d60a67e95668a5b3e76ac40958c419faded9fa2da6f8594ce68",
+    "storefrontprojectionservice": "4e4759eb22cca716397480086e74144c55e5d42e0d3e89394398e34c84c689fb",
 }
 
 

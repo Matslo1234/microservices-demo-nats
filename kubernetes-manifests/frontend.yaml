@@ -118,7 +118,7 @@ spec:
           - name: NATS_REQUIRED
             value: "true"
           - name: NATS_REQUIRED_SUBSCRIPTIONS
-            value: "boutique.qry.storefront.home.v1,boutique.qry.storefront.product.v1,boutique.qry.storefront.cart.v1,boutique.qry.storefront.currencies.v1,boutique.qry.storefront.product-meta.v1,boutique.qry.storefront.operation.v1,boutique.qry.storefront.order.v1,boutique.qry.payment.tokenize.v1"
+            value: "boutique.qry.storefront.home.v1,boutique.qry.storefront.product.v1,boutique.qry.storefront.cart.v1,boutique.qry.storefront.checkout.v1,boutique.qry.storefront.currencies.v1,boutique.qry.storefront.product-meta.v1,boutique.qry.storefront.operation.v1,boutique.qry.storefront.order.v1,boutique.qry.payment.tokenize.v1"
           - name: CART_OPERATION_WAIT_TIMEOUT
             value: "750ms"
           - name: GOMEMLIMIT

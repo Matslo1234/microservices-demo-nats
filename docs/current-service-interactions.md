@@ -94,12 +94,13 @@ scaling of projection and query work.
 | HTTP action | NATS interaction |
 | --- | --- |
 | Home, product, cart and currency views | `boutique.qry.storefront.home.v1`, `.product.v1`, `.cart.v1`, `.currencies.v1` |
+| Checkout cart snapshot | `boutique.qry.storefront.checkout.v1` |
 | Product metadata and search | `boutique.qry.storefront.product-meta.v1`, `.search-products.v1` |
 | Operation and order resources | `boutique.qry.storefront.operation.v1`, `.order.v1` |
 | Live order status | `boutique.live.operation.<region-id>.<order-id>` subscription exposed as `GET /orders/{id}/events` |
 | Product page context | `boutique.evt.storefront.page-viewed.v1` |
 | Add/clear cart | `boutique.cmd.cart.add-item.v1`, `.clear.v1`, plus `boutique.evt.storefront.operation-accepted.v1` |
-| Checkout | `boutique.qry.payment.tokenize.v1`, then `boutique.cmd.order.submit.v1` |
+| Checkout | Run `boutique.qry.storefront.checkout.v1` and `boutique.qry.payment.tokenize.v1` concurrently, then publish `boutique.cmd.order.submit.v1` |
 
 Cart and checkout HTTP writes require or derive an idempotency identity. They
 return the same operation/order resource for a repeated identity. A write that
@@ -117,6 +118,21 @@ against its shared Redis projection of replayable catalog events, deduplicates
 the command ID, and retries its internal aggregate CAS when another add wins the
 first commit. Clear and checkout retain observed-version preconditions because
 they operate on the complete cart state.
+
+The cart page places its observed cart version in the checkout form. The
+checkout query has a separate subject and admission pool so ordinary cart-page
+traffic cannot consume checkout's in-flight budget. Its responder reads the
+watch-fed cart cache when that cache is at least as new as the requested
+version; a cold or lagging cache performs one authoritative JetStream KV read.
+API clients that do not supply a minimum version may use the newest locally
+observed projection, while `checkoutservice` still validates the resulting
+version against its owner-derived cart state before accepting the order.
+
+Each query subject has an independent bounded admission counter. The deployed
+default is `STOREFRONT_QUERY_MAX_IN_FLIGHT=48` per subject per pod; exceeding it
+returns `OVERLOADED` immediately instead of extending an unbounded queue.
+`STOREFRONT_QUERY_CONCURRENCY` controls NATS endpoint slots and the pending
+message/byte settings remain hard transport bounds.
 
 ### Domain ownership and consumers
 
@@ -142,6 +158,13 @@ and operation status in `STOREFRONT_PRODUCTS_<REGION_KEY>`,
 These buckets are derived state and can be deleted and rebuilt by replaying
 `BOUTIQUE_EVENTS`. Domain owner snapshots provide the current catalog and
 currency baselines before consumers become ready.
+
+Projection writes use a bounded per-replica revision cache. The common path
+attempts the authoritative KV compare-and-set with the cached revision. A
+write by another replica produces a normal revision conflict, invalidates the
+local entry, and causes the existing retry loop to refresh from JetStream.
+This removes a read from uncontended updates without weakening KV authority or
+cross-replica correctness.
 
 ### Recommendation freshness and coalescing
 

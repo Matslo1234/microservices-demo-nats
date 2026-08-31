@@ -46,9 +46,9 @@ func TestLoadProjectionConfigAcceptsRegionQualifiedAssets(t *testing.T) {
 		config.productsBucket != "STOREFRONT_PRODUCTS_EU_CENTRAL_1" {
 		t.Fatalf("unexpected projection config: %+v", config)
 	}
-	if config.queryConcurrency != 8 || config.queryMaxInFlight != 12 ||
+	if config.queryConcurrency != 8 || config.queryMaxInFlight != 48 ||
 		config.queryPendingMessages != 512 || config.queryPendingBytes != 2*1024*1024 ||
-		config.cartCacheEntries != 32768 ||
+		config.cartCacheEntries != 65536 ||
 		config.contextCacheEntries != 65536 {
 		t.Fatalf("unexpected performance defaults: %+v", config)
 	}

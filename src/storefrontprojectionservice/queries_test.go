@@ -52,7 +52,7 @@ func TestQueryServicesIsolateBrowseFromTracking(t *testing.T) {
 	}
 	sort.Strings(browseNames)
 	sort.Strings(trackingNames)
-	if !slices.Equal(browseNames, []string{"cart", "currencies", "home", "product", "product-meta"}) {
+	if !slices.Equal(browseNames, []string{"cart", "checkout", "currencies", "home", "product", "product-meta"}) {
 		t.Fatalf("unexpected browse handlers: %v", browseNames)
 	}
 	if !slices.Equal(trackingNames, []string{"operation", "order"}) {
@@ -326,5 +326,107 @@ func TestProductQueryUsesSessionCachesWithoutAuthoritativeReads(t *testing.T) {
 	if products.getCount() != 0 || carts.getCount() != 0 || context.getCount() != 0 {
 		t.Fatalf("product query performed authoritative reads: products=%d carts=%d context=%d",
 			products.getCount(), carts.getCount(), context.getCount())
+	}
+}
+
+func TestCheckoutQueryUsesVersionAwareCartCache(t *testing.T) {
+	products := newMemoryKV()
+	storeJSON(t, products, storefront.CurrencyKey, storefront.CurrencyView{
+		BaseCurrencyCode: "USD",
+		Rates:            []storefront.Rate{{CurrencyCode: "USD", UnitsPerBase: 1}},
+		RateRevision:     1,
+	})
+	storeJSON(t, products, storefront.ProductKey("sku"), storefront.ProductView{
+		Product: &commonv1.ProductSnapshot{
+			ProductId: "sku", PriceUsd: &commonv1.Money{CurrencyCode: "USD", Units: 10},
+		},
+		CatalogRevision: 1,
+	})
+	catalog, err := newProjectionReadCache(products)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(catalog.Close)
+
+	carts := newMemoryKV()
+	storeJSON(t, carts, "user-1", storefront.CartView{Cart: &commonv1.CartSnapshot{
+		UserId: "user-1", CartVersion: 3,
+		Items: []*commonv1.CartLine{{ProductId: "sku", Quantity: 1}},
+	}})
+	cartCache, err := newBoundedProjectionReadCache(carts, 16)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(cartCache.Close)
+
+	projector := &projector{
+		products: products, catalog: catalog, carts: carts, cartCache: cartCache,
+		context: newMemoryKV(),
+	}
+	carts.resetGetCount()
+	response, err := projector.checkoutQuery(queryRequest{
+		UserID: "user-1", CurrencyCode: "USD", MinCartVersion: 3,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.CartVersion != 3 || carts.getCount() != 0 {
+		t.Fatalf("checkout did not use current cached cart: response=%#v reads=%d", response, carts.getCount())
+	}
+
+	if _, err := projector.checkoutQuery(queryRequest{
+		UserID: "user-1", CurrencyCode: "USD", MinCartVersion: 4,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if carts.getCount() != 1 {
+		t.Fatalf("checkout with lagging cache performed %d authoritative reads, want 1", carts.getCount())
+	}
+}
+
+func TestCheckoutQueryFallsBackOnCacheMissWithZeroMinimumVersion(t *testing.T) {
+	products := newMemoryKV()
+	storeJSON(t, products, storefront.CurrencyKey, storefront.CurrencyView{
+		BaseCurrencyCode: "USD",
+		Rates:            []storefront.Rate{{CurrencyCode: "USD", UnitsPerBase: 1}},
+		RateRevision:     1,
+	})
+	storeJSON(t, products, storefront.ProductKey("sku"), storefront.ProductView{
+		Product: &commonv1.ProductSnapshot{
+			ProductId: "sku", PriceUsd: &commonv1.Money{CurrencyCode: "USD", Units: 10},
+		},
+		CatalogRevision: 1,
+	})
+	catalog, err := newProjectionReadCache(products)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(catalog.Close)
+
+	carts := newMemoryKV()
+	storeJSON(t, carts, "evicted-user", storefront.CartView{Cart: &commonv1.CartSnapshot{
+		UserId: "evicted-user", CartVersion: 9,
+		Items: []*commonv1.CartLine{{ProductId: "sku", Quantity: 1}},
+	}})
+	emptyCache := &projectionReadCache{
+		entries:   make(map[string]cachedProjectionEntry),
+		revisions: make(map[string]uint64),
+	}
+	projector := &projector{
+		products: products, catalog: catalog, carts: carts, cartCache: emptyCache,
+		context: newMemoryKV(),
+	}
+	carts.resetGetCount()
+	response, err := projector.checkoutQuery(queryRequest{
+		UserID: "evicted-user", CurrencyCode: "USD",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.CartVersion != 9 || len(response.Items) != 1 {
+		t.Fatalf("cache miss was treated as an empty cart: %#v", response)
+	}
+	if carts.getCount() != 1 {
+		t.Fatalf("cache miss performed %d authoritative reads, want 1", carts.getCount())
 	}
 }

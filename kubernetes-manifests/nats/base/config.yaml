@@ -68,6 +68,7 @@ data:
                 "boutique.qry.storefront.home.v1",
                 "boutique.qry.storefront.product.v1",
                 "boutique.qry.storefront.cart.v1",
+                "boutique.qry.storefront.checkout.v1",
                 "boutique.qry.storefront.currencies.v1",
                 "boutique.qry.storefront.product-meta.v1",
                 "boutique.qry.storefront.search-products.v1",

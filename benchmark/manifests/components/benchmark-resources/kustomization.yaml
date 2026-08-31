@@ -36,6 +36,34 @@ patches:
     group: apps
     version: v1
     kind: Deployment
+    name: storefrontprojectionservice
+  patch: |-
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: storefrontprojectionservice
+    spec:
+      template:
+        spec:
+          affinity:
+            nodeAffinity:
+              preferredDuringSchedulingIgnoredDuringExecution:
+              - weight: 100
+                preference:
+                  matchExpressions:
+                  - key: eks.amazonaws.com/nodegroup
+                    operator: In
+                    values:
+                    - storefront-group
+          tolerations:
+          - key: dedicated
+            operator: Equal
+            value: storefrontprojectionservice
+            effect: NoSchedule
+- target:
+    group: apps
+    version: v1
+    kind: Deployment
     name: currencyservice|productcatalogservice
   patch: |-
     apiVersion: apps/v1

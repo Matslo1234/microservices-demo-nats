@@ -287,6 +287,7 @@ stale, and unavailable results.
 | `boutique.qry.storefront.home.v1` | `frontend` | `storefrontprojectionservice` | Products, supported currencies, cart summary, latest ad |
 | `boutique.qry.storefront.product.v1` | `frontend` | `storefrontprojectionservice` | Product, localized price, cart summary, latest recommendations/ad |
 | `boutique.qry.storefront.cart.v1` | `frontend` | `storefrontprojectionservice` | Cart items, localized prices, quote, recommendations, projection versions |
+| `boutique.qry.storefront.checkout.v1` | `frontend` | `storefrontprojectionservice` | Checkout snapshot from the watch-fed cart cache when it satisfies `min_cart_version`, otherwise from authoritative KV; isolated admission from cart-page traffic |
 | `boutique.qry.storefront.currencies.v1` | `frontend` | `storefrontprojectionservice` | Supported currency codes for the Assistant page or other lightweight views |
 | `boutique.qry.storefront.product-meta.v1` | `frontend` | `storefrontprojectionservice` | Existing `/product-meta/{ids}` behavior |
 | `boutique.qry.storefront.search-products.v1` | `frontend` or admin tooling if retained | `storefrontprojectionservice` | Preserve the currently exposed but unused product search contract |
@@ -345,7 +346,7 @@ back to HTTP.
 | `GET`/`HEAD /cart` | Query `storefront.cart`; no fan-out to cart, catalog, currency, shipping, or recommendation services |
 | `POST /cart` | Publish durable `cart.add-item`; return `202` with `Location: /operations/{command_id}` or use the compatibility wait below |
 | `POST /cart/empty` | Publish durable `cart.clear`; return `202` and an operation URL |
-| `POST /cart/checkout` | Tokenize card, publish durable `order.submit`, return `202` with `Location: /orders/{order_id}` |
+| `POST /cart/checkout` | Query the version-aware checkout snapshot and tokenize the card concurrently, publish durable `order.submit`, then return `202` with `Location: /orders/{order_id}` |
 | `GET /assistant` | Query `storefront.currencies`, then render the existing page |
 | `GET /orders/{order_id}` | Query `storefront.order`; return `200` with the known processing/terminal status, `404` if unknown, or `503` if the projection query is unavailable |
 | `GET /orders/{order_id}/events` | SSE stream of session-scoped, sanitized order status changes |
@@ -377,6 +378,14 @@ For checkout, do not hold the HTTP request open for the entire saga. The browser
 should receive an order ID promptly and observe progress. The load generator
 must be updated to follow `202`, poll until a terminal state, and reuse an
 `Idempotency-Key` when retrying.
+
+The checkout form carries the cart version observed while rendering the cart.
+`storefront.checkout` may answer from the watch-fed cache only when the cached
+version meets that minimum; otherwise it falls back to the authoritative cart
+KV. Checkout snapshot retrieval and payment tokenization are independent and
+run concurrently, but `order.submit` is published only after both succeed.
+The dedicated checkout subject has its own bounded admission counter so browse
+traffic cannot consume checkout capacity.
 
 For optional SSE, `storefrontprojectionservice` publishes a sanitized Core NATS
 notification on `boutique.live.operation.<operation-id>` after updating the

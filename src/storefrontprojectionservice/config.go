@@ -107,7 +107,7 @@ func loadProjectionConfig() (projectionConfig, error) {
 	if err != nil {
 		return projectionConfig{}, err
 	}
-	queryMaxInFlight, err := boundedEnvInt("STOREFRONT_QUERY_MAX_IN_FLIGHT", 12, 1, 256)
+	queryMaxInFlight, err := boundedEnvInt("STOREFRONT_QUERY_MAX_IN_FLIGHT", 48, 1, 256)
 	if err != nil {
 		return projectionConfig{}, err
 	}
@@ -119,7 +119,7 @@ func loadProjectionConfig() (projectionConfig, error) {
 	if err != nil {
 		return projectionConfig{}, err
 	}
-	cartCacheEntries, err := boundedEnvInt("STOREFRONT_CART_CACHE_ENTRIES", 32768, 1, 262144)
+	cartCacheEntries, err := boundedEnvInt("STOREFRONT_CART_CACHE_ENTRIES", 65536, 1, 262144)
 	if err != nil {
 		return projectionConfig{}, err
 	}

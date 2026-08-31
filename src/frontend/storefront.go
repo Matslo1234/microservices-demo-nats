@@ -34,15 +34,16 @@ var (
 )
 
 type storefrontQueryRequest struct {
-	ProductID     string   `json:"product_id,omitempty"`
-	UserID        string   `json:"user_id,omitempty"`
-	ProductIDs    []string `json:"product_ids,omitempty"`
-	CurrencyCode  string   `json:"currency_code,omitempty"`
-	OperationID   string   `json:"operation_id,omitempty"`
-	OrderID       string   `json:"order_id,omitempty"`
-	CorrelationID string   `json:"correlation_id,omitempty"`
-	Traceparent   string   `json:"traceparent,omitempty"`
-	Tracestate    string   `json:"tracestate,omitempty"`
+	ProductID      string   `json:"product_id,omitempty"`
+	UserID         string   `json:"user_id,omitempty"`
+	ProductIDs     []string `json:"product_ids,omitempty"`
+	CurrencyCode   string   `json:"currency_code,omitempty"`
+	OperationID    string   `json:"operation_id,omitempty"`
+	OrderID        string   `json:"order_id,omitempty"`
+	MinCartVersion uint64   `json:"min_cart_version,omitempty"`
+	CorrelationID  string   `json:"correlation_id,omitempty"`
+	Traceparent    string   `json:"traceparent,omitempty"`
+	Tracestate     string   `json:"tracestate,omitempty"`
 }
 
 type storefrontProductView struct {
