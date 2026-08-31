@@ -175,8 +175,8 @@ func main() {
 	r.HandleFunc(baseUrl+"/bot", svc.chatBotHandler).Methods(http.MethodPost)
 
 	var handler http.Handler = r
-	handler = &logHandler{log: log, next: handler} // add logging
-	handler = ensureSessionID(handler)             // add session ID
+	handler = &logHandler{log: log, next: handler, tracingEnabled: tracingEnabled} // add logging
+	handler = ensureSessionID(handler)                                             // add session ID
 	if tracingEnabled {
 		handler = otelhttp.NewHandler(handler, "frontend") // add OTel tracing
 	}

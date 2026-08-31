@@ -300,12 +300,10 @@ public sealed class NatsCartCommandWorker : BackgroundService, ICartMessagingHea
                         new QueuedCartCommand(
                             message.Subject,
                             envelope,
-                            async cancellationToken =>
-                                await message.AckAsync(
-                                    cancellationToken: cancellationToken),
-                            async cancellationToken =>
-                                await message.NakAsync(
-                                    cancellationToken: cancellationToken)),
+                            cancellationToken => message.AckAsync(
+                                cancellationToken: cancellationToken),
+                            cancellationToken => message.NakAsync(
+                                cancellationToken: cancellationToken)),
                         stoppingToken);
                 }
                 catch (OperationCanceledException) when (
@@ -447,7 +445,7 @@ public sealed class NatsCartCommandWorker : BackgroundService, ICartMessagingHea
             correlationId);
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
         timeout.CancelAfter(Duration("NATS_PUBLISH_TIMEOUT", TimeSpan.FromSeconds(5)));
-        var envelope = MessageEnvelope.Parser.ParseFrom(result.Data.ToArray());
+        var envelope = result.Envelope;
         CartTelemetry.Inject(envelope);
         var data = envelope.ToByteArray();
         var acknowledgement = await jetStream.PublishAsync(
@@ -517,6 +515,6 @@ public sealed class NatsCartCommandWorker : BackgroundService, ICartMessagingHea
     private sealed record QueuedCartCommand(
         string Subject,
         MessageEnvelope Envelope,
-        Func<CancellationToken, Task> Ack,
-        Func<CancellationToken, Task> Nak);
+        Func<CancellationToken, ValueTask> Ack,
+        Func<CancellationToken, ValueTask> Nak);
 }

@@ -564,7 +564,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-cartservice
-        image: matslo123/cartservice:v0.4.0@sha256:a981b8dd94d28910e3003aeb985ade8d1f3e9aa33f204d4a9323cd142870f648
+        image: matslo123/cartservice:v0.4.0@sha256:e6788b26d4c34a769250a2a51c6378d5e3c96cda6c9cbe979e07c464e538ed07
         livenessProbe:
           failureThreshold: 6
           httpGet:
@@ -1073,7 +1073,7 @@ spec:
             name: nats-credentials-frontend
         - secretRef:
             name: global-application-secrets
-        image: matslo123/frontend:v0.4.0@sha256:53a2861f3ef010cf28e847cdc4262afb8bc590c4602f0c74d8cfbf6951798b3b
+        image: matslo123/frontend:v0.4.0@sha256:f85e899837a9e0f8ccdd87fb9ca73c8bdf1f391401bc4dca665dcb257e797101
         livenessProbe:
           failureThreshold: 6
           httpGet:

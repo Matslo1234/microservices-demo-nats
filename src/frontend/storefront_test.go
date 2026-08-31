@@ -103,6 +103,75 @@ func TestResponseRecorderPreservesStreamingFlush(t *testing.T) {
 	}
 }
 
+func TestInfrastructureAndStaticRequestsBypassApplicationMiddleware(t *testing.T) {
+	originalBaseURL := baseUrl
+	baseUrl = "/shop"
+	t.Cleanup(func() { baseUrl = originalBaseURL })
+
+	logger := newJSONLogger()
+	logger.SetOutput(io.Discard)
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Context().Value(ctxKeySessionID{}) != nil ||
+			r.Context().Value(ctxKeyCurrency{}) != nil ||
+			r.Context().Value(ctxKeyRequestID{}) != nil ||
+			r.Context().Value(ctxKeyLog{}) != nil {
+			t.Error("bypassed request received application middleware context")
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+	handler := ensureSessionID(&logHandler{log: logger, next: next})
+
+	for _, path := range []string{
+		"/shop/_healthz", "/shop/_readyz", "/shop/metrics", "/shop/static/styles.css",
+	} {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, path, nil))
+		if cookies := recorder.Result().Cookies(); len(cookies) != 0 {
+			t.Fatalf("%s set session cookies: %v", path, cookies)
+		}
+	}
+}
+
+func TestSessionMiddlewareCachesCurrencyForRequest(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "/cart", nil)
+	request.AddCookie(&http.Cookie{Name: cookieCurrency, Value: "EUR"})
+	recorder := httptest.NewRecorder()
+
+	handler := ensureSessionID(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		// Changing the header proves currentCurrency reads the value cached by the
+		// middleware instead of reparsing cookies on each call.
+		r.Header.Set("Cookie", cookieCurrency+"=JPY")
+		if got := currentCurrency(r); got != "EUR" {
+			t.Fatalf("cached currency = %q, want EUR", got)
+		}
+	}))
+	handler.ServeHTTP(recorder, request)
+}
+
+func TestInjectCommonTemplateDataReusesPayload(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "/", nil)
+	request = request.WithContext(context.WithValue(request.Context(), ctxKeyCurrency{}, "CAD"))
+	payload := map[string]interface{}{"products": "original"}
+
+	got := injectCommonTemplateData(request, payload)
+	got["sentinel"] = true
+	if payload["sentinel"] != true {
+		t.Fatal("template data was copied instead of enriching the caller's map")
+	}
+	if payload["products"] != "original" || payload["user_currency"] != "CAD" {
+		t.Fatalf("unexpected enriched payload: %#v", payload)
+	}
+}
+
+func TestDisabledTracingSkipsProducerSpan(t *testing.T) {
+	server := &frontendServer{tracingEnabled: false}
+	ctx := context.Background()
+	gotContext, span := server.startProducerSpan(ctx, "subject", "query", "message", "correlation")
+	if gotContext != ctx || span != nil {
+		t.Fatalf("disabled tracing returned context=%v span=%v", gotContext, span)
+	}
+}
+
 func TestCartOperationIDIsStableForIdempotencyKey(t *testing.T) {
 	first := httptest.NewRequest("POST", "/cart", nil)
 	first.Header.Set("Idempotency-Key", "retry-1")

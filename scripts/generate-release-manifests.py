@@ -45,11 +45,11 @@ SERVICES = (
 DEFAULT_IMAGE_DIGESTS = {
     "adservice": "5f54fe06f3bfa41a788cc943ed4afe5ab527c97aca5a89b0ab3ba4a7d6c86f80",
     "benchmarkservice": "4c679cab7671ee42167f4691b72e17c0be20fc566b34ae4ab5cc6cbb9b6fd2e8",
-    "cartservice": "a981b8dd94d28910e3003aeb985ade8d1f3e9aa33f204d4a9323cd142870f648",
+    "cartservice": "e6788b26d4c34a769250a2a51c6378d5e3c96cda6c9cbe979e07c464e538ed07",
     "checkoutservice": "45d687649369e1bca4f49200b4fc6115e61730db14aa74cd385999582d890e2a",
     "currencyservice": "aeccde52544263ceb7169be694250312e267a01104dc3dd3d68611975bd47cb8",
     "emailservice": "703b889cefab8f7b720fa4680a1009f0a63388a19c8d79bade47117b9eedff9e",
-    "frontend": "53a2861f3ef010cf28e847cdc4262afb8bc590c4602f0c74d8cfbf6951798b3b",
+    "frontend": "f85e899837a9e0f8ccdd87fb9ca73c8bdf1f391401bc4dca665dcb257e797101",
     "loadgenerator": "c66a188ecf8bf7507bd3982a5fa50ae3e9497f3239248dd48b275fc2aee0adb3",
     "messageoperationsservice": "2b2334e684a9297e2bf6af8daf0e924b86daecb78f9ff578756e9bc34b8f7a45",
     "paymentservice": "755e13249749163500bdb54898c5f23973e2012dde0b89e2b533bde45522ffaf",

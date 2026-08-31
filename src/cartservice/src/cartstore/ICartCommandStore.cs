@@ -21,7 +21,8 @@ namespace cartservice.cartstore
     public sealed record CartStoredResult(
         string Subject,
         string MessageId,
-        ReadOnlyMemory<byte> Data);
+        ReadOnlyMemory<byte> Data,
+        MessageEnvelope Envelope);
 
     public sealed record CartCommandCommit(
         CartStoredResult Result,

@@ -32,6 +32,7 @@ import (
 
 type ctxKeyLog struct{}
 type ctxKeyRequestID struct{}
+type ctxKeyCurrency struct{}
 
 var (
 	sessionCookieKeyOnce  sync.Once
@@ -39,8 +40,9 @@ var (
 )
 
 type logHandler struct {
-	log  *logrus.Logger
-	next http.Handler
+	log            *logrus.Logger
+	next           http.Handler
+	tracingEnabled bool
 }
 
 type responseRecorder struct {
@@ -71,10 +73,16 @@ func (r *responseRecorder) WriteHeader(statusCode int) {
 }
 
 func (lh *logHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if bypassApplicationMiddleware(r.URL.Path) {
+		lh.next.ServeHTTP(w, r)
+		return
+	}
 	ctx := r.Context()
 	requestID := uuid.NewString()
 	ctx = context.WithValue(ctx, ctxKeyRequestID{}, requestID)
-	telemetry.SetCorrelationID(ctx, requestID)
+	if lh.tracingEnabled {
+		telemetry.SetCorrelationID(ctx, requestID)
+	}
 
 	log := lh.log.WithFields(logrus.Fields{
 		"http.req.path":   r.URL.Path,
@@ -107,13 +115,17 @@ func (lh *logHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func ensureSessionID(next http.Handler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if bypassApplicationMiddleware(r.URL.Path) {
+			next.ServeHTTP(w, r)
+			return
+		}
 		var sessionID string
 		c, err := r.Cookie(cookieSessionID)
 		if err == nil {
 			sessionID, err = verifySessionCookie(c.Value)
 		}
 		if err != nil {
-			if os.Getenv("ENABLE_SINGLE_SHARED_SESSION") == "true" {
+			if singleSharedSession {
 				// Hard coded user id, shared across sessions
 				sessionID = "12345678-1234-1234-1234-123456789123"
 			} else {
@@ -131,9 +143,17 @@ func ensureSessionID(next http.Handler) http.HandlerFunc {
 			})
 		}
 		ctx := context.WithValue(r.Context(), ctxKeySessionID{}, sessionID)
+		ctx = context.WithValue(ctx, ctxKeyCurrency{}, currencyFromCookie(r))
 		r = r.WithContext(ctx)
 		next.ServeHTTP(w, r)
 	}
+}
+
+func bypassApplicationMiddleware(path string) bool {
+	if path == baseUrl+"/_healthz" || path == baseUrl+"/_readyz" || path == baseUrl+"/metrics" {
+		return true
+	}
+	return strings.HasPrefix(path, baseUrl+"/static/")
 }
 
 func sessionCookieKey() []byte {

@@ -20,6 +20,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/nats-io/nats.go"
 	"github.com/sirupsen/logrus"
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -175,12 +176,14 @@ func (fe *frontendServer) storefrontQuery(ctx context.Context, view string, requ
 		request.CorrelationID = requestID(ctx)
 	}
 	topic := "boutique.qry.storefront." + view + ".v1"
-	ctx, span := telemetry.StartProducerSpan(ctx, topic, "query", "", request.CorrelationID)
-	defer span.End()
-	telemetry.Inject(ctx, &request.Traceparent, &request.Tracestate)
+	ctx, span := fe.startProducerSpan(ctx, topic, "query", "", request.CorrelationID)
+	if span != nil {
+		defer span.End()
+		telemetry.Inject(ctx, &request.Traceparent, &request.Tracestate)
+	}
 	encoded, err := json.Marshal(request)
 	if err != nil {
-		telemetry.RecordError(span, err)
+		recordTelemetryError(span, err)
 		return nil, err
 	}
 	queryContext, cancel := context.WithTimeout(ctx, fe.natsRequestTimeout)
@@ -194,7 +197,7 @@ func (fe *frontendServer) storefrontQuery(ctx context.Context, view string, requ
 	}
 	message, err := fe.natsConn.RequestWithContext(queryContext, topic, encoded)
 	if err != nil {
-		telemetry.RecordError(span, err)
+		recordTelemetryError(span, err)
 		if errors.Is(err, nats.ErrNoResponders) || errors.Is(err, nats.ErrTimeout) || errors.Is(err, context.DeadlineExceeded) {
 			return nil, fmt.Errorf("%w: %v", errProjectionUnavailable, err)
 		}
@@ -202,7 +205,7 @@ func (fe *frontendServer) storefrontQuery(ctx context.Context, view string, requ
 	}
 	var response storefrontQueryResponse
 	if err := json.Unmarshal(message.Data, &response); err != nil {
-		telemetry.RecordError(span, err)
+		recordTelemetryError(span, err)
 		return nil, fmt.Errorf("decode storefront response: %w", err)
 	}
 	switch response.Error {
@@ -245,12 +248,14 @@ func (fe *frontendServer) publishPageView(ctx context.Context, session, pageType
 		AggregateType: "storefront-session", AggregateId: session, AggregateVersion: version,
 		CorrelationId: requestID(ctx), Data: wrapped,
 	}
-	ctx, span := telemetry.StartProducerSpan(ctx, pageViewedSubject, "event", messageID, envelope.CorrelationId)
-	defer span.End()
-	telemetry.Inject(ctx, &envelope.Traceparent, &envelope.Tracestate)
+	ctx, span := fe.startProducerSpan(ctx, pageViewedSubject, "event", messageID, envelope.CorrelationId)
+	if span != nil {
+		defer span.End()
+		telemetry.Inject(ctx, &envelope.Traceparent, &envelope.Tracestate)
+	}
 	encoded, err := proto.Marshal(envelope)
 	if err != nil {
-		telemetry.RecordError(span, err)
+		recordTelemetryError(span, err)
 		return err
 	}
 	message := &nats.Msg{Subject: pageViewedSubject, Data: encoded, Header: nats.Header{}}
@@ -262,7 +267,7 @@ func (fe *frontendServer) publishPageView(ctx context.Context, session, pageType
 		nats.StallWait(5*time.Millisecond),
 	)
 	if err != nil {
-		telemetry.RecordError(span, err)
+		recordTelemetryError(span, err)
 		return err
 	}
 	if fe.log.IsLevelEnabled(logrus.DebugLevel) {
@@ -273,6 +278,20 @@ func (fe *frontendServer) publishPageView(ctx context.Context, session, pageType
 		}).Debug("NATS event sent")
 	}
 	return nil
+}
+
+func (fe *frontendServer) startProducerSpan(ctx context.Context, subject, kind, messageID,
+	correlationID string) (context.Context, trace.Span) {
+	if !fe.tracingEnabled {
+		return ctx, nil
+	}
+	return telemetry.StartProducerSpan(ctx, subject, kind, messageID, correlationID)
+}
+
+func recordTelemetryError(span trace.Span, err error) {
+	if span != nil {
+		telemetry.RecordError(span, err)
+	}
 }
 
 func requestID(ctx context.Context) string {

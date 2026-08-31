@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-using System.Collections.Concurrent;
 using System.Globalization;
 using System.Text;
 using Boutique.Stateless;
@@ -21,9 +20,19 @@ namespace cartservice;
 
 public sealed class CartMetrics
 {
-    private readonly ConcurrentDictionary<string, long> _handlerOutcomes = new();
-    private readonly ConcurrentDictionary<string, long> _commandDurationCount = new();
-    private readonly ConcurrentDictionary<string, double> _commandDurationSum = new();
+    private const int AddItem = 0;
+    private const int Clear = 1;
+    private const int Failed = 0;
+    private const int Published = 1;
+    private static readonly string[] CommandNames = ["add-item", "clear"];
+    private static readonly string[] OutcomeNames = ["failed", "published"];
+
+    // The command and outcome labels are a closed set. Fixed cells avoid a
+    // composite-string allocation and ConcurrentDictionary operations on every
+    // command while retaining atomic updates across partition workers.
+    private readonly long[] _handlerOutcomes = new long[4];
+    private readonly long[] _commandDurationCount = new long[2];
+    private readonly double[] _commandDurationSum = new double[2];
     private long _inboxHits;
     private long _redisRetries;
     private long _resultRepublishes;
@@ -35,18 +44,22 @@ public sealed class CartMetrics
         TimeSpan elapsed,
         bool duplicate)
     {
-        _handlerOutcomes.AddOrUpdate(
-            $"{command}\0{outcome}",
-            1,
-            static (_, current) => current + 1);
-        _commandDurationCount.AddOrUpdate(
-            command,
-            1,
-            static (_, current) => current + 1);
-        _commandDurationSum.AddOrUpdate(
-            command,
-            elapsed.TotalSeconds,
-            (_, current) => current + elapsed.TotalSeconds);
+        var commandIndex = command switch
+        {
+            "add-item" => AddItem,
+            "clear" => Clear,
+            _ => throw new ArgumentOutOfRangeException(nameof(command))
+        };
+        var outcomeIndex = outcome switch
+        {
+            "failed" => Failed,
+            "published" => Published,
+            _ => throw new ArgumentOutOfRangeException(nameof(outcome))
+        };
+        Interlocked.Increment(
+            ref _handlerOutcomes[(commandIndex * OutcomeNames.Length) + outcomeIndex]);
+        Interlocked.Increment(ref _commandDurationCount[commandIndex]);
+        AtomicAdd(ref _commandDurationSum[commandIndex], elapsed.TotalSeconds);
         if (duplicate)
         {
             Interlocked.Increment(ref _inboxHits);
@@ -74,16 +87,24 @@ public sealed class CartMetrics
         output.AppendLine(
             $"# HELP {MetricNames.HandlerOutcomes} Completed cart command-handler outcomes.");
         output.AppendLine($"# TYPE {MetricNames.HandlerOutcomes} counter");
-        foreach (var (key, value) in _handlerOutcomes.OrderBy(entry => entry.Key, StringComparer.Ordinal))
+        for (var commandIndex = 0; commandIndex < CommandNames.Length; commandIndex++)
         {
-            var separator = key.IndexOf('\0');
-            output.Append(MetricNames.HandlerOutcomes)
-                .Append("{service=\"cartservice\",handler=\"")
-                .Append(key.AsSpan(0, separator))
-                .Append("\",outcome=\"")
-                .Append(key.AsSpan(separator + 1))
-                .Append("\"} ")
-                .AppendLine(value.ToString(CultureInfo.InvariantCulture));
+            for (var outcomeIndex = 0; outcomeIndex < OutcomeNames.Length; outcomeIndex++)
+            {
+                var value = Interlocked.Read(
+                    ref _handlerOutcomes[(commandIndex * OutcomeNames.Length) + outcomeIndex]);
+                if (value == 0)
+                {
+                    continue;
+                }
+                output.Append(MetricNames.HandlerOutcomes)
+                    .Append("{service=\"cartservice\",handler=\"")
+                    .Append(CommandNames[commandIndex])
+                    .Append("\",outcome=\"")
+                    .Append(OutcomeNames[outcomeIndex])
+                    .Append("\"} ")
+                    .AppendLine(value.ToString(CultureInfo.InvariantCulture));
+            }
         }
 
         Counter(
@@ -110,16 +131,23 @@ public sealed class CartMetrics
         output.AppendLine(
             "# HELP boutique_cart_command_duration_seconds Cart command commit and result-publication latency.");
         output.AppendLine("# TYPE boutique_cart_command_duration_seconds summary");
-        foreach (var command in _commandDurationCount.Keys.OrderBy(value => value, StringComparer.Ordinal))
+        for (var index = 0; index < CommandNames.Length; index++)
         {
-            _commandDurationCount.TryGetValue(command, out var count);
-            _commandDurationSum.TryGetValue(command, out var sum);
+            var count = Interlocked.Read(ref _commandDurationCount[index]);
+            if (count == 0)
+            {
+                continue;
+            }
+            var sum = Interlocked.CompareExchange(
+                ref _commandDurationSum[index],
+                0,
+                0);
             output.Append("boutique_cart_command_duration_seconds_count{command=\"")
-                .Append(command)
+                .Append(CommandNames[index])
                 .Append("\"} ")
                 .AppendLine(count.ToString(CultureInfo.InvariantCulture));
             output.Append("boutique_cart_command_duration_seconds_sum{command=\"")
-                .Append(command)
+                .Append(CommandNames[index])
                 .Append("\"} ")
                 .AppendLine(sum.ToString("R", CultureInfo.InvariantCulture));
         }
@@ -137,5 +165,20 @@ public sealed class CartMetrics
         output.Append(name)
             .Append("{service=\"cartservice\"} ")
             .AppendLine(value.ToString(CultureInfo.InvariantCulture));
+    }
+
+    private static void AtomicAdd(ref double target, double value)
+    {
+        var current = Volatile.Read(ref target);
+        while (true)
+        {
+            var updated = current + value;
+            var observed = Interlocked.CompareExchange(ref target, updated, current);
+            if (observed.Equals(current))
+            {
+                return;
+            }
+            current = observed;
+        }
     }
 }

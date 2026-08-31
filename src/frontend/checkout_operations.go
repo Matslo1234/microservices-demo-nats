@@ -72,10 +72,14 @@ func checkoutOrderID(request *http.Request, userID string) (string, error) {
 
 func (fe *frontendServer) tokenizePayment(ctx context.Context, orderID string, card paymentCard) (string, error) {
 	topic := "boutique.qry.payment.tokenize.v1"
-	ctx, span := telemetry.StartProducerSpan(ctx, topic, "query", "", orderID)
-	defer span.End()
+	ctx, span := fe.startProducerSpan(ctx, topic, "query", "", orderID)
+	if span != nil {
+		defer span.End()
+	}
 	var traceparent, tracestate string
-	telemetry.Inject(ctx, &traceparent, &tracestate)
+	if span != nil {
+		telemetry.Inject(ctx, &traceparent, &tracestate)
+	}
 	request := map[string]interface{}{"order_id": orderID, "idempotency_key": orderID,
 		"correlation_id": orderID,
 		"traceparent":    traceparent, "tracestate": tracestate,
@@ -83,7 +87,7 @@ func (fe *frontendServer) tokenizePayment(ctx context.Context, orderID string, c
 		"credit_card_expiration_year": card.ExpirationYear, "credit_card_cvv": card.CVV}
 	encoded, err := json.Marshal(request)
 	if err != nil {
-		telemetry.RecordError(span, err)
+		recordTelemetryError(span, err)
 		return "", err
 	}
 	requestContext, cancel := context.WithTimeout(ctx, fe.natsRequestTimeout)
@@ -97,12 +101,12 @@ func (fe *frontendServer) tokenizePayment(ctx context.Context, orderID string, c
 	}
 	message, err := fe.natsConn.RequestWithContext(requestContext, topic, encoded)
 	if err != nil {
-		telemetry.RecordError(span, err)
+		recordTelemetryError(span, err)
 		return "", fmt.Errorf("payment tokenization unavailable: %w", err)
 	}
 	var response paymentTokenResponse
 	if err := json.Unmarshal(message.Data, &response); err != nil {
-		telemetry.RecordError(span, err)
+		recordTelemetryError(span, err)
 		return "", err
 	}
 	if response.Error != "" || response.PaymentToken == "" {

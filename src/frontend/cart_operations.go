@@ -164,12 +164,14 @@ func (fe *frontendServer) publishOperationAccepted(publishContext, traceContext 
 
 func (fe *frontendServer) publishEnvelope(ctx context.Context, subject, messageID string,
 	envelope *commonv1.MessageEnvelope) error {
-	ctx, span := telemetry.StartProducerSpan(ctx, subject, messageKind(subject), messageID, envelope.CorrelationId)
-	defer span.End()
-	telemetry.Inject(ctx, &envelope.Traceparent, &envelope.Tracestate)
+	ctx, span := fe.startProducerSpan(ctx, subject, messageKind(subject), messageID, envelope.CorrelationId)
+	if span != nil {
+		defer span.End()
+		telemetry.Inject(ctx, &envelope.Traceparent, &envelope.Tracestate)
+	}
 	encoded, err := proto.Marshal(envelope)
 	if err != nil {
-		telemetry.RecordError(span, err)
+		recordTelemetryError(span, err)
 		return err
 	}
 	publishContext, cancel := context.WithTimeout(ctx, fe.natsPublishTimeout)
@@ -179,12 +181,12 @@ func (fe *frontendServer) publishEnvelope(ctx context.Context, subject, messageI
 	message.Header.Set("Content-Type", "application/protobuf")
 	ack, err := fe.natsJS.PublishMsg(message, nats.Context(publishContext), nats.MsgId(messageID))
 	if err != nil {
-		telemetry.RecordError(span, err)
+		recordTelemetryError(span, err)
 		return err
 	}
 	if ack == nil {
 		err := fmt.Errorf("JetStream did not acknowledge %s", subject)
-		telemetry.RecordError(span, err)
+		recordTelemetryError(span, err)
 		return err
 	}
 	if fe.log.IsLevelEnabled(logrus.DebugLevel) {

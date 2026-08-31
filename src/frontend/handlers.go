@@ -44,10 +44,12 @@ type platformDetails struct {
 }
 
 var (
-	frontendMessage  = strings.TrimSpace(os.Getenv("FRONTEND_MESSAGE"))
-	isCymbalBrand    = "true" == strings.ToLower(os.Getenv("CYMBAL_BRANDING"))
-	assistantEnabled = "true" == strings.ToLower(os.Getenv("ENABLE_ASSISTANT"))
-	templates        = template.Must(template.New("").
+	frontendMessage     = strings.TrimSpace(os.Getenv("FRONTEND_MESSAGE"))
+	isCymbalBrand       = "true" == strings.ToLower(os.Getenv("CYMBAL_BRANDING"))
+	assistantEnabled    = "true" == strings.ToLower(os.Getenv("ENABLE_ASSISTANT"))
+	bannerColor         = os.Getenv("BANNER_COLOR")
+	singleSharedSession = os.Getenv("ENABLE_SINGLE_SHARED_SESSION") == "true"
+	templates           = template.Must(template.New("").
 				Funcs(template.FuncMap{
 			"renderMoney":        renderMoney,
 			"renderCommonMoney":  renderCommonMoney,
@@ -78,7 +80,7 @@ func (fe *frontendServer) homeHandler(w http.ResponseWriter, r *http.Request) {
 		"currencies":    filterCurrencies(view.Currencies),
 		"products":      view.Products,
 		"cart_size":     view.CartSize,
-		"banner_color":  os.Getenv("BANNER_COLOR"), // illustrates canary deployments
+		"banner_color":  bannerColor, // illustrates canary deployments
 		"ad":            view.Ad,
 	})); err != nil {
 		log.Error(err)
@@ -180,7 +182,9 @@ func (fe *frontendServer) addToCartHandler(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	log = log.WithField("correlation_id", operationID)
-	telemetry.SetCorrelationID(r.Context(), operationID)
+	if fe.tracingEnabled {
+		telemetry.SetCorrelationID(r.Context(), operationID)
+	}
 
 	setOperationHeaders(w, operationID)
 	if err := fe.publishCartAdd(r.Context(), operationID, sessionID(r), payload.ProductID,
@@ -223,7 +227,9 @@ func (fe *frontendServer) emptyCartHandler(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	log = log.WithField("correlation_id", operationID)
-	telemetry.SetCorrelationID(r.Context(), operationID)
+	if fe.tracingEnabled {
+		telemetry.SetCorrelationID(r.Context(), operationID)
+	}
 	view, err := fe.storefrontQuery(r.Context(), "cart", storefrontQueryRequest{
 		UserID: sessionID(r), CurrencyCode: currentCurrency(r), CorrelationID: operationID,
 	})
@@ -350,7 +356,9 @@ func (fe *frontendServer) placeOrderHandler(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	log = log.WithField("correlation_id", orderID)
-	telemetry.SetCorrelationID(r.Context(), orderID)
+	if fe.tracingEnabled {
+		telemetry.SetCorrelationID(r.Context(), orderID)
+	}
 	minimumCartVersion, _ := strconv.ParseUint(r.FormValue("cart_version"), 10, 64)
 	type cartResult struct {
 		view *storefrontQueryResponse
@@ -575,28 +583,28 @@ func renderStorefrontError(log logrus.FieldLogger, r *http.Request, w http.Respo
 }
 
 func injectCommonTemplateData(r *http.Request, payload map[string]interface{}) map[string]interface{} {
-	data := map[string]interface{}{
-		"session_id":        sessionID(r),
-		"request_id":        r.Context().Value(ctxKeyRequestID{}),
-		"user_currency":     currentCurrency(r),
-		"platform_css":      plat.css,
-		"platform_name":     plat.provider,
-		"is_cymbal_brand":   isCymbalBrand,
-		"assistant_enabled": assistantEnabled,
-		"deploymentDetails": currentDeploymentDetails(),
-		"frontendMessage":   frontendMessage,
-		"currentYear":       time.Now().Year(),
-		"baseUrl":           baseUrl,
-	}
-
-	for k, v := range payload {
-		data[k] = v
-	}
-
-	return data
+	payload["session_id"] = sessionID(r)
+	payload["request_id"] = r.Context().Value(ctxKeyRequestID{})
+	payload["user_currency"] = currentCurrency(r)
+	payload["platform_css"] = plat.css
+	payload["platform_name"] = plat.provider
+	payload["is_cymbal_brand"] = isCymbalBrand
+	payload["assistant_enabled"] = assistantEnabled
+	payload["deploymentDetails"] = currentDeploymentDetails()
+	payload["frontendMessage"] = frontendMessage
+	payload["currentYear"] = time.Now().Year()
+	payload["baseUrl"] = baseUrl
+	return payload
 }
 
 func currentCurrency(r *http.Request) string {
+	if currency, ok := r.Context().Value(ctxKeyCurrency{}).(string); ok {
+		return currency
+	}
+	return currencyFromCookie(r)
+}
+
+func currencyFromCookie(r *http.Request) string {
 	c, _ := r.Cookie(cookieCurrency)
 	if c != nil {
 		return c.Value

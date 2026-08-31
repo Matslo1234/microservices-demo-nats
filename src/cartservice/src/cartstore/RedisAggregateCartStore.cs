@@ -107,8 +107,18 @@ public sealed class RedisAggregateCartStore : ICartStore, ICartCommandStore
                 }
 
                 var next = cart.Clone();
-                var existing = next.Items.SingleOrDefault(
-                    item => item.ProductId == command.ProductId);
+                CartItem? existing = null;
+                foreach (var item in next.Items)
+                {
+                    if (string.Equals(
+                        item.ProductId,
+                        command.ProductId,
+                        StringComparison.Ordinal))
+                    {
+                        existing = item;
+                        break;
+                    }
+                }
                 if (existing == null)
                 {
                     existing = new CartItem
@@ -184,10 +194,12 @@ public sealed class RedisAggregateCartStore : ICartStore, ICartCommandStore
                         "The cart changed before this command was applied.");
                 }
 
-                var priorIds = cart.Items
-                    .Select(item => item.ProductId)
-                    .OrderBy(productId => productId, StringComparer.Ordinal)
-                    .ToArray();
+                var priorIds = new string[cart.Items.Count];
+                for (var index = 0; index < cart.Items.Count; index++)
+                {
+                    priorIds[index] = cart.Items[index].ProductId;
+                }
+                Array.Sort(priorIds, StringComparer.Ordinal);
                 var next = new Cart { UserId = command.UserId };
                 var nextVersion = checked(currentVersion + 1);
                 var payload = new CartClearedEvent
@@ -253,7 +265,9 @@ public sealed class RedisAggregateCartStore : ICartStore, ICartCommandStore
                         selected.AdvanceVersion),
                     cancellationToken);
                 return new CartCommandCommit(
-                    CartResultJournal.Parse(commit.Journal.Span),
+                    commit.Duplicate
+                        ? CartResultJournal.Parse(commit.Journal.Span)
+                        : result,
                     commit.Duplicate,
                     conflicts,
                     dependencies);
@@ -332,7 +346,8 @@ public sealed class RedisAggregateCartStore : ICartStore, ICartCommandStore
         return new CartStoredResult(
             transition.Subject,
             metadata.MessageId,
-            result.ToByteArray());
+            result.ToByteArray(),
+            result);
     }
 
     private static CartTransition Rejection(
@@ -363,7 +378,7 @@ public sealed class RedisAggregateCartStore : ICartStore, ICartCommandStore
 
     private static Cart ReadCart(string userId, ReadOnlyMemory<byte> state)
     {
-        var cart = state.IsEmpty ? new Cart() : Cart.Parser.ParseFrom(state.ToArray());
+        var cart = state.IsEmpty ? new Cart() : Cart.Parser.ParseFrom(state.Span);
         if (!string.IsNullOrEmpty(cart.UserId) &&
             !string.Equals(cart.UserId, userId, StringComparison.Ordinal))
         {
@@ -380,14 +395,25 @@ public sealed class RedisAggregateCartStore : ICartStore, ICartCommandStore
             UserId = cart.UserId,
             CartVersion = version
         };
-        snapshot.Items.AddRange(
-            cart.Items
-                .OrderBy(item => item.ProductId, StringComparer.Ordinal)
-                .Select(item => new CartLine
-                {
-                    ProductId = item.ProductId,
-                    Quantity = item.Quantity
-                }));
+        if (cart.Items.Count == 0)
+        {
+            return snapshot;
+        }
+        var items = new CartItem[cart.Items.Count];
+        cart.Items.CopyTo(items, 0);
+        Array.Sort(
+            items,
+            static (left, right) => StringComparer.Ordinal.Compare(
+                left.ProductId,
+                right.ProductId));
+        foreach (var item in items)
+        {
+            snapshot.Items.Add(new CartLine
+            {
+                ProductId = item.ProductId,
+                Quantity = item.Quantity
+            });
+        }
         return snapshot;
     }
 
@@ -441,17 +467,16 @@ internal static class CartResultJournal
     {
         var subject = Encoding.UTF8.GetBytes(result.Subject);
         var messageId = Encoding.UTF8.GetBytes(result.MessageId);
-        var data = result.Data.ToArray();
         var length = checked(
             1 + sizeof(int) + subject.Length +
             sizeof(int) + messageId.Length +
-            sizeof(int) + data.Length);
+            sizeof(int) + result.Data.Length);
         var journal = new byte[length];
         journal[0] = FormatVersion;
         var offset = 1;
         Write(subject, journal, ref offset);
         Write(messageId, journal, ref offset);
-        Write(data, journal, ref offset);
+        Write(result.Data.Span, journal, ref offset);
         return journal;
     }
 
@@ -472,7 +497,11 @@ internal static class CartResultJournal
         {
             throw new InvalidDataException("Invalid cart result journal.");
         }
-        return new CartStoredResult(subject, messageId, data);
+        return new CartStoredResult(
+            subject,
+            messageId,
+            data,
+            MessageEnvelope.Parser.ParseFrom(data));
     }
 
     private static void Write(
