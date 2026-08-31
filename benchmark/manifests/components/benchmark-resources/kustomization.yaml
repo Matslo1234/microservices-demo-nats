@@ -17,6 +17,11 @@ patches:
     spec:
       template:
         spec:
+          containers:
+          - name: server
+            env:
+            - name: GOMEMLIMIT
+              value: 1GiB
           affinity:
             nodeAffinity:
               preferredDuringSchedulingIgnoredDuringExecution:

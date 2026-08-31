@@ -817,6 +817,8 @@ spec:
           value: 10m
         - name: ENABLE_TRACING
           value: "0"
+        - name: GOMEMLIMIT
+          value: 1GiB
         - name: PORT
           value: "8080"
         - name: NATS_REQUIRED
@@ -835,8 +837,6 @@ spec:
           value: 30s
         - name: CHECKOUT_PROJECTION_CATCHUP_TIMEOUT
           value: 10m
-        - name: GOMEMLIMIT
-          value: 400MiB
         - name: COLLECTOR_SERVICE_ADDR
           value: alloy.observability.svc.cluster.local:4317
         - name: OTEL_EXPORTER_OTLP_ENDPOINT
@@ -1071,7 +1071,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-emailservice
-        image: matslo123/emailservice:v0.4.0@sha256:92c6ebe1fc527c6e5f46e6cb73cc5dc6db4ff392d05179ddcd29778447be5f59
+        image: matslo123/emailservice:v0.4.0@sha256:703b889cefab8f7b720fa4680a1009f0a63388a19c8d79bade47117b9eedff9e
         livenessProbe:
           httpGet:
             path: /healthz
@@ -1710,7 +1710,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-recommendationservice
-        image: matslo123/recommendationservice:v0.4.0@sha256:d8cccf9a19c5d62bf3e38d94728366c7933c1daeb138b6f6713c42277a5f760a
+        image: matslo123/recommendationservice:v0.4.0@sha256:0ebcff3ff9ea157368213b9c696c4ec156f1ec365354b1506d03879eec120a2f
         livenessProbe:
           failureThreshold: 6
           httpGet:
