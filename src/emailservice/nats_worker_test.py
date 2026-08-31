@@ -191,15 +191,20 @@ class PublishBeforeAckTest(unittest.IsolatedAsyncioTestCase):
         return
 
     decode = message_pb2.MessageEnvelope.FromString
-    with mock.patch.object(
+    with (mock.patch.object(
         message_pb2.MessageEnvelope,
         "FromString",
         wraps=decode,
-    ) as mocked_decode:
+    ) as mocked_decode,
+          mock.patch("nats_worker.TRACING_ENABLED", False),
+          mock.patch("nats_worker.consumer_span") as consumer_span,
+          mock.patch("nats_worker.inject_envelope") as inject_envelope):
       message = Message()
       await _process_message(message, Publisher(), "")
 
     self.assertEqual(1, mocked_decode.call_count)
+    consumer_span.assert_not_called()
+    inject_envelope.assert_not_called()
     self.assertEqual(0, message.naks)
 
 
@@ -228,7 +233,7 @@ class FetchRecoveryTest(unittest.IsolatedAsyncioTestCase):
       await _fetch_message(subscription, retry_delay=0)
     self.assertEqual(1, subscription.calls)
     self.assertEqual(
-        [{"batch": 1, "timeout": 1}],
+        [{"batch": 1, "timeout": 30}],
         subscription.requests)
     self.assertFalse(_ready.is_set())
 
@@ -247,6 +252,26 @@ class FetchRecoveryTest(unittest.IsolatedAsyncioTestCase):
       await _process_messages([object(), object(), object()], None, "", 2)
 
     self.assertEqual(2, maximum_active)
+
+  async def test_batch_processing_creates_only_concurrency_workers(self):
+    started = 0
+    all_started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def process(*unused):
+      nonlocal started
+      started += 1
+      if started == 8:
+        all_started.set()
+      await release.wait()
+
+    with mock.patch("nats_worker._process_message", side_effect=process):
+      task = asyncio.create_task(
+          _process_messages([object()] * 32, None, "", 8))
+      await asyncio.wait_for(all_started.wait(), timeout=1)
+      self.assertEqual(8, started)
+      release.set()
+      await task
 
 
 class LoggerConfigurationTest(unittest.TestCase):

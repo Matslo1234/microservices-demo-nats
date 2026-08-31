@@ -5,11 +5,13 @@
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import ssl
 import threading
 import time
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 import nats
@@ -48,6 +50,17 @@ _stop = threading.Event()
 _loop = None
 _connection = None
 _thread = None
+
+
+@dataclass(frozen=True, slots=True)
+class _DecodedTrigger:
+    """A trigger decoded once and reused by filtering and processing."""
+
+    message: object
+    envelope: object
+    session_id: str
+    excluded: tuple
+    context_version: int
 
 
 class _CatalogCache:
@@ -186,14 +199,15 @@ async def _publish_result(js, catalog_cache, envelope, session_id, excluded):
     )
     inject_envelope(result)
     await js.publish(RESULT_SUBJECT, result.SerializeToString(), headers={"Nats-Msg-Id": message_id})
-    logger.debug(
-        "NATS event sent",
-        extra={
-            "topic": RESULT_SUBJECT,
-            "message_kind": "event",
-            "message_id": message_id,
-            "correlation_id": envelope.correlation_id or "unknown",
-        })
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "NATS event sent",
+            extra={
+                "topic": RESULT_SUBJECT,
+                "message_kind": "event",
+                "message_id": message_id,
+                "correlation_id": envelope.correlation_id or "unknown",
+            })
 
 
 class _NATSCatalogStore:
@@ -299,32 +313,65 @@ async def _apply_catalog_and_invalidate(catalog_store, catalog_cache, message):
     return outcome
 
 
-async def _handle_trigger(js, catalog_cache, message):
+async def _handle_trigger(js, catalog_cache, trigger):
+    if not isinstance(trigger, _DecodedTrigger):
+        if trigger.subject not in {
+            PAGE_VIEW_SUBJECT,
+            "boutique.evt.cart.item-added.v1",
+            "boutique.evt.cart.cleared.v1",
+        }:
+            return
+        trigger = _decode_trigger(trigger)
+    await _publish_result(
+        js,
+        catalog_cache,
+        trigger.envelope,
+        trigger.session_id,
+        trigger.excluded,
+    )
+
+
+def _decode_trigger(message):
     envelope = message_pb2.MessageEnvelope.FromString(message.data)
     if message.subject == PAGE_VIEW_SUBJECT:
         payload = events_pb2.StorefrontPageViewedEvent()
-        if not envelope.data.Unpack(payload):
+        if not envelope.data.Unpack(payload) or not payload.session_id:
             raise ValueError("page-view payload is invalid")
-        excluded = [payload.product_id] if payload.product_id else []
-        await _publish_result(js, catalog_cache, envelope, payload.session_id, excluded)
-        return
-    if message.subject == "boutique.evt.cart.item-added.v1":
+        session_id = payload.session_id
+        excluded = (payload.product_id,) if payload.product_id else ()
+    elif message.subject == "boutique.evt.cart.item-added.v1":
         payload = events_pb2.CartItemAddedEvent()
         if not envelope.data.Unpack(payload) or not payload.cart.user_id:
             raise ValueError("cart item payload is invalid")
-        await _publish_result(js, catalog_cache, envelope, payload.cart.user_id, [line.product_id for line in payload.cart.items])
+        session_id = payload.cart.user_id
+        excluded = tuple(line.product_id for line in payload.cart.items)
     elif message.subject == "boutique.evt.cart.cleared.v1":
         payload = events_pb2.CartClearedEvent()
         if not envelope.data.Unpack(payload) or not payload.cart.user_id:
             raise ValueError("cart clear payload is invalid")
-        await _publish_result(js, catalog_cache, envelope, payload.cart.user_id, [])
+        session_id = payload.cart.user_id
+        excluded = ()
+    else:
+        raise ValueError("unsupported recommendation trigger subject")
+    return _DecodedTrigger(
+        message=message,
+        envelope=envelope,
+        session_id=session_id,
+        excluded=excluded,
+        context_version=_context_version(envelope),
+    )
 
 
-async def _process_message(message, handler):
+async def _process_message(item, handler):
+    message = item.message if isinstance(item, _DecodedTrigger) else item
     try:
-        envelope = message_pb2.MessageEnvelope.FromString(message.data)
+        envelope = (
+            item.envelope
+            if isinstance(item, _DecodedTrigger)
+            else message_pb2.MessageEnvelope.FromString(message.data)
+        )
         with consumer_span(envelope, message.subject):
-            await handler(message)
+            await handler(item)
             await message.ack()
     except Exception:
         correlation_id, message_id = _message_context(message)
@@ -354,36 +401,33 @@ async def _fresh_page_views(messages, max_age=None):
     discarded = []
     for message in messages:
         try:
-            envelope = message_pb2.MessageEnvelope.FromString(message.data)
-            payload = events_pb2.StorefrontPageViewedEvent()
-            if not envelope.data.Unpack(payload) or not payload.session_id:
-                raise ValueError("page-view payload is invalid")
+            trigger = _decode_trigger(message)
         except Exception:
             # Preserve normal processing so malformed events follow the
             # existing logging and redelivery policy instead of disappearing.
             retained.append(message)
             continue
-        occurred_at = _trigger_time(envelope)
+        occurred_at = _trigger_time(trigger.envelope)
         if occurred_at > datetime.fromtimestamp(0, timezone.utc) and (
             now - occurred_at
         ).total_seconds() > max_age:
             discarded.append(message)
             continue
-        version = _context_version(envelope)
-        previous = newest.get(payload.session_id)
-        if previous is None or version >= previous[0]:
+        previous = newest.get(trigger.session_id)
+        if previous is None or trigger.context_version >= previous[0]:
             if previous is not None:
-                discarded.append(previous[1])
-            newest[payload.session_id] = (version, message)
+                discarded.append(previous[1].message)
+            newest[trigger.session_id] = (trigger.context_version, trigger)
         else:
             discarded.append(message)
     retained.extend(value[1] for value in newest.values())
     if discarded:
         await asyncio.gather(*(message.ack() for message in discarded))
-        logger.debug(
-            "Discarded stale or superseded page views",
-            extra={"discarded_count": len(discarded)},
-        )
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "Discarded stale or superseded page views",
+                extra={"discarded_count": len(discarded)},
+            )
     return retained
 
 
@@ -394,35 +438,32 @@ async def _latest_cart_triggers(messages):
     discarded = []
     for message in messages:
         try:
-            envelope = message_pb2.MessageEnvelope.FromString(message.data)
-            if message.subject == "boutique.evt.cart.item-added.v1":
-                payload = events_pb2.CartItemAddedEvent()
-            elif message.subject == "boutique.evt.cart.cleared.v1":
-                payload = events_pb2.CartClearedEvent()
-            else:
+            if message.subject not in {
+                "boutique.evt.cart.item-added.v1",
+                "boutique.evt.cart.cleared.v1",
+            }:
                 retained.append(message)
                 continue
-            if not envelope.data.Unpack(payload) or not payload.cart.user_id:
-                raise ValueError("cart payload is invalid")
+            trigger = _decode_trigger(message)
         except Exception:
             # Preserve normal processing and redelivery for malformed events.
             retained.append(message)
             continue
-        version = _context_version(envelope)
-        previous = newest.get(payload.cart.user_id)
-        if previous is None or version >= previous[0]:
+        previous = newest.get(trigger.session_id)
+        if previous is None or trigger.context_version >= previous[0]:
             if previous is not None:
-                discarded.append(previous[1])
-            newest[payload.cart.user_id] = (version, message)
+                discarded.append(previous[1].message)
+            newest[trigger.session_id] = (trigger.context_version, trigger)
         else:
             discarded.append(message)
     retained.extend(value[1] for value in newest.values())
     if discarded:
         await asyncio.gather(*(message.ack() for message in discarded))
-        logger.debug(
-            "Discarded superseded recommendation cart triggers",
-            extra={"discarded_count": len(discarded)},
-        )
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "Discarded superseded recommendation cart triggers",
+                extra={"discarded_count": len(discarded)},
+            )
     return retained
 
 
@@ -442,29 +483,32 @@ async def _consume(
         raise ValueError("NATS_CONSUMER_BATCH_SIZE must be between 1 and 256")
     if concurrency < 1 or concurrency > 64:
         raise ValueError("NATS_CONSUMER_CONCURRENCY must be between 1 and 64")
-    slots = asyncio.Semaphore(concurrency)
-    pending = set()
+    queue = asyncio.Queue(maxsize=batch_size * 2)
+    workers = set()
     failures = []
-    max_buffered = batch_size * 2
 
-    async def process(message):
-        async with slots:
-            await _process_message(message, handler)
+    async def worker():
+        while True:
+            item = await queue.get()
+            try:
+                await _process_message(item, handler)
+            finally:
+                queue.task_done()
 
     def completed(task):
-        pending.discard(task)
+        workers.discard(task)
         if not task.cancelled() and task.exception() is not None:
             failures.append(task.exception())
+
+    for _ in range(concurrency):
+        task = asyncio.create_task(worker())
+        workers.add(task)
+        task.add_done_callback(completed)
 
     try:
         while not _stop.is_set():
             if failures:
                 raise failures[0]
-            while len(pending) + batch_size > max_buffered:
-                await asyncio.wait(
-                    pending, return_when=asyncio.FIRST_COMPLETED)
-                if failures:
-                    raise failures[0]
             try:
                 messages = await subscription.fetch(
                     batch=batch_size, timeout=1)
@@ -480,20 +524,23 @@ async def _consume(
             if messages:
                 if batch_filter is not None:
                     messages = await batch_filter(messages)
-                logger.debug(
-                    "NATS event received",
-                    extra={"message_kind": "event"},
-                )
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug(
+                        "NATS event received",
+                        extra={"message_kind": "event"},
+                    )
                 for message in messages:
-                    task = asyncio.create_task(process(message))
-                    pending.add(task)
-                    task.add_done_callback(completed)
-                # Give ready handlers a chance to run before another fetch.
-                # The next fetch can then overlap with outstanding handlers.
+                    await queue.put(message)
+                # Let workers observe shutdown and begin processing before a
+                # pull subscription that is already buffered returns again.
                 await asyncio.sleep(0)
     finally:
-        if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
+        if not failures:
+            await queue.join()
+        for task in workers:
+            task.cancel()
+        if workers:
+            await asyncio.gather(*workers, return_exceptions=True)
 
 
 async def _durable(js, subject, durable, deliver_policy=DeliverPolicy.ALL):

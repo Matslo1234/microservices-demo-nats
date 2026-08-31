@@ -2,11 +2,13 @@
 # Licensed under the Apache License, Version 2.0 (the "License");
 
 from contextlib import contextmanager
+import os
 
 from opentelemetry import propagate, trace
 from opentelemetry.trace import SpanKind
 
 
+TRACING_ENABLED = os.getenv("ENABLE_TRACING") == "1"
 _TRACER = trace.get_tracer("online-boutique/messaging")
 
 
@@ -51,4 +53,3 @@ def inject_envelope(envelope):
     envelope.traceparent = carrier["traceparent"]
     envelope.tracestate = carrier.get("tracestate", "")
   return envelope
-

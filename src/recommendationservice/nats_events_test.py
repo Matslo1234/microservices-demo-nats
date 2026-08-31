@@ -17,6 +17,7 @@ from nats_events import (
     _CatalogCache,
     _NATSCatalogStore,
     _consume,
+    _DecodedTrigger,
     _fresh_page_views,
     _latest_cart_triggers,
     _ready,
@@ -179,7 +180,8 @@ class StreamingConsumerTests(unittest.IsolatedAsyncioTestCase):
     retained = await _fresh_page_views(
         [old, superseded, newest, other], max_age=5)
 
-    self.assertEqual({newest, other}, set(retained))
+    self.assertTrue(all(isinstance(item, _DecodedTrigger) for item in retained))
+    self.assertEqual({newest, other}, {item.message for item in retained})
     self.assertEqual(1, old.acks)
     self.assertEqual(1, superseded.acks)
     self.assertEqual(0, newest.acks)
@@ -200,7 +202,8 @@ class StreamingConsumerTests(unittest.IsolatedAsyncioTestCase):
 
     retained = await _latest_cart_triggers([item_added, cleared, other])
 
-    self.assertEqual({cleared, other}, set(retained))
+    self.assertTrue(all(isinstance(item, _DecodedTrigger) for item in retained))
+    self.assertEqual({cleared, other}, {item.message for item in retained})
     self.assertEqual(1, item_added.acks)
     self.assertEqual(0, cleared.acks)
     self.assertEqual(0, other.acks)

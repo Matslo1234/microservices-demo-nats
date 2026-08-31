@@ -28,7 +28,8 @@ RUN apk update \
 
 # get packages
 COPY src/emailservice/requirements.txt .
-RUN pip install -r requirements.txt
+RUN pip install --prefix=/runtime -r requirements.txt \
+    && pip install grpcio-tools==1.76.0
 
 COPY protos /build/protos
 RUN mkdir -p /generated \
@@ -46,8 +47,8 @@ RUN apk update \
 
 WORKDIR /email_server
 
-# Grab packages from builder
-COPY --from=builder /usr/local/lib/python3.14/ /usr/local/lib/python3.14/
+# Grab runtime packages from builder. grpcio-tools is intentionally excluded.
+COPY --from=builder /runtime/lib/python3.14/site-packages/ /usr/local/lib/python3.14/site-packages/
 
 # Add the application
 COPY src/emailservice .

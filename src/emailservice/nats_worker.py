@@ -4,6 +4,7 @@
 
 import asyncio
 import base64
+from contextlib import nullcontext
 import hashlib
 import logging
 import os
@@ -21,7 +22,7 @@ from nats.js.errors import ServiceUnavailableError
 from logger import getJSONLogger
 from protos.common.v1 import message_pb2
 from protos.events.v1 import events_pb2
-from telemetry import consumer_span, inject_envelope
+from telemetry import TRACING_ENABLED, consumer_span, inject_envelope
 
 logger = getJSONLogger("emailservice-nats")
 ORDER_SUBJECT = "boutique.evt.order.completed.v1"
@@ -154,11 +155,15 @@ def _bounded_integer_env(name, fallback, minimum, maximum):
   return value
 
 
-async def _fetch_messages(subscription, batch_size, retry_delay=0.1):
+async def _fetch_messages(
+    subscription, batch_size, retry_delay=0.1, fetch_timeout=30):
   del retry_delay  # Recovery is owned by the outer connection supervisor.
   while not _stop.is_set():
     try:
-      messages = await subscription.fetch(batch=batch_size, timeout=1)
+      # Pull requests complete as soon as a message is available. A longer
+      # timeout therefore reduces idle polling without delaying new messages.
+      messages = await subscription.fetch(
+          batch=batch_size, timeout=fetch_timeout)
     except (NatsTimeoutError, asyncio.TimeoutError):
       _ready.set()
       continue
@@ -187,8 +192,12 @@ async def _process_message(message, js, failure_mode):
     envelope = message_pb2.MessageEnvelope.FromString(message.data)
     correlation_id = envelope.correlation_id or "unknown"
     source_event_id = envelope.message_id or "unknown"
-    with consumer_span(envelope, message.subject):
-      inject_envelope(envelope)
+    span = (consumer_span(envelope, message.subject)
+            if TRACING_ENABLED else nullcontext())
+    with span:
+      if TRACING_ENABLED:
+        # Update propagation fields only when there is an active span.
+        inject_envelope(envelope)
       if logger.isEnabledFor(logging.DEBUG):
         logger.debug(
             "NATS event received",
@@ -228,13 +237,14 @@ async def _process_message(message, js, failure_mode):
 
 
 async def _process_messages(messages, js, failure_mode, concurrency):
-  slots = asyncio.Semaphore(concurrency)
+  worker_count = min(concurrency, len(messages))
+  messages = iter(messages)
 
-  async def process(message):
-    async with slots:
+  async def process():
+    for message in messages:
       await _process_message(message, js, failure_mode)
 
-  await asyncio.gather(*(process(message) for message in messages))
+  await asyncio.gather(*(process() for _ in range(worker_count)))
 
 
 async def _consume_connection():
