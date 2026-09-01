@@ -174,9 +174,6 @@ func (worker *checkoutWorker) applyOrderCommand(state *persistedState, envelope 
 		"order", payload.OrderId, saga.Version, payload.OrderId, envelope.MessageId, quoteCommand); err != nil {
 		return err
 	}
-	if err := queueStage(state, saga, envelope.MessageId); err != nil {
-		return err
-	}
 	state.setInbox(envelope.MessageId, state.TransitionTime)
 	return nil
 }
@@ -232,7 +229,7 @@ func (worker *checkoutWorker) applySagaEvent(state *persistedState, subject stri
 		if err := queueEnvelope(state, "boutique.cmd.payment.authorize.v1", "boutique.payment.Authorize.v1", "order", saga.OrderID, saga.Version, saga.OrderID, cause, command); err != nil {
 			return err
 		}
-		return queueStage(state, saga, cause)
+		return nil
 	case "boutique.evt.shipping.order-quote-failed.v1":
 		payload := &eventsv1.ShippingOrderQuoteFailedEvent{}
 		if err := envelope.Data.UnmarshalTo(payload); err != nil {
@@ -263,7 +260,7 @@ func (worker *checkoutWorker) applySagaEvent(state *persistedState, subject stri
 		if err := queueEnvelope(state, "boutique.cmd.shipping.create-shipment.v1", "boutique.shipping.CreateShipment.v1", "order", saga.OrderID, saga.Version, saga.OrderID, cause, command); err != nil {
 			return err
 		}
-		return queueStage(state, saga, cause)
+		return nil
 	case "boutique.evt.payment.authorization-declined.v1":
 		payload := &eventsv1.PaymentAuthorizationDeclinedEvent{}
 		if err := envelope.Data.UnmarshalTo(payload); err != nil {
@@ -292,7 +289,7 @@ func (worker *checkoutWorker) applySagaEvent(state *persistedState, subject stri
 		if err := queueEnvelope(state, "boutique.cmd.payment.capture.v1", "boutique.payment.Capture.v1", "order", saga.OrderID, saga.Version, saga.OrderID, cause, command); err != nil {
 			return err
 		}
-		return queueStage(state, saga, cause)
+		return nil
 	case "boutique.evt.shipping.shipment-creation-failed.v1":
 		payload := &eventsv1.ShippingShipmentCreationFailedEvent{}
 		if err := envelope.Data.UnmarshalTo(payload); err != nil {
@@ -322,7 +319,7 @@ func (worker *checkoutWorker) applySagaEvent(state *persistedState, subject stri
 		if err := queueEnvelope(state, "boutique.cmd.cart.clear.v1", "boutique.cart.Clear.v1", "cart", saga.UserID, saga.CartVersion, saga.OrderID, cause, clear); err != nil {
 			return err
 		}
-		return queueStage(state, saga, cause)
+		return nil
 	case "boutique.evt.payment.capture-failed.v1":
 		payload := &eventsv1.PaymentCaptureFailedEvent{}
 		if err := envelope.Data.UnmarshalTo(payload); err != nil {

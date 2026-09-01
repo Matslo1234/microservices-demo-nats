@@ -17,14 +17,24 @@ import (
 type cachedProjectionKV struct {
 	source     projectionKV
 	maxEntries int
+	maxBytes   int
 
 	mu      sync.RWMutex
 	entries map[string]cachedProjectionEntry
+	bytes   int
 }
 
 func newCachedProjectionKV(source projectionKV, maxEntries int) *cachedProjectionKV {
+	maxBytes := 0
+	if maxEntries > 0 {
+		maxBytes = maxEntries * 2048
+	}
+	return newCachedProjectionKVWithLimits(source, maxEntries, maxBytes)
+}
+
+func newCachedProjectionKVWithLimits(source projectionKV, maxEntries, maxBytes int) *cachedProjectionKV {
 	return &cachedProjectionKV{
-		source: source, maxEntries: maxEntries,
+		source: source, maxEntries: maxEntries, maxBytes: maxBytes,
 		entries: make(map[string]cachedProjectionEntry),
 	}
 }
@@ -78,18 +88,32 @@ func cachedWriteEntry(key string, value []byte, revision uint64) cachedProjectio
 func (cache *cachedProjectionKV) store(entry cachedProjectionEntry) {
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
-	if _, exists := cache.entries[entry.key]; !exists &&
-		cache.maxEntries > 0 && len(cache.entries) >= cache.maxEntries {
+	if previous, exists := cache.entries[entry.key]; exists {
+		cache.bytes -= projectionCacheEntryBytes(previous)
+		delete(cache.entries, entry.key)
+	}
+	entryBytes := projectionCacheEntryBytes(entry)
+	for len(cache.entries) > 0 && ((cache.maxEntries > 0 && len(cache.entries) >= cache.maxEntries) ||
+		(cache.maxBytes > 0 && cache.bytes+entryBytes > cache.maxBytes)) {
 		for key := range cache.entries {
+			cache.bytes -= projectionCacheEntryBytes(cache.entries[key])
 			delete(cache.entries, key)
 			break
 		}
 	}
 	cache.entries[entry.key] = entry
+	cache.bytes += entryBytes
 }
 
 func (cache *cachedProjectionKV) invalidate(key string) {
 	cache.mu.Lock()
+	if entry, exists := cache.entries[key]; exists {
+		cache.bytes -= projectionCacheEntryBytes(entry)
+	}
 	delete(cache.entries, key)
 	cache.mu.Unlock()
+}
+
+func projectionCacheEntryBytes(entry cachedProjectionEntry) int {
+	return len(entry.key) + len(entry.value)
 }

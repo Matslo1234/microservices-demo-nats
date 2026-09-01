@@ -43,6 +43,8 @@ type projectionConfig struct {
 	queryPendingBytes      int
 	cartCacheEntries       int
 	contextCacheEntries    int
+	cartCacheBytes         int
+	contextCacheBytes      int
 }
 
 func requiredEnvironment(name string) (string, error) {
@@ -98,6 +100,9 @@ func loadProjectionConfig() (projectionConfig, error) {
 		!strings.Contains(values["STOREFRONT_PROJECTION_DURABLE"], values["REGION_ID"]) {
 		return projectionConfig{}, fmt.Errorf("STOREFRONT_PROJECTION_DURABLE must be safe and contain REGION_ID")
 	}
+	if !durableNamePattern.MatchString(values["STOREFRONT_PROJECTION_DURABLE"] + "-orders") {
+		return projectionConfig{}, fmt.Errorf("STOREFRONT_PROJECTION_DURABLE is too long for the derived order durable")
+	}
 	if !durableNamePattern.MatchString(values["STOREFRONT_PERSONALIZATION_DURABLE"]) ||
 		!strings.Contains(values["STOREFRONT_PERSONALIZATION_DURABLE"], values["REGION_ID"]) {
 		return projectionConfig{}, fmt.Errorf("STOREFRONT_PERSONALIZATION_DURABLE must be safe and contain REGION_ID")
@@ -137,6 +142,14 @@ func loadProjectionConfig() (projectionConfig, error) {
 	if err != nil {
 		return projectionConfig{}, err
 	}
+	cartCacheBytes, err := boundedEnvInt("STOREFRONT_CART_CACHE_BYTES", 128*1024*1024, 1024*1024, 1024*1024*1024)
+	if err != nil {
+		return projectionConfig{}, err
+	}
+	contextCacheBytes, err := boundedEnvInt("STOREFRONT_CONTEXT_CACHE_BYTES", 128*1024*1024, 1024*1024, 1024*1024*1024)
+	if err != nil {
+		return projectionConfig{}, err
+	}
 	ownerRegion := strings.TrimSpace(os.Getenv("STREAM_OWNER_REGION"))
 	if ownerRegion == "" {
 		ownerRegion = values["REGION_ID"]
@@ -167,6 +180,8 @@ func loadProjectionConfig() (projectionConfig, error) {
 		queryPendingBytes:      queryPendingBytes,
 		cartCacheEntries:       cartCacheEntries,
 		contextCacheEntries:    contextCacheEntries,
+		cartCacheBytes:         cartCacheBytes,
+		contextCacheBytes:      contextCacheBytes,
 	}, nil
 }
 

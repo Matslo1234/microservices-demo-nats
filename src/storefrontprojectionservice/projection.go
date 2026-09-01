@@ -28,13 +28,15 @@ const (
 	projectionFetchSize                  = 1024
 	projectionParallelism                = 128
 	projectionMaxPending                 = 4096
+	orderProjectionParallelism           = 128
+	orderProjectionMaxPending            = 4096
 	projectionMaxDeliver                 = -1
 	projectionEventHistory               = 32
 	personalizationProjectionParallelism = 8
 	personalizationProjectionMaxPending  = 256
 )
 
-var criticalProjectionFilterSubjects = []string{
+var generalProjectionFilterSubjects = []string{
 	"boutique.evt.catalog.product-upserted.v1",
 	"boutique.evt.catalog.product-removed.v1",
 	"boutique.evt.catalog.snapshot-completed.v1",
@@ -42,9 +44,17 @@ var criticalProjectionFilterSubjects = []string{
 	"boutique.evt.cart.item-added.v1",
 	"boutique.evt.cart.cleared.v1",
 	"boutique.evt.cart.command-rejected.v1",
-	"boutique.evt.storefront.operation-accepted.v1",
 	"boutique.evt.shipping.cart-quote-updated.v1",
 	"boutique.evt.shipping.cart-quote-failed.v1",
+}
+
+// Order subjects use a separate durable so order traffic cannot block general
+// storefront facts. Messages are sharded by correlation ID into ordered local
+// lanes, while version-aware CAS updates make delivery safe when a shared
+// durable distributes one aggregate across deployment replicas. The legacy
+// stage subject remains subscribed for replay compatibility.
+var orderProjectionFilterSubjects = []string{
+	"boutique.evt.storefront.operation-accepted.v1",
 	"boutique.evt.order.submitted.v1",
 	"boutique.evt.order.processing-stage-changed.v1",
 	"boutique.evt.order.rejected.v1",
@@ -55,6 +65,11 @@ var criticalProjectionFilterSubjects = []string{
 	"boutique.evt.notification.order-confirmation-sent.v1",
 	"boutique.evt.notification.order-confirmation-failed.v1",
 }
+
+var criticalProjectionFilterSubjects = append(
+	append([]string(nil), generalProjectionFilterSubjects...),
+	orderProjectionFilterSubjects...,
+)
 
 var personalizationProjectionFilterSubjects = []string{
 	"boutique.evt.recommendation.generated.v1",
@@ -80,9 +95,21 @@ type projectionConsumer struct {
 func (p *projector) criticalConsumer() projectionConsumer {
 	return projectionConsumer{
 		js: p.js, stream: p.config.eventStream, durable: p.config.durable,
-		filters: criticalProjectionFilterSubjects, parallelism: projectionParallelism,
+		filters: generalProjectionFilterSubjects, parallelism: projectionParallelism,
 		maxPending: projectionMaxPending, critical: true,
 	}
+}
+
+func (p *projector) orderConsumer() projectionConsumer {
+	return projectionConsumer{
+		js: p.js, stream: p.config.eventStream, durable: p.config.durable + "-orders",
+		filters: orderProjectionFilterSubjects, parallelism: orderProjectionParallelism,
+		maxPending: orderProjectionMaxPending, critical: true,
+	}
+}
+
+func (p *projector) criticalConsumers() []projectionConsumer {
+	return []projectionConsumer{p.criticalConsumer(), p.orderConsumer()}
 }
 
 func (p *projector) personalizationConsumer(js nats.JetStreamContext) projectionConsumer {
@@ -121,6 +148,8 @@ type projector struct {
 	lastProjectedUnix  atomic.Int64
 	consumerPending    atomic.Uint64
 	consumerAckPending atomic.Uint64
+	consumerStateMu    sync.Mutex
+	consumerStates     map[string][2]uint64
 }
 
 // projectionReader keeps read-model queries independently testable.
@@ -151,7 +180,9 @@ func newProjector(js nats.JetStreamContext, config projectionConfig) (*projector
 		catalog.Close()
 		return nil, fmt.Errorf("open cart KV: %w", err)
 	}
-	cartCache, err := newExpiringProjectionReadCache(carts, config.cartCacheEntries, cartCacheTTL, nil)
+	cartCache, err := newExpiringProjectionReadCacheWithLimits(
+		carts, config.cartCacheEntries, config.cartCacheBytes, cartCacheTTL, nil,
+	)
 	if err != nil {
 		catalog.Close()
 		return nil, fmt.Errorf("initialize cart query cache: %w", err)
@@ -162,7 +193,9 @@ func newProjector(js nats.JetStreamContext, config projectionConfig) (*projector
 		cartCache.Close()
 		return nil, fmt.Errorf("open context KV: %w", err)
 	}
-	contextCache, err := newExpiringProjectionReadCache(context, config.contextCacheEntries, 0, projectionExpiresAt)
+	contextCache, err := newExpiringProjectionReadCacheWithLimits(
+		context, config.contextCacheEntries, config.contextCacheBytes, 0, projectionExpiresAt,
+	)
 	if err != nil {
 		catalog.Close()
 		cartCache.Close()
@@ -187,10 +220,11 @@ func newProjector(js nats.JetStreamContext, config projectionConfig) (*projector
 		cartCache: cartCache, context: context, contextCache: contextCache,
 		operations: operations, orders: orders,
 		productWrites:   newCachedProjectionKV(products, 4096),
-		cartWrites:      newCachedProjectionKV(carts, config.cartCacheEntries),
-		contextWrites:   newCachedProjectionKV(context, config.contextCacheEntries),
-		operationWrites: newCachedProjectionKV(operations, 65536),
-		orderWrites:     newCachedProjectionKV(orders, 65536),
+		cartWrites:      newCachedProjectionKVWithLimits(carts, config.cartCacheEntries, config.cartCacheBytes),
+		contextWrites:   newCachedProjectionKVWithLimits(context, config.contextCacheEntries, config.contextCacheBytes),
+		operationWrites: newCachedProjectionKVWithLimits(operations, 65536, 64*1024*1024),
+		orderWrites:     newCachedProjectionKVWithLimits(orders, 65536, 128*1024*1024),
+		consumerStates:  make(map[string][2]uint64),
 	}, nil
 }
 
@@ -325,7 +359,7 @@ func (p *projector) run(subscription *nats.Subscription, stop <-chan struct{}, c
 			return nil
 		}
 		if consumer.critical {
-			_ = p.refreshConsumerState()
+			_ = p.refreshConsumerState(consumer)
 		}
 		if err := batch.Error(); err != nil {
 			if projectionConsumerTerminal(err) {
@@ -804,17 +838,17 @@ func (p *projector) applyEnvelope(
 		if err := envelope.Data.UnmarshalTo(payload); err != nil {
 			return err
 		}
-		status := "PROCESSING"
-		if payload.Stage == "COMPLETED" {
-			status = "COMPLETED"
-		} else if payload.Stage == "CANCELLED" {
-			status = "CANCELLED"
-		} else if payload.Stage == "MANUAL_REVIEW" {
-			status = "MANUAL_REVIEW"
+		// Detailed stages published by older checkout versions are progress-only.
+		// Terminal state comes from the authoritative terminal events, and the
+		// submitted event establishes PROCESSING. Retain only compensation because
+		// it is the one coarse intermediate state useful to a customer.
+		if payload.Stage != "COMPENSATING" {
+			p.staleEventSkips.Add(1)
+			return nil
 		}
 		return p.updateOrder(storefront.OrderView{ProjectionMetadata: projectionMetadata(envelope, envelope.AggregateVersion),
-			OrderID: payload.OrderId, Status: status, Stage: payload.Stage,
-			AggregateVersion: envelope.AggregateVersion, OutcomeAt: terminalOrderOutcomeAt(status, publishedAt), UpdatedAt: updatedAt})
+			OrderID: payload.OrderId, Status: "PROCESSING", Stage: payload.Stage,
+			AggregateVersion: envelope.AggregateVersion, UpdatedAt: updatedAt})
 	case "boutique.evt.order.rejected.v1":
 		payload := &eventsv1.OrderRejectedEvent{}
 		if err := envelope.Data.UnmarshalTo(payload); err != nil {
@@ -1000,21 +1034,31 @@ func liveOperationSubject(prefix, operationID string) (string, error) {
 	return prefix + operationID, nil
 }
 
-func (p *projector) refreshConsumerState() error {
-	info, err := p.js.ConsumerInfo(p.config.eventStream, p.config.durable)
+func (p *projector) refreshConsumerState(consumer projectionConsumer) error {
+	info, err := consumer.js.ConsumerInfo(consumer.stream, consumer.durable)
 	if err != nil {
 		return err
 	}
-	p.consumerPending.Store(info.NumPending)
-	p.consumerAckPending.Store(uint64(info.NumAckPending))
+	p.consumerStateMu.Lock()
+	p.consumerStates[consumer.durable] = [2]uint64{info.NumPending, uint64(info.NumAckPending)}
+	var pending, ackPending uint64
+	for _, state := range p.consumerStates {
+		pending += state[0]
+		ackPending += state[1]
+	}
+	p.consumerStateMu.Unlock()
+	p.consumerPending.Store(pending)
+	p.consumerAckPending.Store(ackPending)
 	return nil
 }
 
 func (p *projector) waitForInitialReplay(timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for {
-		if err := p.refreshConsumerState(); err != nil {
-			return fmt.Errorf("inspect regional projection replay: %w", err)
+		for _, consumer := range p.criticalConsumers() {
+			if err := p.refreshConsumerState(consumer); err != nil {
+				return fmt.Errorf("inspect regional projection replay for %s: %w", consumer.durable, err)
+			}
 		}
 		if p.consumerPending.Load() == 0 && p.consumerAckPending.Load() == 0 {
 			return nil

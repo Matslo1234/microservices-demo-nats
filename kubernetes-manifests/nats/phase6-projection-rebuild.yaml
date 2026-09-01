@@ -34,6 +34,7 @@ spec:
           args="--server=${NATS_URL} --user=${NATS_USER} --password=${NATS_PASSWORD} --tlsca=/etc/nats-ca/ca.crt"
 
           nats ${args} consumer rm "${STOREFRONT_EVENT_STREAM}" "${STOREFRONT_PROJECTION_DURABLE}" --force || true
+          nats ${args} consumer rm "${STOREFRONT_EVENT_STREAM}" "${STOREFRONT_PROJECTION_DURABLE}-orders" --force || true
           for bucket in "${STOREFRONT_PRODUCTS_BUCKET}" "${STOREFRONT_CARTS_BUCKET}" "${STOREFRONT_CONTEXT_BUCKET}" "${STOREFRONT_ORDERS_BUCKET}" "${STOREFRONT_OPERATIONS_BUCKET}"; do
             nats ${args} kv del "${bucket}" --force || true
           done
@@ -103,8 +104,11 @@ spec:
           deadline=$(( $(date +%s) + 300 ))
           while :; do
             state="$(nats ${args} consumer info "${STOREFRONT_EVENT_STREAM}" "${STOREFRONT_PROJECTION_DURABLE}" --json 2>/dev/null || true)"
+            order_state="$(nats ${args} consumer info "${STOREFRONT_EVENT_STREAM}" "${STOREFRONT_PROJECTION_DURABLE}-orders" --json 2>/dev/null || true)"
             if echo "${state}" | grep -Eq '"num_pending"[[:space:]]*:[[:space:]]*0' && \
-               echo "${state}" | grep -Eq '"num_ack_pending"[[:space:]]*:[[:space:]]*0'; then
+               echo "${state}" | grep -Eq '"num_ack_pending"[[:space:]]*:[[:space:]]*0' && \
+               echo "${order_state}" | grep -Eq '"num_pending"[[:space:]]*:[[:space:]]*0' && \
+               echo "${order_state}" | grep -Eq '"num_ack_pending"[[:space:]]*:[[:space:]]*0'; then
               break
             fi
             if [ "$(date +%s)" -ge "${deadline}" ]; then
@@ -119,6 +123,7 @@ spec:
             nats ${args} kv info "${bucket}" >/dev/null
           done
           nats ${args} consumer info "${STOREFRONT_EVENT_STREAM}" "${STOREFRONT_PROJECTION_DURABLE}"
+          nats ${args} consumer info "${STOREFRONT_EVENT_STREAM}" "${STOREFRONT_PROJECTION_DURABLE}-orders"
           echo "Storefront projection replay reached zero pending and zero ack-pending messages."
         envFrom:
         - configMapRef:

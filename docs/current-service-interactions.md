@@ -86,9 +86,11 @@ described below.
 ### Frontend reads and writes
 
 The frontend reads views through the logical `storefrontprojectionservice`; it
-does not query domain owners directly. Each `storefrontprojectionservice` pod
-shares the critical durable event consumer that maintains the materialized
-views and serves Core NATS queries from those views. A second, independently
+does not query domain owners directly. General storefront facts and order facts
+use separate region-qualified durable consumers. The derived order durable is
+`${STOREFRONT_PROJECTION_DURABLE}-orders`; it uses parallel correlation-ID
+lanes and version-aware CAS updates so order traffic scales without allowing
+an older transition to replace a newer order view. Another independently
 connected durable consumes recommendation and ad results from
 `BOUTIQUE_PERSONALIZATION` with only eight processing lanes and 256 pending
 acknowledgements. Keeping the complete read side in
@@ -115,6 +117,15 @@ The SSE endpoint first returns the session-scoped authoritative order view,
 then forwards named `order` events after projection updates. Core NATS delivery
 is intentionally ephemeral; reconnecting obtains a fresh view rather than
 replaying missed notifications.
+
+The customer-facing order view intentionally uses a coarse progress model.
+`order.submitted` establishes `PROCESSING`; a compensation transition may
+temporarily expose `COMPENSATING`; and a dedicated rejected, completed,
+cancelled, or manual-review event establishes the terminal state. Internal
+`WAITING_FOR_QUOTE`, `WAITING_FOR_AUTHORIZATION`, `WAITING_FOR_SHIPMENT`, and
+`WAITING_FOR_CAPTURE` stages remain authoritative inside checkoutservice but
+are not published as storefront progress events. Retained detailed stage
+events from older deployments are acknowledged without rewriting the view.
 
 Add-item POSTs publish directly after request validation; they do not query the
 storefront for a cart version. `cartservice` validates product availability
@@ -400,7 +411,8 @@ In supercluster mode, clients still connect only to their local
 `nats.nats.svc.cluster.local:4222`. Routes stay inside one Kubernetes region;
 mTLS gateways use only TCP `7222` between uniquely named NATS clusters. Global
 command/event streams and the owner Redis workloads remain primary-placed,
-while every region has its own projection durable and placed derived buckets.
+while every region has paired general/order projection durables and placed
+derived buckets.
 The checked-in local inventory selects standalone mode, which exercises the
 same regional application contract without requiring a remote peer.
 

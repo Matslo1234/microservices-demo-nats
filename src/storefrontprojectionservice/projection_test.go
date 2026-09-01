@@ -39,6 +39,56 @@ func TestProjectionConsumerTerminalErrorsRequireRebind(t *testing.T) {
 	}
 }
 
+func TestOrderProjectionUsesSeparateParallelDurable(t *testing.T) {
+	worker := &projector{config: projectionConfig{eventStream: "BOUTIQUE_EVENTS", durable: "storefront-projection-local-v1"}}
+	general := worker.criticalConsumer()
+	orders := worker.orderConsumer()
+	if general.durable == orders.durable {
+		t.Fatal("order and general projection share a durable")
+	}
+	if orders.parallelism != orderProjectionParallelism || orders.maxPending != orderProjectionMaxPending {
+		t.Fatalf("order projection has unexpected capacity: parallelism=%d max_pending=%d", orders.parallelism, orders.maxPending)
+	}
+	if orders.parallelism <= 1 || orders.maxPending <= 1 {
+		t.Fatalf("order projection is globally serialized: parallelism=%d max_pending=%d", orders.parallelism, orders.maxPending)
+	}
+	for _, subject := range orderProjectionFilterSubjects {
+		for _, generalSubject := range generalProjectionFilterSubjects {
+			if subject == generalSubject {
+				t.Fatalf("subject %q appears in both critical durables", subject)
+			}
+		}
+	}
+}
+
+func TestCriticalConsumerHealthRequiresEveryDurable(t *testing.T) {
+	worker := &projector{config: projectionConfig{eventStream: "BOUTIQUE_EVENTS", durable: "storefront-projection-local-v1"}}
+	runtime := &projectionRuntime{projector: worker}
+	general := worker.criticalConsumer()
+	orders := worker.orderConsumer()
+
+	if runtime.criticalConsumersHealthy() {
+		t.Fatal("missing critical consumer health was reported healthy")
+	}
+	runtime.setCriticalConsumerHealthy(general, true)
+	if runtime.criticalConsumersHealthy() {
+		t.Fatal("one healthy critical consumer masked the missing order consumer")
+	}
+	runtime.setCriticalConsumerHealthy(orders, true)
+	if !runtime.criticalConsumersHealthy() {
+		t.Fatal("all healthy critical consumers were reported unhealthy")
+	}
+	runtime.setCriticalConsumerHealthy(general, false)
+	if runtime.criticalConsumersHealthy() {
+		t.Fatal("healthy order consumer masked the failed general consumer")
+	}
+	runtime.setCriticalConsumerHealthy(general, true)
+	runtime.setCriticalConsumerHealthy(orders, false)
+	if runtime.criticalConsumersHealthy() {
+		t.Fatal("healthy general consumer masked the failed order consumer")
+	}
+}
+
 func TestProjectionRetryDelayUsesBoundedExponentialBackoff(t *testing.T) {
 	tests := []struct {
 		deliveries uint64

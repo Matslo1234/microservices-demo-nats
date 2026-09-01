@@ -8,11 +8,30 @@ JetStream
 KV remains the authoritative projection store; process-local caches are
 disposable accelerators rebuilt from KV watches or reads.
 
-The critical and personalization projections use distinct NATS connections,
-durables, and worker pools. Readiness and initial replay wait only for the
-critical projection.
+General storefront, order, and personalization projections use distinct
+durables and worker pools. The general durable is configured by
+`STOREFRONT_PROJECTION_DURABLE`; the order durable appends `-orders`. Order
+events use parallel correlation-ID lanes, and version-aware CAS updates keep
+older transitions from replacing newer views across replicas. Readiness and
+initial replay wait for both critical durables, but not personalization.
 Personalization uses eight lanes with at most 256 unacknowledged messages, so
-its backlog cannot occupy the critical durable or its 128 projection lanes.
+its backlog cannot occupy either critical durable or the general durable's 128
+projection lanes.
+
+## Coarse order progress
+
+Checkout publishes storefront progress only when it adds customer value:
+
+- `order.submitted` creates the `PROCESSING` view.
+- `order.processing-stage-changed` is emitted only for `COMPENSATING`.
+- `order.rejected`, `order.completed`, `order.cancelled`, and
+  `order.manual-review-required` establish terminal state.
+
+The checkout saga still persists its detailed waiting stage for correctness,
+deadline handling, and diagnostics. Those internal stages are not required by
+the projector. Detailed stage events retained from an older release stay in
+the order durable's filter for replay compatibility, but the handler
+acknowledges them without rewriting KV or publishing a live update.
 
 ## Query isolation and admission
 
@@ -38,6 +57,9 @@ Relevant settings are:
 | `STOREFRONT_QUERY_PENDING_MESSAGES` | `512` | Pending NATS messages allowed per endpoint |
 | `STOREFRONT_QUERY_PENDING_BYTES` | `2097152` | Pending NATS bytes allowed per endpoint |
 | `STOREFRONT_CART_CACHE_ENTRIES` | `65536` | Maximum watch-fed cart entries retained per pod |
+| `STOREFRONT_CONTEXT_CACHE_ENTRIES` | `65536` | Maximum watch-fed context entries retained per pod |
+| `STOREFRONT_CART_CACHE_BYTES` | `134217728` | Maximum raw cart-cache key/value bytes retained per pod |
+| `STOREFRONT_CONTEXT_CACHE_BYTES` | `134217728` | Maximum raw context-cache key/value bytes retained per pod |
 
 Increasing pending limits does not increase processing capacity and can turn
 overload into tail latency. Tune admission only after measuring handler and KV
@@ -63,5 +85,18 @@ with the cached revision. If another replica has advanced the key, the CAS
 conflict invalidates the cache; the normal retry loop rereads JetStream and
 reapplies duplicate/version checks before trying again.
 
-The cache therefore removes an authoritative read from uncontended updates but
-does not replace JetStream KV, relax ordering, or permit last-write-wins state.
+Both read and write caches enforce entry-count and raw key/value-byte bounds.
+The byte bound prevents a workload with unusually large views from consuming
+the entire pod memory limit even when it remains below the entry limit.
+
+The write cache therefore removes an authoritative read from uncontended
+updates but does not replace JetStream KV, relax ordering, or permit
+last-write-wins state.
+
+## Replay and reset
+
+Projection rebuilds delete and recreate both critical durable cursors. The
+rebuild is complete only when both report zero pending and zero ack-pending
+messages. Deleting only `STOREFRONT_PROJECTION_DURABLE` is insufficient: the
+derived order durable could retain its old cursor and skip order history while
+the order KV bucket is empty.

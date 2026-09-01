@@ -202,10 +202,12 @@ type projectionRuntime struct {
 	personalizationNC           *nats.Conn
 	projector                   *projector
 	subscription                *nats.Subscription
+	orderSubscription           *nats.Subscription
 	personalizationSubscription *nats.Subscription
 	subscriptionMu              sync.RWMutex
 	projectionReady             atomic.Bool
-	consumerHealthy             atomic.Bool
+	consumerHealthMu            sync.RWMutex
+	consumerHealth              map[string]bool
 	queryMu                     sync.RWMutex
 	queryServices               map[string]*queryServiceRuntime
 	queryStopped                chan string
@@ -236,8 +238,17 @@ func initializeProjectionRuntime() (*projectionRuntime, error) {
 		nc.Close()
 		return nil, err
 	}
+	orderConsumer := projector.orderConsumer()
+	orderSubscription, _, err := projector.subscribe(orderConsumer)
+	if err != nil {
+		_ = subscription.Unsubscribe()
+		projector.close()
+		nc.Close()
+		return nil, err
+	}
 	personalizationNC, err := connectNATSConnection(config, "personalization-projection")
 	if err != nil {
+		_ = orderSubscription.Unsubscribe()
 		_ = subscription.Unsubscribe()
 		projector.close()
 		nc.Close()
@@ -246,6 +257,7 @@ func initializeProjectionRuntime() (*projectionRuntime, error) {
 	personalizationJS, err := personalizationNC.JetStream()
 	if err != nil {
 		personalizationNC.Close()
+		_ = orderSubscription.Unsubscribe()
 		_ = subscription.Unsubscribe()
 		projector.close()
 		nc.Close()
@@ -255,6 +267,7 @@ func initializeProjectionRuntime() (*projectionRuntime, error) {
 	personalizationSubscription, _, err := projector.subscribe(personalizationConsumer)
 	if err != nil {
 		personalizationNC.Close()
+		_ = orderSubscription.Unsubscribe()
 		_ = subscription.Unsubscribe()
 		projector.close()
 		nc.Close()
@@ -262,7 +275,12 @@ func initializeProjectionRuntime() (*projectionRuntime, error) {
 	}
 	runtime := &projectionRuntime{
 		nc: nc, personalizationNC: personalizationNC, projector: projector, subscription: subscription,
+		orderSubscription:           orderSubscription,
 		personalizationSubscription: personalizationSubscription,
+		consumerHealth: map[string]bool{
+			criticalConsumer.durable: true,
+			orderConsumer.durable:    true,
+		},
 		queryServices:               make(map[string]*queryServiceRuntime),
 		queryStopped:                make(chan string, 8), rebuilding: rebuilding,
 		stop: make(chan struct{}),
@@ -304,8 +322,8 @@ func initializeProjectionRuntime() (*projectionRuntime, error) {
 			role: role, nc: queryConnection, service: service, endpointCount: endpointCount,
 		}
 	}
-	runtime.consumerHealthy.Store(true)
 	go runtime.superviseProjectionConsumer(subscription, criticalConsumer)
+	go runtime.superviseProjectionConsumer(orderSubscription, orderConsumer)
 	go runtime.superviseProjectionConsumer(personalizationSubscription, personalizationConsumer)
 	if err := projector.waitForInitialReplay(config.catchupTimeout); err != nil {
 		runtime.close()
@@ -325,7 +343,7 @@ func configureQueryConnection(nc *nats.Conn, role string) {
 }
 
 func (runtime *projectionRuntime) ready() bool {
-	if !runtime.projectionReady.Load() || !runtime.consumerHealthy.Load() ||
+	if !runtime.projectionReady.Load() || !runtime.criticalConsumersHealthy() ||
 		runtime.nc == nil || !runtime.nc.IsConnected() {
 		return false
 	}
@@ -337,6 +355,32 @@ func (runtime *projectionRuntime) ready() bool {
 	for _, queryRuntime := range runtime.queryServices {
 		if queryRuntime.nc == nil || !queryRuntime.nc.IsConnected() ||
 			queryRuntime.service == nil || queryRuntime.service.Stopped() {
+			return false
+		}
+	}
+	return true
+}
+
+func (runtime *projectionRuntime) setCriticalConsumerHealthy(consumer projectionConsumer, healthy bool) {
+	if !consumer.critical {
+		return
+	}
+	runtime.consumerHealthMu.Lock()
+	if runtime.consumerHealth == nil {
+		runtime.consumerHealth = make(map[string]bool)
+	}
+	runtime.consumerHealth[consumer.durable] = healthy
+	runtime.consumerHealthMu.Unlock()
+}
+
+func (runtime *projectionRuntime) criticalConsumersHealthy() bool {
+	if runtime.projector == nil {
+		return false
+	}
+	runtime.consumerHealthMu.RLock()
+	defer runtime.consumerHealthMu.RUnlock()
+	for _, consumer := range runtime.projector.criticalConsumers() {
+		if !runtime.consumerHealth[consumer.durable] {
 			return false
 		}
 	}
@@ -366,7 +410,9 @@ func queryRepairBackoff(failures int) time.Duration {
 
 func (runtime *projectionRuntime) setConsumerSubscription(consumer projectionConsumer, subscription *nats.Subscription) {
 	runtime.subscriptionMu.Lock()
-	if consumer.critical {
+	if consumer.durable == runtime.projector.orderConsumer().durable {
+		runtime.orderSubscription = subscription
+	} else if consumer.critical {
 		runtime.subscription = subscription
 	} else {
 		runtime.personalizationSubscription = subscription
@@ -386,7 +432,7 @@ func (runtime *projectionRuntime) superviseProjectionConsumer(initial *nats.Subs
 	for {
 		runtime.setConsumerSubscription(consumer, subscription)
 		if consumer.critical && !needsCatchup {
-			runtime.consumerHealthy.Store(true)
+			runtime.setCriticalConsumerHealthy(consumer, true)
 		}
 		runDone := make(chan error, 1)
 		go func(current *nats.Subscription) {
@@ -409,8 +455,8 @@ func (runtime *projectionRuntime) superviseProjectionConsumer(initial *nats.Subs
 					runErr = <-runDone
 					log.Printf("projection consumer recovery did not catch up: %v", catchupErr)
 				} else {
-					runtime.consumerHealthy.Store(true)
-					runtime.projectionReady.Store(runtime.nc.IsConnected())
+					runtime.setCriticalConsumerHealthy(consumer, true)
+					runtime.projectionReady.Store(runtime.nc.IsConnected() && runtime.criticalConsumersHealthy())
 					log.Printf("projection consumer recovered durable=%q", consumer.durable)
 					select {
 					case <-runtime.stop:
@@ -428,7 +474,7 @@ func (runtime *projectionRuntime) superviseProjectionConsumer(initial *nats.Subs
 		}
 
 		if consumer.critical {
-			runtime.consumerHealthy.Store(false)
+			runtime.setCriticalConsumerHealthy(consumer, false)
 			runtime.projectionReady.Store(false)
 		}
 		select {
@@ -517,8 +563,12 @@ func (runtime *projectionRuntime) close() {
 			_ = subscription.Unsubscribe()
 		}
 		runtime.subscriptionMu.RLock()
+		orderSubscription := runtime.orderSubscription
 		personalizationSubscription := runtime.personalizationSubscription
 		runtime.subscriptionMu.RUnlock()
+		if orderSubscription != nil {
+			_ = orderSubscription.Unsubscribe()
+		}
 		if personalizationSubscription != nil {
 			_ = personalizationSubscription.Unsubscribe()
 		}

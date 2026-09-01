@@ -228,6 +228,23 @@ Growth in either late-stage durable can directly delay completed-order events.
 The benchmark HPA recording rule sums all four queues for checkout scaling,
 while keeping the `consumer_name` series available for stage-level diagnosis.
 
+Storefront projection pressure must be inspected as two critical durables:
+
+- `STOREFRONT_PROJECTION_DURABLE` handles catalog, currency, cart, and cart
+  quote facts with the parallel projection pool.
+- `${STOREFRONT_PROJECTION_DURABLE}-orders` handles operation acceptance,
+  order lifecycle, timeout, and notification facts through parallel
+  correlation-ID lanes. Version-aware CAS updates prevent older transitions
+  from replacing newer order views across storefrontprojectionservice replicas.
+
+The application-level `boutique_projection_consumer_pending` and
+`boutique_projection_consumer_ack_pending` gauges aggregate both critical
+durables. Use the NATS `consumer_name` series when identifying which durable is
+backlogged. General-projection growth no longer creates consumer-level
+head-of-line blocking for terminal order views, although both paths can still
+contend for pod, KV, and broker resources. Order-durable growth directly
+increases customer-visible order latency.
+
 Recommendation pending counts have different semantics. A non-zero
 `recommendation-page-views-v1` value can represent approximately the configured
 freshness window while new page views arrive; stale and same-batch-superseded

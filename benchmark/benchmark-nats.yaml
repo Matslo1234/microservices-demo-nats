@@ -472,7 +472,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-benchmarkservice
-        image: matslo123/benchmarkservice:v0.4.0@sha256:4c679cab7671ee42167f4691b72e17c0be20fc566b34ae4ab5cc6cbb9b6fd2e8
+        image: matslo123/benchmarkservice:v0.4.0@sha256:5ac86d9c48cd8bd86a80c8ffdebdec44e2fc70fc5ce6fe8f07011b2e08d88878
         livenessProbe:
           httpGet:
             path: /healthz
@@ -738,7 +738,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-checkoutservice
-        image: matslo123/checkoutservice:v0.4.0@sha256:45d687649369e1bca4f49200b4fc6115e61730db14aa74cd385999582d890e2a
+        image: matslo123/checkoutservice:v0.4.0@sha256:b9cae375965379413414fe67480dded6644252eb24e0953bef25aef07a923fac
         livenessProbe:
           httpGet:
             path: /healthz
@@ -1812,7 +1812,7 @@ spec:
         - name: NATS_REQUIRED
           value: "true"
         - name: NATS_REQUIRED_SUBSCRIPTIONS
-          value: storefront-projection-local-v1,storefront-personalization-local-v1,boutique.qry.storefront.home.v1,boutique.qry.storefront.product.v1,boutique.qry.storefront.cart.v1,boutique.qry.storefront.checkout.v1,boutique.qry.storefront.currencies.v1,boutique.qry.storefront.product-meta.v1,boutique.qry.storefront.operation.v1,boutique.qry.storefront.order.v1
+          value: storefront-projection-local-v1,storefront-projection-local-v1-orders,storefront-personalization-local-v1,boutique.qry.storefront.home.v1,boutique.qry.storefront.product.v1,boutique.qry.storefront.cart.v1,boutique.qry.storefront.checkout.v1,boutique.qry.storefront.currencies.v1,boutique.qry.storefront.product-meta.v1,boutique.qry.storefront.operation.v1,boutique.qry.storefront.order.v1
         - name: GOMEMLIMIT
           value: 1GiB
         - name: STOREFRONT_QUERY_CONCURRENCY
@@ -1827,12 +1827,16 @@ spec:
           value: "65536"
         - name: STOREFRONT_CONTEXT_CACHE_ENTRIES
           value: "65536"
+        - name: STOREFRONT_CART_CACHE_BYTES
+          value: "134217728"
+        - name: STOREFRONT_CONTEXT_CACHE_BYTES
+          value: "134217728"
         envFrom:
         - configMapRef:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-storefrontprojectionservice
-        image: matslo123/storefrontprojectionservice:v0.4.0@sha256:0733af933ce5f6745606cde5bface6b88b539ab51760a4b89995eb317e8ceb9d
+        image: matslo123/storefrontprojectionservice:v0.4.0@sha256:2164b3f699bcfec1b5816f3489098e7519ac076a68c345ec647d3605705b9176
         livenessProbe:
           failureThreshold: 6
           httpGet:
@@ -2840,7 +2844,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-benchmarkservice
-        image: matslo123/benchmarkservice:v0.4.0@sha256:4c679cab7671ee42167f4691b72e17c0be20fc566b34ae4ab5cc6cbb9b6fd2e8
+        image: matslo123/benchmarkservice:v0.4.0@sha256:5ac86d9c48cd8bd86a80c8ffdebdec44e2fc70fc5ce6fe8f07011b2e08d88878
         imagePullPolicy: IfNotPresent
         livenessProbe:
           httpGet:

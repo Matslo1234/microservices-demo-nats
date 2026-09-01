@@ -63,7 +63,8 @@ flowchart LR
 ```
 
 The `storefrontprojectionservice` is a CQRS read side. Every pod participates in
-the shared durable consumer for exact view-relevant subjects, maintains
+the shared general and serialized order durables for exact view-relevant
+subjects, maintains
 denormalized products, carts, recommendations, ads, shipping quotes, orders,
 and operation statuses, and serves the same KV-backed views. The frontend makes
 one NATS query/reply call per HTTP page instead of calling several domain
@@ -238,7 +239,7 @@ depends only on the cart items.
 | Subject | Publisher | Subscribers | Minimum event data |
 | --- | --- | --- | --- |
 | `boutique.evt.order.submitted.v1` | `checkoutservice` | `storefrontprojectionservice` | Order/operation ID, user ID, sanitized immutable order snapshot, accepted revisions |
-| `boutique.evt.order.processing-stage-changed.v1` | `checkoutservice` | `storefrontprojectionservice` | Order ID, stage enum, timestamp; no payment token |
+| `boutique.evt.order.processing-stage-changed.v1` | `checkoutservice` | `storefrontprojectionservice` | Coarse `COMPENSATING` progress only; retained detailed events remain replay-compatible |
 | `boutique.evt.order.rejected.v1` | `checkoutservice` | `storefrontprojectionservice` | Order/operation ID, safe validation reason |
 | `boutique.evt.order.completed.v1` | `checkoutservice` | `storefrontprojectionservice`, `emailservice` | Order result, amount, currency, recipient email, shipping address, tracking ID, items; no payment token/provider secrets |
 | `boutique.evt.order.cancelled.v1` | `checkoutservice` | `storefrontprojectionservice` | Order ID, safe reason, completed compensations |
@@ -537,7 +538,7 @@ permissions. Use these controls even inside the Kubernetes cluster.
 | Service | Publishes | Subscribes / serves |
 | --- | --- | --- |
 | `frontend` | Cart/order/assistant commands; page-view events | HTTP externally; storefront queries and payment tokenization internally; optional live status subjects |
-| `storefrontprojectionservice` | Optional sanitized Core live-status notifications | Exact view-relevant events through one shared durable; every pod writes views and serves `boutique.qry.storefront.*` |
+| `storefrontprojectionservice` | Optional sanitized Core live-status notifications | General facts through the configured durable, order facts through its derived `-orders` durable, personalization through its independent durable; every pod writes views and serves `boutique.qry.storefront.*` |
 | `productcatalogservice` | Product upsert/remove/snapshot events | Its local file/admin source; no per-page query traffic |
 | `currencyservice` | Rate snapshot events | Its local rate source; no per-price conversion traffic |
 | `cartservice` | Cart success/rejection events | Cart commands and catalog events; owns Redis cart state |

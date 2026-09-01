@@ -34,6 +34,7 @@ spec:
           nats ${args} kv add "${STOREFRONT_CARTS_BUCKET}" --history=2 --replicas="${NATS_JETSTREAM_REPLICAS}" --storage=file --ttl=0s --max-bucket-size=536870912 --placement="${NATS_CLUSTER_NAME}"
           nats ${args} kv add RECOMMENDATION_CATALOG --history=5 --replicas="${NATS_JETSTREAM_REPLICAS}" --storage=file --ttl=0s --max-bucket-size=268435456 --placement="${GLOBAL_ASSET_CLUSTER}"
           nats ${args} consumer rm "${STOREFRONT_EVENT_STREAM}" "${STOREFRONT_PROJECTION_DURABLE}" --force || true
+          nats ${args} consumer rm "${STOREFRONT_EVENT_STREAM}" "${STOREFRONT_PROJECTION_DURABLE}-orders" --force || true
           nats ${args} consumer rm "${STOREFRONT_EVENT_STREAM}" recommendation-catalog-v1 --force || true
         envFrom:
         - configMapRef:

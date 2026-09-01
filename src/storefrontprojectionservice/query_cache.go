@@ -31,6 +31,7 @@ type projectionReadCache struct {
 	source     projectionReader
 	watcher    nats.KeyWatcher
 	maxEntries int
+	maxBytes   int
 	idleTTL    time.Duration
 	expiresAt  func([]byte) time.Time
 
@@ -45,6 +46,7 @@ type projectionReadCache struct {
 	sweepDone   chan struct{}
 	hits        atomic.Uint64
 	misses      atomic.Uint64
+	bytes       int
 }
 
 type cacheExpiration struct {
@@ -114,12 +116,25 @@ func newExpiringProjectionReadCache(
 	idleTTL time.Duration,
 	expiresAt func([]byte) time.Time,
 ) (*projectionReadCache, error) {
+	maxBytes := 0
+	if maxEntries > 0 {
+		maxBytes = maxEntries * 2048
+	}
+	return newExpiringProjectionReadCacheWithLimits(source, maxEntries, maxBytes, idleTTL, expiresAt)
+}
+
+func newExpiringProjectionReadCacheWithLimits(
+	source projectionWatchReader,
+	maxEntries, maxBytes int,
+	idleTTL time.Duration,
+	expiresAt func([]byte) time.Time,
+) (*projectionReadCache, error) {
 	watcher, err := source.WatchAll()
 	if err != nil {
 		return nil, err
 	}
 	cache := &projectionReadCache{
-		source: source, watcher: watcher, maxEntries: maxEntries,
+		source: source, watcher: watcher, maxEntries: maxEntries, maxBytes: maxBytes,
 		idleTTL: idleTTL, expiresAt: expiresAt,
 		entries: make(map[string]cachedProjectionEntry), revisions: make(map[string]uint64),
 		decoded: make(map[string]decodedProjectionEntry), expirations: make(map[string]*cacheExpiration),
@@ -189,6 +204,7 @@ func (cache *projectionReadCache) sweepExpired(now time.Time) {
 		if deadline == 0 || deadline > nowUnix {
 			continue
 		}
+		cache.bytes -= projectionCacheEntryBytes(cache.entries[key])
 		delete(cache.entries, key)
 		delete(cache.revisions, key)
 		delete(cache.decoded, key)
@@ -238,15 +254,25 @@ func (cache *projectionReadCache) apply(entry nats.KeyValueEntry) {
 	}
 	cache.revisions[entry.Key()] = entry.Revision()
 	if entry.Operation() == nats.KeyValueDelete || entry.Operation() == nats.KeyValuePurge {
+		if previous, exists := cache.entries[entry.Key()]; exists {
+			cache.bytes -= projectionCacheEntryBytes(previous)
+		}
 		delete(cache.entries, entry.Key())
 		delete(cache.decoded, entry.Key())
 		delete(cache.expirations, entry.Key())
 		cache.generation.Add(1)
 		return
 	}
-	if _, exists := cache.entries[entry.Key()]; !exists &&
-		cache.maxEntries > 0 && len(cache.entries) >= cache.maxEntries {
+	if previous, exists := cache.entries[entry.Key()]; exists {
+		cache.bytes -= projectionCacheEntryBytes(previous)
+		delete(cache.entries, entry.Key())
+	}
+	entryCopy := copyProjectionEntry(entry)
+	entryBytes := projectionCacheEntryBytes(entryCopy)
+	for len(cache.entries) > 0 && ((cache.maxEntries > 0 && len(cache.entries) >= cache.maxEntries) ||
+		(cache.maxBytes > 0 && cache.bytes+entryBytes > cache.maxBytes)) {
 		for key := range cache.entries {
+			cache.bytes -= projectionCacheEntryBytes(cache.entries[key])
 			delete(cache.entries, key)
 			delete(cache.revisions, key)
 			delete(cache.decoded, key)
@@ -254,7 +280,8 @@ func (cache *projectionReadCache) apply(entry nats.KeyValueEntry) {
 			break
 		}
 	}
-	cache.entries[entry.Key()] = copyProjectionEntry(entry)
+	cache.entries[entry.Key()] = entryCopy
+	cache.bytes += entryBytes
 	delete(cache.decoded, entry.Key())
 	if deadline.IsZero() {
 		delete(cache.expirations, entry.Key())

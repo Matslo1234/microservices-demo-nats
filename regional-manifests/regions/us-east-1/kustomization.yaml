@@ -89,4 +89,4 @@ patches:
   patch: |-
     - op: replace
       path: /spec/template/spec/containers/0/env/1/value
-      value: storefront-projection-us-east-1-v1,boutique.qry.storefront.home.v1,boutique.qry.storefront.product.v1,boutique.qry.storefront.cart.v1,boutique.qry.storefront.currencies.v1,boutique.qry.storefront.product-meta.v1,boutique.qry.storefront.operation.v1,boutique.qry.storefront.order.v1
+      value: storefront-projection-us-east-1-v1,storefront-projection-us-east-1-v1-orders,boutique.qry.storefront.home.v1,boutique.qry.storefront.product.v1,boutique.qry.storefront.cart.v1,boutique.qry.storefront.currencies.v1,boutique.qry.storefront.product-meta.v1,boutique.qry.storefront.operation.v1,boutique.qry.storefront.order.v1

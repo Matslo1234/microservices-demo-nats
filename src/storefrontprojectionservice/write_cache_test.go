@@ -39,6 +39,23 @@ func TestCachedProjectionKVInvalidatesAfterReplicaConflict(t *testing.T) {
 	}
 }
 
+func TestCachedProjectionKVEnforcesByteLimit(t *testing.T) {
+	source := newMemoryKV()
+	cache := newCachedProjectionKVWithLimits(source, 10, 8)
+	if _, err := cache.Create("a", []byte("1234")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cache.Create("b", []byte("5678")); err != nil {
+		t.Fatal(err)
+	}
+	if cache.bytes > cache.maxBytes {
+		t.Fatalf("cache retained %d bytes, limit %d", cache.bytes, cache.maxBytes)
+	}
+	if len(cache.entries) != 1 {
+		t.Fatalf("cache retained %d entries, want 1 after byte eviction", len(cache.entries))
+	}
+}
+
 func TestProjectionEventHistoryIsBounded(t *testing.T) {
 	var metadata storefront.ProjectionMetadata
 	for index := 0; index < projectionEventHistory+10; index++ {

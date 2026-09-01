@@ -134,6 +134,33 @@ func progressToCapture(t *testing.T, worker *checkoutWorker, orderID string) {
 		})
 }
 
+func TestSuccessfulSagaPublishesOnlyCoarseOrderProgress(t *testing.T) {
+	worker := testWorker(t)
+	orderID := "coarse-progress"
+	transitions := []transitionOutcome{
+		submitTestOrder(t, worker, orderID, testTime),
+		sagaEvent(t, worker, "boutique.evt.shipping.order-quote-calculated.v1", "quote-"+orderID, orderID, 1,
+			testTime.Add(time.Second), &eventsv1.ShippingOrderQuoteCalculatedEvent{
+				OrderId: orderID, CostUsd: &commonv1.Money{CurrencyCode: "USD", Units: 5},
+			}),
+		sagaEvent(t, worker, "boutique.evt.payment.authorized.v1", "authorized-"+orderID, orderID, 2,
+			testTime.Add(2*time.Second), &eventsv1.PaymentAuthorizedEvent{OrderId: orderID, AuthorizationId: "auth-1"}),
+		sagaEvent(t, worker, "boutique.evt.shipping.shipment-created.v1", "shipment-"+orderID, orderID, 3,
+			testTime.Add(3*time.Second), &eventsv1.ShippingShipmentCreatedEvent{
+				OrderId: orderID, ShipmentId: "ship-1", TrackingId: "track-1",
+			}),
+		sagaEvent(t, worker, "boutique.evt.payment.captured.v1", "captured-"+orderID, orderID, 4,
+			testTime.Add(4*time.Second), &eventsv1.PaymentCapturedEvent{OrderId: orderID, TransactionId: "txn-1"}),
+	}
+	for _, transition := range transitions {
+		for _, result := range transition.Results {
+			if result.Subject == "boutique.evt.order.processing-stage-changed.v1" {
+				t.Fatalf("successful transition published detailed stage event: %#v", result)
+			}
+		}
+	}
+}
+
 func TestOrderTotalDoesNotOverflowFractionalNanos(t *testing.T) {
 	state := newPersistedState(testTime)
 	state.Rates = &eventsv1.CurrencyRatesUpdatedEvent{
@@ -341,7 +368,7 @@ func TestCrashBoundariesReplayStoredResults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if committed.Duplicate || len(committed.Results) != 3 {
+	if committed.Duplicate || len(committed.Results) != 2 {
 		t.Fatalf("initial commit = %#v", committed)
 	}
 
