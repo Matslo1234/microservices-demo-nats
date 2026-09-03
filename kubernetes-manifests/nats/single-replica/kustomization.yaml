@@ -1,0 +1,15 @@
+# A three-server NATS cluster with one JetStream copy of each stream.
+# All other settings are inherited unchanged from fresh-cluster.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- ../fresh-cluster
+patches:
+- target:
+    version: v1
+    kind: ConfigMap
+    name: nats-region-config
+  patch: |-
+    - op: replace
+      path: /data/NATS_JETSTREAM_REPLICAS
+      value: "1"

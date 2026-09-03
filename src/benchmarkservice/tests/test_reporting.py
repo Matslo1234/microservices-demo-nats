@@ -112,6 +112,72 @@ class ReportingTest(unittest.TestCase):
             self.assertTrue((run / "business.csv").exists())
             self.assertTrue((run / "summary.json").exists())
 
+    def test_build_report_uses_complete_post_warmup_nats_window(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            run = Path(temporary)
+            config = BenchmarkConfig.from_request(
+                {
+                    "target_url": "http://frontend",
+                    "metrics_url": "http://benchmarkmetrics/snapshot",
+                    "warmup_seconds": 1,
+                    "duration_seconds": 10,
+                    "drain_seconds": 2,
+                    "users": 10,
+                },
+                "NATS",
+            )
+            (run / "config.json").write_text(
+                json.dumps(config.as_dict()), encoding="utf-8"
+            )
+            (run / "business.jsonl").write_text("", encoding="utf-8")
+            resources = []
+            for elapsed, phase, waiting in (
+                (0, "warmup", 99),
+                (1, "steady", 1),
+                (10.5, "steady", 2),
+                (11, "drain", 88),
+                (12, "drain", 88),
+            ):
+                resources.append(
+                    {
+                        "timestamp": 1_000 + elapsed,
+                        "elapsed_seconds": elapsed,
+                        "source_elapsed_seconds": {
+                            "nats": elapsed,
+                            "nats_raft": elapsed,
+                        },
+                        "source_samples": {
+                            "nats": {"collected_at": 1_000 + elapsed},
+                            "nats_raft": {"collected_at": 1_000 + elapsed},
+                        },
+                        "phase": phase,
+                        "pods": {},
+                        "nats_metrics": [
+                            self._nats_metric(
+                                "jetstream_consumer_num_pending",
+                                waiting,
+                                "BOUTIQUE_EVENTS",
+                                "checkout",
+                            )
+                        ],
+                        "nats_micro_endpoints": [],
+                        "nats_raft_groups": [],
+                        "errors": [],
+                    }
+                )
+            (run / "resources.jsonl").write_text(
+                "".join(json.dumps(record) + "\n" for record in resources),
+                encoding="utf-8",
+            )
+
+            summary = build_report(run)
+
+            series = summary["nats"]["consumer_pending"]["series"]
+            self.assertEqual(1, series[0]["elapsed_seconds"])
+            self.assertEqual(1, series[0]["waiting_events"])
+            self.assertEqual(10, series[-1]["elapsed_seconds"])
+            self.assertEqual(2, series[-1]["waiting_events"])
+
     def test_nats_summary_deduplicates_replicated_consumer_series(self) -> None:
         first = {
             "elapsed_seconds": 0,

@@ -738,6 +738,7 @@ def write_png_chart(
     event_markers: list[tuple[float, str, str, str]] | None = None,
     colors: list[str | None] | None = None,
     x_limit: float | None = None,
+    max_value: float | None = None,
 ) -> None:
     _write_png_series_chart(
         destination,
@@ -754,6 +755,7 @@ def write_png_chart(
         show_legend=False,
         colors=colors,
         x_limit=x_limit,
+        max_value=max_value,
     )
 
 
@@ -771,6 +773,7 @@ def write_png_multi_series_chart(
     vertical_lines: list[tuple[float, str, str]] | None = None,
     event_markers: list[tuple[float, str, str, str]] | None = None,
     x_limit: float | None = None,
+    max_value: float | None = None,
 ) -> None:
     _write_png_series_chart(
         destination,
@@ -785,6 +788,7 @@ def write_png_multi_series_chart(
         vertical_lines=vertical_lines,
         event_markers=event_markers,
         x_limit=x_limit,
+        max_value=max_value,
         show_legend=True,
     )
 
@@ -811,6 +815,7 @@ def _write_png_series_chart(
     colors: list[str | None] | None = None,
     line_styles: list[str] | None = None,
     x_limit: float | None = None,
+    max_value: float | None = None,
     show_legend: bool,
 ) -> None:
     if colors is not None and len(colors) != len(series):
@@ -918,7 +923,17 @@ def _write_png_series_chart(
             if upper_bounds:
                 maximum_y = max(maximum_y, max(upper_bounds))
     x_axis_limit = x_limit if x_limit is not None else _axis_limit(maximum_x)
-    y_limit = _axis_limit(maximum_y, headroom=1.1)
+    if max_value is not None and (
+        not math.isfinite(max_value) or max_value <= 0
+    ):
+        raise ResultError(
+            f"cannot create {destination}: max value must be finite and positive"
+        )
+    y_limit = (
+        max_value
+        if max_value is not None
+        else _axis_limit(maximum_y, headroom=1.1)
+    )
 
     figure = Figure(figsize=(9.6, 6), dpi=100, layout="constrained")
     FigureCanvasAgg(figure)
@@ -1038,6 +1053,7 @@ def write_saturation_graphs(
     saturation_limit: float | None = None,
     *,
     add_accepted: bool = False,
+    max_value: float | None = None,
 ) -> list[Path]:
     submitted_goodput, processed_goodput, pending, p95_latency = (
         saturation_points(result, saturation_limit)
@@ -1068,6 +1084,7 @@ def write_saturation_graphs(
         ),
         x_label="Št. oddanih naročil na sekundo",
         colors=goodput_colors,
+        max_value=max_value,
     )
     outputs = [goodput_path]
     timeout_latency = saturation_latency_timeout_points(
@@ -1078,12 +1095,12 @@ def write_saturation_graphs(
     )
     if p95_latency or acceptance_latency or timeout_latency:
         p95_latency_path = base.with_name(f"{base.name}_p95_latency.png")
-        latency_series = [("P95 tranjanje naročila", p95_latency)]
+        latency_series = [("Obdelava naročila", p95_latency)]
         latency_colors = ["#1f77b4"]
         latency_styles = ["-"]
         if acceptance_latency:
             latency_series.append(
-                ("P95 sprejema naročila", acceptance_latency)
+                ("Sprejem naročila", acceptance_latency)
             )
             latency_colors.append("#ff7f0e")
             latency_styles.append("-")
@@ -1094,10 +1111,11 @@ def write_saturation_graphs(
             p95_latency_path,
             latency_series,
             title=f"",
-            y_label="P95 trajanje naročila (ms)",
+            y_label="P95 Čas (ms)",
             x_label="Št. naročil na sekundo",
             colors=latency_colors,
             line_styles=latency_styles,
+            max_value=max_value,
         )
         outputs.append(p95_latency_path)
     if pending:
@@ -1108,6 +1126,7 @@ def write_saturation_graphs(
             title=f"",
             y_label="Št. čakajočih dogodkov",
             colors=["#1f77b4"],
+            max_value=max_value,
         )
         outputs.append(pending_path)
         interpolated_pending = saturation_interpolated_pending_points(
@@ -1123,6 +1142,7 @@ def write_saturation_graphs(
                 title=f"",
                 y_label="Št. čakajočih dogodkov",
                 colors=["#1f77b4"],
+                max_value=max_value,
             )
             outputs.append(interpolated_path)
     return outputs
@@ -1299,6 +1319,7 @@ def write_average_saturation_graphs(
     saturation_limit: float | None = None,
     *,
     add_accepted: bool = False,
+    max_value: float | None = None,
 ) -> list[Path]:
     by_duration: dict[float, list[Result]] = {}
     for result in results:
@@ -1357,6 +1378,7 @@ def write_average_saturation_graphs(
             x_label="Št. oddanih naročil na sekundo",
             colors=goodput_colors,
             deviation_bands=goodput_deviations,
+            max_value=max_value,
         )
         outputs.append(goodput_path)
 
@@ -1377,7 +1399,7 @@ def write_average_saturation_graphs(
 
         if latency or acceptance_latency or timeout_latency:
             latency_path = folder / f"average_latency_{suffix}.png"
-            latency_series = [("P95 trajanje naročila", latency)]
+            latency_series = [("Obdelava naročila", latency)]
             latency_colors = ["#1f77b4"]
             latency_styles = ["-"]
             latency_bands: list[
@@ -1385,7 +1407,7 @@ def write_average_saturation_graphs(
             ] = [latency_deviations]
             if acceptance_latency:
                 latency_series.append(
-                    ("P95 sprejema naročila", acceptance_latency)
+                    ("Sprejem naročila", acceptance_latency)
                 )
                 latency_colors.append("#ff7f0e")
                 latency_styles.append("-")
@@ -1398,11 +1420,12 @@ def write_average_saturation_graphs(
                 latency_path,
                 latency_series,
                 title="",
-                y_label="P95 trajanje naročila (ms)",
+                y_label="P95 Čas (ms)",
                 x_label="Št. naročil na sekundo",
                 colors=latency_colors,
                 line_styles=latency_styles,
                 deviation_bands=latency_bands,
+                max_value=max_value,
             )
             outputs.append(latency_path)
 
@@ -1432,12 +1455,15 @@ def write_average_saturation_graphs(
                     x_label="Št. naročil na sekundo",
                     deviation_band=pending_deviations,
                     colors=["#1f77b4"],
+                    max_value=max_value,
                 )
                 outputs.append(pending_path)
     return outputs
 
 
-def write_fault_tolerance_graphs(result: Result) -> list[Path]:
+def write_fault_tolerance_graphs(
+    result: Result, max_value: float | None = None
+) -> list[Path]:
     successful, queued = fault_tolerance_points(result)
     accepted = fault_tolerance_accepted_points(result)
     markers = fault_tolerance_markers(result)
@@ -1465,6 +1491,7 @@ def write_fault_tolerance_graphs(result: Result) -> list[Path]:
         event_markers=markers,
         colors=["#1f77b4", "#2ca02c"],
         x_limit=submission_end,
+        max_value=max_value,
     )
     outputs = [successful_path]
     if queued:
@@ -1478,6 +1505,7 @@ def write_fault_tolerance_graphs(result: Result) -> list[Path]:
             event_markers=markers,
             colors=["#1f77b4"],
             x_limit=submission_end,
+            max_value=max_value,
         )
         outputs.append(queued_path)
     return outputs
@@ -1992,6 +2020,7 @@ def write_closed_graphs(
     groups: dict[int, ClosedMeasurements],
     *,
     infer_end: bool = False,
+    max_value: float | None = None,
 ) -> list[Path]:
     outputs: list[Path] = []
     latency_points, latency_errors = _closed_latency_points(groups)
@@ -2002,8 +2031,9 @@ def write_closed_graphs(
             latency_points,
             title="",
             x_label="Št. sočasnih uporabnikov",
-            y_label="P95 trajanje naročila (ms)",
+            y_label="P95 čas obdelave naročila (ms)",
             error_bars=latency_errors,
+            max_value=max_value,
         )
         outputs.append(latency_path)
 
@@ -2017,6 +2047,7 @@ def write_closed_graphs(
             x_label="Št. sočasnih uporabnikov",
             y_label="Št. zaključenih naročil",
             error_bars=completed_errors,
+            max_value=max_value,
         )
         outputs.append(completed_path)
 
@@ -2040,6 +2071,7 @@ def write_closed_graphs(
                 waiting_deviations[users] for users in waiting_by_users
             ],
             x_limit=waiting_end_seconds,
+            max_value=max_value,
         )
         outputs.append(waiting_path)
     return outputs
@@ -2049,6 +2081,7 @@ def write_closed_comparison_graphs(
     folder: Path,
     groups: dict[int, ClosedMeasurements],
     comparison_folder: Path,
+    max_value: float | None = None,
 ) -> list[Path]:
     comparison_results = [
         result
@@ -2081,9 +2114,10 @@ def write_closed_comparison_graphs(
         ],
         title="",
         x_label="Št. sočasnih uporabnikov",
-        y_label="P95 trajanje naročila (ms)",
+        y_label="P95 čas obdelave naročila (ms)",
         error_bars=[current_deviations, comparison_deviations],
         colors=["#1f77b4", "#2ca02c"],
+        max_value=max_value,
     )
 
     current_completed, current_completed_deviations = (
@@ -2109,6 +2143,7 @@ def write_closed_comparison_graphs(
             comparison_completed_deviations,
         ],
         colors=["#1f77b4", "#2ca02c"],
+        max_value=max_value,
     )
     return [latency_destination, completed_destination]
 
@@ -2156,7 +2191,12 @@ def process_folder(
     closed_infer_end: bool = False,
     saturation_add_accepted: bool = False,
     closed_compare: Path | None = None,
+    max_value: float | None = None,
 ) -> list[Path]:
+    if max_value is not None and (
+        not math.isfinite(max_value) or max_value <= 0
+    ):
+        raise ResultError("--max-value must be finite and positive")
     results = find_results(folder)
     for result in results:
         workload = result.summary.get("workload")
@@ -2184,12 +2224,13 @@ def process_folder(
                 closed_results,
                 closed_measurements,
                 infer_end=closed_infer_end,
+                max_value=max_value,
             )
         )
         if closed_compare is not None:
             outputs.extend(
                 write_closed_comparison_graphs(
-                    folder, closed_measurements, closed_compare
+                    folder, closed_measurements, closed_compare, max_value
                 )
             )
     elif closed_compare is not None:
@@ -2210,16 +2251,18 @@ def process_folder(
                     result,
                     saturation_limit,
                     add_accepted=saturation_add_accepted,
+                    max_value=max_value,
                 )
             )
         elif result.summary["workload"] == "fault_tolerance":
-            outputs.extend(write_fault_tolerance_graphs(result))
+            outputs.extend(write_fault_tolerance_graphs(result, max_value))
     outputs.extend(
         write_average_saturation_graphs(
             folder,
             saturation_results,
             saturation_limit,
             add_accepted=saturation_add_accepted,
+            max_value=max_value,
         )
     )
     return outputs
@@ -2233,6 +2276,12 @@ def parser() -> argparse.ArgumentParser:
         "results_folder",
         type=Path,
         help="folder containing benchmark result JSON files",
+    )
+    argument_parser.add_argument(
+        "--max-value",
+        type=float,
+        metavar="VALUE",
+        help="override the calculated maximum value of every plot's y-axis",
     )
     argument_parser.add_argument(
         "--saturation-limit",
@@ -2279,6 +2328,7 @@ def main(arguments: list[str] | None = None) -> int:
             options.closed_infer_end,
             options.saturation_add_accepted,
             options.closed_compare,
+            options.max_value,
         )
     except ResultError as error:
         print(error, file=sys.stderr)

@@ -1934,13 +1934,20 @@ def build_report(run_directory: Path) -> dict[str, Any]:
         resource_records,
         allow_single_sample=config.workload == "saturation",
     )
+    steady_started = float(config.warmup_seconds)
+    # source_records_for_window uses inclusive bounds, while the steady phase
+    # ends exactly when drain begins. Move the upper bound down by one float so
+    # a sample stamped at the phase boundary is not counted as steady state.
+    steady_ended = math.nextafter(
+        steady_started + measured_duration, -math.inf
+    )
     nats = (
         nats_summary(
             source_records_for_window(
-                resource_records, "nats", 0, measured_duration
+                resource_records, "nats", steady_started, steady_ended
             ),
             raft_records=source_records_for_window(
-                resource_records, "nats_raft", 0, measured_duration
+                resource_records, "nats_raft", steady_started, steady_ended
             ),
             health_records=resource_records,
         )

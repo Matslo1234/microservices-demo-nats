@@ -537,6 +537,8 @@ class ParseResultsTest(unittest.TestCase):
                     "--closed-compare",
                     "comparison-results",
                     "--saturation-add-accepted",
+                    "--max-value",
+                    "500",
                 ]
             )
 
@@ -547,6 +549,7 @@ class ParseResultsTest(unittest.TestCase):
             True,
             True,
             Path("comparison-results"),
+            500.0,
         )
 
     def test_process_folder_applies_saturation_limit_to_graphs(self) -> None:
@@ -962,6 +965,25 @@ class ParseResultsTest(unittest.TestCase):
             )
 
             self.assert_png(chart_path)
+
+    def test_chart_uses_explicit_max_value_for_y_axis(self) -> None:
+        with (
+            mock.patch("parse_results.Figure") as figure_constructor,
+            mock.patch("parse_results.FigureCanvasAgg"),
+        ):
+            axes = figure_constructor.return_value.subplots.return_value
+            write_png_chart(
+                Path("chart.png"),
+                [(1.0, 20.0)],
+                title="Chart",
+                y_label="Values",
+                max_value=50.0,
+            )
+
+        axes.set_ylim.assert_called_once_with(0, 50.0)
+        axes.set_yticks.assert_called_once_with(
+            [0.0, 10.0, 20.0, 30.0, 40.0, 50.0]
+        )
 
     def test_multi_series_chart_uses_explicit_colors(self) -> None:
         with (
