@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"regexp"
 	"testing"
 	"time"
@@ -123,6 +124,35 @@ func TestShippingProcessingTime(t *testing.T) {
 	}
 }
 
+func TestShippingRejectionPercentage(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   string
+		want    float64
+		wantErr bool
+	}{
+		{name: "unset", value: "", want: 0},
+		{name: "zero", value: "0", want: 0},
+		{name: "fractional", value: "20.5", want: 20.5},
+		{name: "all", value: "100", want: 100},
+		{name: "negative", value: "-1", wantErr: true},
+		{name: "over one hundred", value: "100.1", wantErr: true},
+		{name: "not a number", value: "invalid", wantErr: true},
+		{name: "nan", value: "NaN", wantErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := shippingRejectionPercentage(test.value)
+			if (err != nil) != test.wantErr {
+				t.Fatalf("shippingRejectionPercentage(%q) error = %v, wantErr %v", test.value, err, test.wantErr)
+			}
+			if got != test.want {
+				t.Fatalf("shippingRejectionPercentage(%q) = %v, want %v", test.value, got, test.want)
+			}
+		})
+	}
+}
+
 func shippingTestEnvelope(t *testing.T, messageID, aggregateID string, version uint64, occurredAt time.Time, payload proto.Message) *commonv1.MessageEnvelope {
 	t.Helper()
 	wrapped, err := anypb.New(payload)
@@ -145,7 +175,7 @@ func shippingTestEnvelope(t *testing.T, messageID, aggregateID string, version u
 
 func shippingTestProvider(t *testing.T, secret string) *shippingProvider {
 	t.Helper()
-	provider, err := newShippingProvider(secret)
+	provider, err := newShippingProvider(secret, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -461,6 +491,52 @@ func TestShippingFailureInjectionIsDeterministic(t *testing.T) {
 				t.Fatal("failure retry changed its deterministic outcome")
 			}
 		})
+	}
+}
+
+func TestShippingPercentageRejectionIsDeterministicAcrossReplicas(t *testing.T) {
+	inputTime := time.Date(2026, 9, 29, 12, 0, 0, 0, time.UTC)
+	providerA, err := newShippingProvider(testShippingSecret, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	providerB, err := newShippingProvider(testShippingSecret, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rejected := 0
+	for index := 0; index < 1_000; index++ {
+		orderID := fmt.Sprintf("order-%d", index)
+		command := &commandsv1.ShippingCreateShipmentCommand{
+			CommandId:      "shipment-" + orderID,
+			OrderId:        orderID,
+			IdempotencyKey: orderID + "/shipment",
+		}
+		envelope := shippingTestEnvelope(t, "source-"+orderID, orderID, 4, inputTime, command)
+		first, err := buildShippingOutcome(shippingCreateShipmentSubject, envelope, providerA, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		retry, err := buildShippingOutcome(shippingCreateShipmentSubject, envelope, providerB, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if first.Subject != retry.Subject || string(first.Data) != string(retry.Data) {
+			t.Fatal("replica or retry changed the percentage-based outcome")
+		}
+		if first.Subject == "boutique.evt.shipping.shipment-creation-failed.v1" {
+			rejected++
+			payload := &eventsv1.ShippingShipmentCreationFailedEvent{}
+			if err := decodeShippingResult(t, first).Data.UnmarshalTo(payload); err != nil {
+				t.Fatal(err)
+			}
+			if payload.Failure.GetCode() != "CARRIER_REJECTED" || payload.Failure.GetRetryable() {
+				t.Fatalf("unexpected percentage rejection: %+v", payload.Failure)
+			}
+		}
+	}
+	if rejected < 150 || rejected > 250 {
+		t.Fatalf("20%% deterministic rejection selected %d of 1000 shipments", rejected)
 	}
 }
 

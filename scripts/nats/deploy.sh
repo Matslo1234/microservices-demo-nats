@@ -70,6 +70,18 @@ trap 'rm -rf "${render_dir}"' EXIT
 kubectl kustomize "${nats_overlay}" >"${render_dir}/nats.yaml"
 python3 "${repo_root}/scripts/nats/validate-rendered.py" \
   --manifest "${render_dir}/nats.yaml" --region "${region}" --role "${role}"
+bootstrap_overlay="${nats_overlay}-bootstrap"
+join_overlay="${nats_overlay}-join"
+if [[ "${role}" == primary && -d "${bootstrap_overlay}" ]]; then
+  kubectl kustomize "${bootstrap_overlay}" >"${render_dir}/nats-bootstrap.yaml"
+  python3 "${repo_root}/scripts/nats/validate-rendered.py" \
+    --manifest "${render_dir}/nats-bootstrap.yaml" --region "${region}" --role "${role}"
+fi
+if [[ "${role}" == secondary && -d "${join_overlay}" ]]; then
+  kubectl kustomize "${join_overlay}" >"${render_dir}/nats-join.yaml"
+  python3 "${repo_root}/scripts/nats/validate-rendered.py" \
+    --manifest "${render_dir}/nats-join.yaml" --region "${region}" --role "${role}"
+fi
 if [[ "${deploy_application}" == true ]]; then
   kubectl kustomize "${application_overlay}" >"${render_dir}/application.yaml"
   python3 "${repo_root}/scripts/nats/validate-rendered.py" \
@@ -79,17 +91,65 @@ fi
 # One explicit context is used for every mutation. This script never loops over
 # contexts or deploys a second region as a side effect.
 kubectl --context "${context}" apply -f "${repo_root}/kubernetes-manifests/nats/base/namespace.yaml"
+statefulset_existed=false
+if kubectl --context "${context}" --namespace nats get statefulset/nats >/dev/null 2>&1; then
+  statefulset_existed=true
+fi
+staged_primary=false
+staged_secondary=false
+initial_manifest="${render_dir}/nats.yaml"
+if [[ "${statefulset_existed}" == false && -f "${render_dir}/nats-bootstrap.yaml" ]]; then
+  staged_primary=true
+  initial_manifest="${render_dir}/nats-bootstrap.yaml"
+elif [[ "${statefulset_existed}" == false && -f "${render_dir}/nats-join.yaml" ]]; then
+  staged_secondary=true
+  initial_manifest="${render_dir}/nats-join.yaml"
+fi
 kubectl --context "${context}" --namespace nats delete job \
   nats-global-bootstrap nats-regional-bootstrap --ignore-not-found --wait=true
-kubectl --context "${context}" apply -f "${render_dir}/nats.yaml"
+kubectl --context "${context}" apply -f "${initial_manifest}"
 kubectl --context "${context}" --namespace nats rollout restart deployment/nats-setup
 kubectl --context "${context}" --namespace nats rollout status deployment/nats-setup --timeout=5m
-kubectl --context "${context}" --namespace nats rollout restart statefulset/nats
+if [[ "${statefulset_existed}" == true ]]; then
+  kubectl --context "${context}" --namespace nats rollout restart statefulset/nats
+fi
 kubectl --context "${context}" --namespace nats rollout status statefulset/nats --timeout=10m
+
+if [[ "${staged_secondary}" == true ]]; then
+  # A 3+3 WAN cold start can repeatedly split the initial vote three ways per
+  # region. Start one secondary voter, wait until it joins the established
+  # primary metadata group, and only then add the remaining two voters.
+  meta_leader_ready=false
+  for ((attempt = 1; attempt <= 120; attempt++)); do
+    if kubectl --context "${context}" --namespace nats exec nats-0 -c nats -- \
+      wget -qO- http://127.0.0.1:8222/jsz 2>/dev/null | \
+      python3 -c 'import json, sys; raise SystemExit(0 if json.load(sys.stdin).get("meta_cluster", {}).get("leader") else 1)'
+    then
+      meta_leader_ready=true
+      break
+    fi
+    sleep 5
+  done
+  if [[ "${meta_leader_ready}" != true ]]; then
+    echo "secondary did not join the primary JetStream metadata group within 10 minutes" >&2
+    exit 1
+  fi
+  kubectl --context "${context}" apply -f "${render_dir}/nats.yaml"
+  kubectl --context "${context}" --namespace nats rollout status statefulset/nats --timeout=10m
+fi
+
 if [[ "${role}" == primary ]]; then
   kubectl --context "${context}" --namespace nats wait --for=condition=complete job/nats-global-bootstrap --timeout=10m
 fi
 kubectl --context "${context}" --namespace nats wait --for=condition=complete job/nats-regional-bootstrap --timeout=10m
+
+if [[ "${staged_primary}" == true ]]; then
+  # The empty primary first elects a local leader without remote seeds. Once
+  # that state is durable, enable the normal three-seed gateway configuration.
+  kubectl --context "${context}" apply -f "${render_dir}/nats.yaml"
+  kubectl --context "${context}" --namespace nats rollout restart statefulset/nats
+  kubectl --context "${context}" --namespace nats rollout status statefulset/nats --timeout=10m
+fi
 
 if [[ "${deploy_application}" == true ]]; then
   kubectl --context "${context}" apply -f "${render_dir}/application.yaml"

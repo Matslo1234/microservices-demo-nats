@@ -1,7 +1,7 @@
 # Copyright 2026 Google LLC
 # Licensed under the Apache License, Version 2.0 (the "License");
 
-"""Observe completed-order events outside Locust's gevent-patched process."""
+"""Observe order workflow events outside Locust's gevent-patched process."""
 
 from __future__ import annotations
 

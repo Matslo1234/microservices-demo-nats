@@ -1,9 +1,10 @@
 # NATS supercluster overlays
 
-Each directory represents exactly one regional NATS cluster. The checked-in
-`local` overlay enables the gateway listener and three ordinal LoadBalancer
-Services, but has no remote gateway seeds because no second cluster is
-available yet. It therefore starts safely as a one-member supercluster.
+Each directory represents exactly one regional NATS cluster. The active AWS
+pair is `eu-central-1` (primary) and `us-west-2` (secondary). The `local`
+overlay enables the gateway listener and three ordinal LoadBalancer Services,
+but has no remote gateway seeds because no second cluster is available yet.
+It therefore starts safely as a one-member supercluster.
 
 Before connecting another region:
 
@@ -23,15 +24,20 @@ Example remote entry:
 ```conf
 gateways: [
   {
-    name: "BOUTIQUE-us-east-1"
+    name: "BOUTIQUE-us-west-2"
     urls: [
-      tls://nats-0.gw.us-east-1.example.net:7222,
-      tls://nats-1.gw.us-east-1.example.net:7222,
-      tls://nats-2.gw.us-east-1.example.net:7222
+      tls://nats-0.gw.us-west-2.example.net:7222,
+      tls://nats-1.gw.us-west-2.example.net:7222,
+      tls://nats-2.gw.us-west-2.example.net:7222
     ]
   }
 ]
 ```
+
+For an empty AWS pair, deploy the primary first. The deployment helper uses
+`eu-central-1-bootstrap` to elect the initial three-node metadata leader, then
+uses `us-west-2-join` to add one secondary voter before scaling the secondary
+to three. This staged cold start avoids a 3-vs-3 WAN vote split.
 
 Do not set `jetstream.domain` in a regional overlay. Global and regional asset
 placement depends on all clusters sharing the same JetStream account view.

@@ -148,7 +148,11 @@ def merge_worker_outputs(
         run_directory / "outstanding.jsonl", rebase_outstanding()
     )
 
-    for shared_artifact in ("resources.jsonl", "saturation.jsonl"):
+    for shared_artifact in (
+        "resources.jsonl",
+        "saturation.jsonl",
+        "workflow-events.json",
+    ):
         source = worker_directories[0] / shared_artifact
         if source.exists():
             shutil.copyfile(source, run_directory / shared_artifact)

@@ -592,7 +592,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-benchmarkservice
-        image: matslo123/benchmarkservice:v0.4.0@sha256:818df7084b3279d91d8dad9c8ae51b0d83eae48614b6c81e948b0b9493af74f4
+        image: matslo123/benchmarkservice:v0.4.0@sha256:cf1f24fa0f6ca59ebc84844811905e23e4ee346d1005dc4c1d155bf8347f937e
         livenessProbe:
           httpGet:
             path: /healthz
@@ -858,7 +858,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-checkoutservice
-        image: matslo123/checkoutservice:v0.4.0@sha256:b9cae375965379413414fe67480dded6644252eb24e0953bef25aef07a923fac
+        image: matslo123/checkoutservice:v0.4.0@sha256:34755ed99846292b3f37e223c7eb1485704fdab33505eabd943c205a932db6d8
         livenessProbe:
           httpGet:
             path: /healthz
@@ -1223,7 +1223,7 @@ spec:
             name: nats-credentials-frontend
         - secretRef:
             name: global-application-secrets
-        image: matslo123/frontend:v0.4.0@sha256:f85e899837a9e0f8ccdd87fb9ca73c8bdf1f391401bc4dca665dcb257e797101
+        image: matslo123/frontend:v0.4.0@sha256:d6fcf42aff93f5993741f61c1b1fd218dfc2c5a3bf2c194c309042bb83571a38
         livenessProbe:
           failureThreshold: 6
           httpGet:
@@ -1370,7 +1370,7 @@ spec:
             name: nats-credentials-messageoperationsservice
         - secretRef:
             name: messageoperations-admin-api
-        image: matslo123/messageoperationsservice:v0.4.0@sha256:2b2334e684a9297e2bf6af8daf0e924b86daecb78f9ff578756e9bc34b8f7a45
+        image: matslo123/messageoperationsservice:v0.4.0@sha256:6e482d2cbcf6ce0ae1d87aec66f6e6f6395544d1e20b484a408b130af6ec8f90
         livenessProbe:
           failureThreshold: 6
           httpGet:
@@ -1584,7 +1584,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-productcatalogservice
-        image: matslo123/productcatalogservice:v0.4.0@sha256:26d97784a6e105cf1586b2ff723772c583021491d5fa165ceaae6a3af12fe54d
+        image: matslo123/productcatalogservice:v0.4.0@sha256:93a1c36492cd0461e0b511bdc7c4bbe81998f056402e63413ba27717ca9b6280
         livenessProbe:
           httpGet:
             path: /healthz
@@ -1820,6 +1820,8 @@ spec:
           value: 400MiB
         - name: NATS_REQUIRED
           value: "true"
+        - name: SHIPPING_REJECTION_PERCENTAGE
+          value: "0"
         - name: NATS_REQUIRED_SUBSCRIPTIONS
           value: shipping-cart-quotes-v1,shipping-order-quotes-v1,shipping-create-shipments-v1,shipping-cancel-shipments-v1
         envFrom:
@@ -1829,7 +1831,7 @@ spec:
             name: nats-credentials-shippingservice
         - secretRef:
             name: global-application-secrets
-        image: matslo123/shippingservice:v0.4.0@sha256:3ae7c7a3dc550a4e6f8d6fd9edcc312ce244b801cdf1405bc49cb5c507e8ed1b
+        image: matslo123/shippingservice:v0.4.0@sha256:e024b998a3eac5e0bd352de56c6407b4377c84c8258a3bf3d429898442c074d4
         livenessProbe:
           failureThreshold: 6
           httpGet:
@@ -1956,7 +1958,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-storefrontprojectionservice
-        image: matslo123/storefrontprojectionservice:v0.4.0@sha256:2164b3f699bcfec1b5816f3489098e7519ac076a68c345ec647d3605705b9176
+        image: matslo123/storefrontprojectionservice:v0.4.0@sha256:c919f4c27ee1cdec9385b33e31c414ee35ed17232553bdc90f0d77cc63a8eff4
         livenessProbe:
           failureThreshold: 6
           httpGet:
@@ -3224,7 +3226,7 @@ spec:
             name: nats-client-config
         - secretRef:
             name: nats-credentials-benchmarkservice
-        image: matslo123/benchmarkservice:v0.4.0@sha256:818df7084b3279d91d8dad9c8ae51b0d83eae48614b6c81e948b0b9493af74f4
+        image: matslo123/benchmarkservice:v0.4.0@sha256:cf1f24fa0f6ca59ebc84844811905e23e4ee346d1005dc4c1d155bf8347f937e
         imagePullPolicy: IfNotPresent
         livenessProbe:
           httpGet:

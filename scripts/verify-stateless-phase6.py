@@ -354,6 +354,7 @@ def verify_release_manifests() -> None:
             "benchmark-nats-hpa.yaml",
             "benchmark-nats-multiple-replicas.yaml",
             "benchmark-nats-with-delay.yaml",
+            "benchmark-nats-with-delay-20-percent-rejections.yaml",
             "benchmark-nats-with-delay-fsync1s.yaml",
         )
     )
@@ -565,12 +566,21 @@ def verify_release_manifests() -> None:
             forbid(content, "kind: HorizontalPodAutoscaler")
         if path.name in (
             "benchmark-nats-with-delay.yaml",
+            "benchmark-nats-with-delay-20-percent-rejections.yaml",
             "benchmark-nats-with-delay-fsync1s.yaml",
         ):
             payment = document(content, "Deployment", "paymentservice")
             shipping = document(content, "Deployment", "shippingservice")
             require(payment, "name: PROCESSING_TIME_MS", 'value: "500"')
             require(shipping, "name: PROCESSING_TIME_MS", 'value: "200"')
+            if path.name == (
+                "benchmark-nats-with-delay-20-percent-rejections.yaml"
+            ):
+                require(
+                    shipping,
+                    "name: SHIPPING_REJECTION_PERCENTAGE",
+                    'value: "20"',
+                )
         if path.name == "benchmark-nats-hpa.yaml":
             lag_scaled = {
                 "adservice",
@@ -884,6 +894,16 @@ def verify_dashboard_and_bootstrap() -> None:
         "nats ${nats_args} object ls",
     )
     forbid(bootstrap, "nats ${nats_args} object list")
+    nats_config = (
+        ROOT / "kubernetes-manifests" / "nats" / "base" / "config.yaml"
+    ).read_text()
+    require(
+        nats_config,
+        '"boutique.evt.order.completed.v1"',
+        '"boutique.evt.shipping.shipment-creation-failed.v1"',
+        '"boutique.evt.payment.authorization-released.v1"',
+        '"boutique.evt.order.manual-review-required.v1"',
+    )
 
 
 def main() -> int:

@@ -30,6 +30,13 @@ the benchmark). Quote and cancellation commands do not incur that delay. Every
 input is still acknowledged only after JetStream acknowledges its deterministic
 result publication.
 
+`SHIPPING_REJECTION_PERCENTAGE` controls deterministic shipment-creation
+rejection injection. It accepts a number from `0` through `100` and defaults to
+`0` when unset. The decision is derived from the provider secret and business
+idempotency key, so retries and different replicas produce the same outcome.
+Percentage-based rejections publish `shipment-creation-failed` with failure code
+`CARRIER_REJECTED`; quote and cancellation requests are unaffected.
+
 ## Local
 
 Run the following command to restore dependencies to `vendor/` directory:

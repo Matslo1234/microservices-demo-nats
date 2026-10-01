@@ -95,6 +95,37 @@ logs remain in the complete artifact archive for diagnostics.
 Warm-up samples remain in raw artifacts but are excluded from summaries. After
 the steady interval, submission stops for the configured drain period.
 
+For NATS runs with NATS metrics collection enabled, `summary.json` also
+contains `workflow_events`. These counters are measured from live NATS events
+between observer samples taken immediately before load starts and after the
+drain finishes. They report successful orders, shipment-creation rejections,
+released payment authorizations, and orders sent to manual review. The report
+marks the counters unavailable if the observer disconnects, because a counter
+reset would make the difference unreliable.
+
+## Shipment rejection benchmark
+
+Apply `benchmark/benchmark-nats-with-delay-20-percent-rejections.yaml` after
+installing NATS as described below. This environment is identical to the
+delayed NATS benchmark except that `shippingservice` sets
+`SHIPPING_REJECTION_PERCENTAGE=20`.
+
+Run the dedicated open-loop benchmark from outside the target cluster. It sends
+50 checkout transactions per second for 30 seconds, stops submitting, drains
+outstanding work, and prints the four workflow counters:
+
+```sh
+python src/benchmarkservice/shipment_rejection_benchmark.py \
+  --url http://FRONTEND_EXTERNAL_IP \
+  --metrics-url http://BENCHMARKMETRICS_EXTERNAL_IP/snapshot \
+  --output ./benchmark-results
+```
+
+The complete report and raw artifacts remain in the printed run directory. In
+an otherwise idle benchmark cluster, shipment rejections and authorization
+releases should normally match; any nonzero manual-review count indicates a
+failed compensation or a step timeout and warrants inspection.
+
 ## NATS prerequisite
 
 Every checked-in benchmark bundle requires a compatible NATS configuration to

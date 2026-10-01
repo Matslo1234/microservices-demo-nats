@@ -320,6 +320,8 @@ class ResourceSampler:
         self._latest_order_completed_observer: dict[str, Any] | None = None
         self._metrics: RemoteMetricsClient | LocalMetricsClient | None = None
         self._order_completed_observer: NatsOrderCompletedObserver | None = None
+        self._workflow_events_started: dict[str, Any] | None = None
+        self._workflow_events_error: str | None = None
 
     def start(self) -> None:
         if not (CONFIG.collect_resources or CONFIG.collect_nats_metrics):
@@ -342,6 +344,15 @@ class ResourceSampler:
             and CONFIG.metrics_url == LOCAL_CLUSTER
         ):
             self._order_completed_observer = NatsOrderCompletedObserver()
+        try:
+            self._workflow_events_started = (
+                self._sample_workflow_events()
+                if CONFIG.application_type == "NATS"
+                and CONFIG.collect_nats_metrics
+                else None
+            )
+        except Exception as error:
+            self._workflow_events_error = str(error)
         self._greenlet = gevent.spawn(self._run)
 
     def stop(self) -> None:
@@ -356,6 +367,21 @@ class ResourceSampler:
             self._target.close()
         self._target = None
         self._greenlet = None
+        workflow_events_ended: dict[str, Any] | None = None
+        if CONFIG.application_type == "NATS" and CONFIG.collect_nats_metrics:
+            try:
+                workflow_events_ended = self._sample_workflow_events()
+            except Exception as error:
+                self._workflow_events_error = str(error)
+        workflow_events = {
+            "started": self._workflow_events_started,
+            "ended": workflow_events_ended,
+            "error": self._workflow_events_error,
+        }
+        (OUTPUT_DIRECTORY / "workflow-events.json").write_text(
+            json.dumps(workflow_events, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
         if self._metrics is not None:
             close = getattr(self._metrics, "close", None)
             if callable(close):
@@ -364,6 +390,17 @@ class ResourceSampler:
         if self._order_completed_observer is not None:
             self._order_completed_observer.close()
         self._order_completed_observer = None
+        self._workflow_events_started = None
+        self._workflow_events_error = None
+
+    def _sample_workflow_events(self) -> dict[str, Any]:
+        if self._metrics is None:
+            raise RuntimeError("metrics sampler has not started")
+        return (
+            self._order_completed_observer.sample()
+            if self._order_completed_observer is not None
+            else self._metrics.nats_order_completed_sample()
+        )
 
     def _run(self) -> None:
         assert self._metrics is not None

@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"sync"
@@ -43,15 +44,38 @@ type shippingOutcome struct {
 // outcomes: every value which looks provider-generated is an HMAC of the
 // business idempotency identity under a replica-shared provider secret.
 type shippingProvider struct {
-	key []byte
+	key                 []byte
+	rejectionPercentage float64
 }
 
-func newShippingProvider(secret string) (*shippingProvider, error) {
+func newShippingProvider(secret string, rejectionPercentages ...float64) (*shippingProvider, error) {
 	if len(secret) < 32 {
 		return nil, errors.New("shipping provider secret must contain at least 32 characters")
 	}
+	rejectionPercentage := 0.0
+	if len(rejectionPercentages) > 0 {
+		rejectionPercentage = rejectionPercentages[0]
+	}
 	key := sha256.Sum256([]byte("boutique/shipping-provider/v1\x00" + secret))
-	return &shippingProvider{key: key[:]}, nil
+	return &shippingProvider{
+		key:                 key[:],
+		rejectionPercentage: rejectionPercentage,
+	}, nil
+}
+
+func (provider *shippingProvider) rejectsShipment(idempotencyKey string) bool {
+	if provider.rejectionPercentage <= 0 {
+		return false
+	}
+	if provider.rejectionPercentage >= 100 {
+		return true
+	}
+	hash := hmac.New(sha256.New, provider.key)
+	_, _ = hash.Write([]byte("reject-shipment\x00" + idempotencyKey))
+	// One million stable buckets retain four decimal places of percentage
+	// precision without introducing replica-local randomness.
+	bucket := binary.BigEndian.Uint64(hash.Sum(nil)[:8]) % 1_000_000
+	return float64(bucket) < provider.rejectionPercentage*10_000
 }
 
 func (provider *shippingProvider) stableID(kind string, parts ...string) string {
@@ -232,7 +256,19 @@ func buildShippingOutcome(
 		if command.OrderId != envelope.AggregateId {
 			return shippingOutcome{}, errors.New("shipping create order does not match the envelope aggregate")
 		}
-		if failureMode == "shipment" {
+		if failureMode == "shipment" || provider.rejectsShipment(command.IdempotencyKey) {
+			failure := &commonv1.Failure{
+				Code:        "CARRIER_UNAVAILABLE",
+				Retryable:   true,
+				SafeMessage: "Shipment creation failed.",
+			}
+			if failureMode != "shipment" {
+				failure = &commonv1.Failure{
+					Code:        "CARRIER_REJECTED",
+					Retryable:   false,
+					SafeMessage: "The carrier rejected the shipment.",
+				}
+			}
 			return newShippingOutcome(
 				shippingCreateShipmentSlot,
 				"boutique.evt.shipping.shipment-creation-failed.v1",
@@ -242,11 +278,7 @@ func buildShippingOutcome(
 				inputTime,
 				&eventsv1.ShippingShipmentCreationFailedEvent{
 					OrderId: command.OrderId,
-					Failure: &commonv1.Failure{
-						Code:        "CARRIER_UNAVAILABLE",
-						Retryable:   true,
-						SafeMessage: "Shipment creation failed.",
-					},
+					Failure: failure,
 				},
 			)
 		}

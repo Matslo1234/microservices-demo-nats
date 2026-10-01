@@ -9,7 +9,7 @@ data:
       name: $NATS_CLUSTER_NAME
       listen: 0.0.0.0:7222
       advertise: $NATS_GATEWAY_ADVERTISE
-      reject_unknown_cluster: true
+      reject_unknown_cluster: false
       connect_retries: 120
       connect_backoff: true
       write_deadline: "10s"
@@ -21,14 +21,5 @@ data:
         timeout: 5
         verify: true
       }
-      gateways: [
-        {
-          name: "BOUTIQUE-us-west-2"
-          urls: [
-            tls://k8s-nats-natsgate-d96edcd91e-19472ad587b8fb54.elb.us-west-2.amazonaws.com:7222,
-            tls://k8s-nats-natsgate-7f106d94e8-3a80a58986e41979.elb.us-west-2.amazonaws.com:7222,
-            tls://k8s-nats-natsgate-c32581b19b-b5a99ba2fbf531e3.elb.us-west-2.amazonaws.com:7222
-          ]
-        }
-      ]
+      gateways: []
     }

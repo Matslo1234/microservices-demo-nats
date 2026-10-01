@@ -133,14 +133,21 @@ func startShippingEvents() (*shippingEventWorker, error) {
 		stop:           make(chan struct{}),
 		failed:         make(chan error, 1),
 	}
+	rejectionPercentage, err := shippingRejectionPercentage(
+		os.Getenv("SHIPPING_REJECTION_PERCENTAGE"),
+	)
+	if err != nil {
+		return nil, err
+	}
 	providerSecret := os.Getenv("SHIPPING_PROVIDER_SECRET")
-	worker.provider, err = newShippingProvider(providerSecret)
+	worker.provider, err = newShippingProvider(providerSecret, rejectionPercentage)
 	if err != nil {
 		return nil, err
 	}
 	providerFingerprint := fmt.Sprintf("%x", sha256.Sum256([]byte(providerSecret)))[:16]
 	log.WithFields(logrus.Fields{
 		"region": os.Getenv("REGION_ID"), "k8s_cluster": os.Getenv("K8S_CLUSTER_NAME"),
+		"shipping_rejection_percentage":     rejectionPercentage,
 		"shipping_provider_key_fingerprint": providerFingerprint,
 	}).Info("shipping regional configuration loaded")
 	nc, err := nats.Connect(url,
@@ -639,4 +646,20 @@ func shippingProcessingTime(value string) time.Duration {
 		return 0
 	}
 	return time.Duration(milliseconds * float64(time.Millisecond))
+}
+
+func shippingRejectionPercentage(value string) (float64, error) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return 0, nil
+	}
+	percentage, err := strconv.ParseFloat(trimmed, 64)
+	if err != nil || math.IsNaN(percentage) || math.IsInf(percentage, 0) ||
+		percentage < 0 || percentage > 100 {
+		return 0, fmt.Errorf(
+			"invalid SHIPPING_REJECTION_PERCENTAGE %q: must be between 0 and 100",
+			value,
+		)
+	}
+	return percentage, nil
 }

@@ -127,6 +127,10 @@ class SnapshotCache:
         }
         return result
 
+    def nats_order_completed_sample(self) -> dict[str, Any] | None:
+        """Read the live event counters instead of a possibly stale cache."""
+        return self.collector.nats_order_completed_sample()
+
     def close(self) -> None:
         self._stop.set()
         for thread in self._threads:
@@ -186,9 +190,7 @@ class MetricsHandler(BaseHTTPRequestHandler):
             value = (
                 {
                     "nats_order_completed_observer": (
-                        self.cache.get().get(
-                            "nats_order_completed_observer"
-                        )
+                        self.cache.nats_order_completed_sample()
                     )
                 }
                 if path == "/nats-order-completed-observer"

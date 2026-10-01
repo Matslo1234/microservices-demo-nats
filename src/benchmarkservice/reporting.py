@@ -199,6 +199,59 @@ def rate(numerator: int, denominator: int) -> float | None:
     return round(numerator / denominator, 6)
 
 
+def workflow_event_summary(value: dict[str, Any]) -> dict[str, Any]:
+    required = (
+        "successful_orders",
+        "shipments_rejected",
+        "payment_authorizations_released",
+        "orders_in_manual_review",
+    )
+    error = value.get("error")
+    if error:
+        return {"available": False, "reason": str(error)}
+    started = value.get("started")
+    ended = value.get("ended")
+    if not isinstance(started, dict) or not isinstance(ended, dict):
+        return {
+            "available": False,
+            "reason": "workflow event observer samples are missing",
+        }
+    observer_id = started.get("observer_id")
+    if (
+        not isinstance(observer_id, str)
+        or not observer_id
+        or observer_id != ended.get("observer_id")
+    ):
+        return {
+            "available": False,
+            "reason": "workflow event observer lost continuity",
+        }
+    before = started.get("counts")
+    after = ended.get("counts")
+    if not isinstance(before, dict) or not isinstance(after, dict):
+        return {
+            "available": False,
+            "reason": "workflow event observer does not expose event counts",
+        }
+    counts: dict[str, int] = {}
+    for name in required:
+        initial = before.get(name)
+        final = after.get(name)
+        if (
+            not isinstance(initial, int)
+            or isinstance(initial, bool)
+            or not isinstance(final, int)
+            or isinstance(final, bool)
+            or final < initial
+        ):
+            return {
+                "available": False,
+                "reason": f"invalid workflow event counter {name}",
+            }
+        counts[name] = final - initial
+    return {"available": True, **counts}
+
+
 def business_summary(
     records: list[dict[str, Any]], duration_seconds: float
 ) -> dict[str, Any]:
@@ -1914,6 +1967,13 @@ def build_report(run_directory: Path) -> dict[str, Any]:
     saturation_outstanding: dict[int, dict[str, Any]] = {}
     business_records = read_json_lines(run_directory / "business.jsonl")
     business = business_summary(business_records, measured_duration)
+    workflow_events = (
+        workflow_event_summary(
+            read_json_object(run_directory / "workflow-events.json")
+        )
+        if config.application_type == "NATS"
+        else {"available": False, "reason": "not applicable to GRPC application"}
+    )
     write_business_csv(business_records, run_directory / "business.csv")
     if config.workload == "saturation":
         for decision in saturation_decisions:
@@ -2021,6 +2081,7 @@ def build_report(run_directory: Path) -> dict[str, Any]:
         "steady_seconds": measured_duration,
         "drain_seconds": config.drain_seconds,
         "business": business,
+        "workflow_events": workflow_events,
         "outstanding_orders": outstanding,
         "resources": resources,
         "nats": nats,

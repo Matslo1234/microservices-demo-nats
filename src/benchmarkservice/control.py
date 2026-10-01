@@ -36,6 +36,7 @@ SUMMARY_OVERVIEW_FIELDS = (
     "configured_steady_seconds",
     "drain_seconds",
     "business",
+    "workflow_events",
     "capacity",
 )
 

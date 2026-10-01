@@ -1,7 +1,7 @@
 # Copyright 2026 Google LLC
 # Licensed under the Apache License, Version 2.0 (the "License");
 
-"""Synchronous facade for the unpatched NATS order observer process."""
+"""Synchronous facade for the unpatched NATS workflow observer process."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from typing import Any
 
 
 class NatsOrderCompletedObserver:
-    """Run the asyncio NATS observer outside Locust's patched runtime."""
+    """Observe completed orders and compensation events outside gevent."""
 
     def __init__(self) -> None:
         bridge = Path(__file__).with_name(
@@ -83,11 +83,25 @@ class NatsOrderCompletedObserver:
             )
         observer_id = value.get("observer_id")
         total = value.get("total")
+        counts = value.get("counts")
         if (
             not isinstance(observer_id, str)
             or not observer_id
             or not isinstance(total, int)
             or isinstance(total, bool)
+            or (
+                counts is not None
+                and (
+                    not isinstance(counts, dict)
+                    or any(
+                        not isinstance(name, str)
+                        or not isinstance(count, int)
+                        or isinstance(count, bool)
+                        or count < 0
+                        for name, count in counts.items()
+                    )
+                )
+            )
         ):
             raise RuntimeError(
                 "NATS completed-order observer returned an invalid sample"

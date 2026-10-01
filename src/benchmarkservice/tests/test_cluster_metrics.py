@@ -135,13 +135,27 @@ unrelated_metric 99
         client._ensure_connected = mock.AsyncMock(return_value=connection)
         client.connect_timeout = 2
         client._order_completed_observer_id = "observer-a"
-        client._order_completed_total = 12_345
+        client._workflow_event_totals = {
+            "successful_orders": 12_345,
+            "shipments_rejected": 321,
+            "payment_authorizations_released": 320,
+            "orders_in_manual_review": 1,
+        }
         client._order_completed_error = None
 
         sample = asyncio.run(client._order_completed_sample())
 
         self.assertEqual(
-            {"observer_id": "observer-a", "total": 12_345},
+            {
+                "observer_id": "observer-a",
+                "total": 12_345,
+                "counts": {
+                    "successful_orders": 12_345,
+                    "shipments_rejected": 321,
+                    "payment_authorizations_released": 320,
+                    "orders_in_manual_review": 1,
+                },
+            },
             sample,
         )
         connection.flush.assert_awaited_once_with(timeout=2)

@@ -23,11 +23,11 @@ data:
       }
       gateways: [
         {
-          name: "BOUTIQUE-us-west-2"
+          name: "BOUTIQUE-eu-central-1"
           urls: [
-            tls://k8s-nats-natsgate-d96edcd91e-19472ad587b8fb54.elb.us-west-2.amazonaws.com:7222,
-            tls://k8s-nats-natsgate-7f106d94e8-3a80a58986e41979.elb.us-west-2.amazonaws.com:7222,
-            tls://k8s-nats-natsgate-c32581b19b-b5a99ba2fbf531e3.elb.us-west-2.amazonaws.com:7222
+            tls://k8s-nats-natsgate-9a49a33457-855f8d42089a130e.elb.eu-central-1.amazonaws.com:7222,
+            tls://k8s-nats-natsgate-426435f5c8-9806ed35b9fd5bbc.elb.eu-central-1.amazonaws.com:7222,
+            tls://k8s-nats-natsgate-f5f85e6f3c-26aec2e4bb3bdb0e.elb.eu-central-1.amazonaws.com:7222
           ]
         }
       ]

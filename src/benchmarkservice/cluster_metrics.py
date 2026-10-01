@@ -87,7 +87,18 @@ NATS_METRICS = {
     "gnatsd_varz_stalled_clients",
     "jetstream_account_storage_used",
 }
-ORDER_COMPLETED_SUBJECT = "boutique.evt.order.completed.v1"
+WORKFLOW_EVENT_SUBJECTS = {
+    "successful_orders": "boutique.evt.order.completed.v1",
+    "shipments_rejected": (
+        "boutique.evt.shipping.shipment-creation-failed.v1"
+    ),
+    "payment_authorizations_released": (
+        "boutique.evt.payment.authorization-released.v1"
+    ),
+    "orders_in_manual_review": (
+        "boutique.evt.order.manual-review-required.v1"
+    ),
+}
 CADVISOR_METRICS = {
     "container_cpu_cfs_periods_total": "cpu_cfs_periods_total",
     "container_cpu_cfs_throttled_periods_total": (
@@ -559,7 +570,7 @@ def normalize_nats_micro_stats(value: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 class NatsMicroStatsClient:
-    """Persistent NATS client for micro stats and completion observations."""
+    """Persistent NATS client for micro stats and workflow observations."""
 
     def __init__(self) -> None:
         self.response_timeout = float(
@@ -577,7 +588,9 @@ class NatsMicroStatsClient:
         self._thread.start()
         self._connection: Any = None
         self._order_completed_observer_id = uuid.uuid4().hex
-        self._order_completed_total = 0
+        self._workflow_event_totals = {
+            name: 0 for name in WORKFLOW_EVENT_SUBJECTS
+        }
         self._order_completed_error: str | None = None
 
     def _run_loop(self) -> None:
@@ -597,12 +610,11 @@ class NatsMicroStatsClient:
         if tls_context is not None and hasattr(ssl, "VERIFY_X509_STRICT"):
             tls_context.verify_flags &= ~ssl.VERIFY_X509_STRICT
 
-        async def completion(_message: Any) -> None:
-            self._order_completed_total += 1
-
         async def disconnected() -> None:
             self._order_completed_observer_id = uuid.uuid4().hex
-            self._order_completed_total = 0
+            self._workflow_event_totals = {
+                name: 0 for name in WORKFLOW_EVENT_SUBJECTS
+            }
 
         async def observer_error(error: Exception) -> None:
             self._order_completed_error = str(error)
@@ -619,10 +631,11 @@ class NatsMicroStatsClient:
             disconnected_cb=disconnected,
             error_cb=observer_error,
         )
-        await self._connection.subscribe(
-            ORDER_COMPLETED_SUBJECT,
-            cb=completion,
-        )
+        for name, subject in WORKFLOW_EVENT_SUBJECTS.items():
+            async def observe(_message: Any, event_name: str = name) -> None:
+                self._workflow_event_totals[event_name] += 1
+
+            await self._connection.subscribe(subject, cb=observe)
         await self._connection.flush(timeout=self.connect_timeout)
         return self._connection
 
@@ -675,9 +688,12 @@ class NatsMicroStatsClient:
         await connection.flush(timeout=self.connect_timeout)
         if self._order_completed_error is not None:
             raise RuntimeError(self._order_completed_error)
+        counts = dict(self._workflow_event_totals)
         return {
             "observer_id": self._order_completed_observer_id,
-            "total": self._order_completed_total,
+            # Retain total for saturation reports and older runners.
+            "total": counts["successful_orders"],
+            "counts": counts,
         }
 
     def order_completed_sample(self) -> dict[str, Any]:

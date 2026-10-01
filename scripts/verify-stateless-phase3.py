@@ -23,6 +23,9 @@ PROVIDER_MANIFESTS = (
     ROOT / "benchmark" / "benchmark-nats-multiple-replicas.yaml",
     ROOT / "benchmark" / "benchmark-nats-hpa.yaml",
     ROOT / "benchmark" / "benchmark-nats-with-delay.yaml",
+    ROOT
+    / "benchmark"
+    / "benchmark-nats-with-delay-20-percent-rejections.yaml",
     ROOT / "benchmark" / "benchmark-nats-with-delay-fsync1s.yaml",
 )
 
@@ -107,6 +110,7 @@ def verify_sources() -> None:
             )
     for required in (
         "SHIPPING_PROVIDER_SECRET",
+        "SHIPPING_REJECTION_PERCENTAGE",
         "newShippingProvider",
         "shippingCreateShipmentSlot",
         "validateShippingInput",
@@ -205,6 +209,14 @@ def verify_manifests() -> None:
                 raise VerificationError(
                     f"{path.relative_to(ROOT)} Deployment/{service} is not stateless"
                 )
+            if (
+                service == "shippingservice"
+                and "SHIPPING_REJECTION_PERCENTAGE" not in workload
+            ):
+                raise VerificationError(
+                    f"{path.relative_to(ROOT)} Deployment/{service} does not "
+                    "configure shipment rejection percentage"
+                )
 
     payment_manifests = (
         ROOT / "kubernetes-manifests" / "paymentservice.yaml",
@@ -214,6 +226,9 @@ def verify_manifests() -> None:
         ROOT / "benchmark" / "benchmark-nats-multiple-replicas.yaml",
         ROOT / "benchmark" / "benchmark-nats-hpa.yaml",
         ROOT / "benchmark" / "benchmark-nats-with-delay.yaml",
+        ROOT
+        / "benchmark"
+        / "benchmark-nats-with-delay-20-percent-rejections.yaml",
         ROOT / "benchmark" / "benchmark-nats-with-delay-fsync1s.yaml",
     )
     for path in payment_manifests:

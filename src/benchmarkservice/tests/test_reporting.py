@@ -15,10 +15,59 @@ from reporting import (
     percentile,
     resource_summary,
     source_records_for_window,
+    workflow_event_summary,
 )
 
 
 class ReportingTest(unittest.TestCase):
+    def test_workflow_event_summary_differences_all_saga_counters(self) -> None:
+        summary = workflow_event_summary(
+            {
+                "started": {
+                    "observer_id": "observer-a",
+                    "counts": {
+                        "successful_orders": 100,
+                        "shipments_rejected": 10,
+                        "payment_authorizations_released": 8,
+                        "orders_in_manual_review": 1,
+                    },
+                },
+                "ended": {
+                    "observer_id": "observer-a",
+                    "counts": {
+                        "successful_orders": 1_300,
+                        "shipments_rejected": 310,
+                        "payment_authorizations_released": 308,
+                        "orders_in_manual_review": 1,
+                    },
+                },
+                "error": None,
+            }
+        )
+
+        self.assertEqual(
+            {
+                "available": True,
+                "successful_orders": 1_200,
+                "shipments_rejected": 300,
+                "payment_authorizations_released": 300,
+                "orders_in_manual_review": 0,
+            },
+            summary,
+        )
+
+    def test_workflow_event_summary_rejects_observer_restart(self) -> None:
+        summary = workflow_event_summary(
+            {
+                "started": {"observer_id": "before", "counts": {}},
+                "ended": {"observer_id": "after", "counts": {}},
+                "error": None,
+            }
+        )
+
+        self.assertFalse(summary["available"])
+        self.assertIn("lost continuity", summary["reason"])
+
     def test_source_windows_use_fresh_source_time_and_deduplicate_cache(self) -> None:
         records = [
             {

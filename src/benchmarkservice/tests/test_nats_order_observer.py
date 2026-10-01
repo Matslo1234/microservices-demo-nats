@@ -34,6 +34,12 @@ class _FakeOutput:
             response["value"] = {
                 "observer_id": "observer-a",
                 "total": 12_345,
+                "counts": {
+                    "successful_orders": 12_345,
+                    "shipments_rejected": 100,
+                    "payment_authorizations_released": 99,
+                    "orders_in_manual_review": 1,
+                },
             }
         elif request["operation"] == "close":
             self.process.closing = True
@@ -74,7 +80,16 @@ class NatsOrderCompletedObserverTest(unittest.TestCase):
             observer = NatsOrderCompletedObserver()
 
             self.assertEqual(
-                {"observer_id": "observer-a", "total": 12_345},
+                {
+                    "observer_id": "observer-a",
+                    "total": 12_345,
+                    "counts": {
+                        "successful_orders": 12_345,
+                        "shipments_rejected": 100,
+                        "payment_authorizations_released": 99,
+                        "orders_in_manual_review": 1,
+                    },
+                },
                 observer.sample(),
             )
             observer.close()

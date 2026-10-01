@@ -8,17 +8,17 @@ data:
   REGION_KEY: EU_CENTRAL_1
   K8S_CLUSTER_NAME: eu-central-1-cluster
   NATS_CLUSTER_NAME: BOUTIQUE-eu-central-1
-  NATS_CLUSTER_ROLE: secondary
+  NATS_CLUSTER_ROLE: primary
   NATS_SUPERCLUSTER_ENABLED: "true"
-  STREAM_OWNER_REGION: us-east-1
-  GLOBAL_ASSET_CLUSTER: BOUTIQUE-us-east-1
+  STREAM_OWNER_REGION: eu-central-1
+  GLOBAL_ASSET_CLUSTER: BOUTIQUE-eu-central-1
   NATS_REGION_TAG: region:eu-central-1
   NATS_CLUSTER_TAG: cluster:BOUTIQUE-eu-central-1
   NATS_GATEWAY_DOMAIN: elb.eu-central-1.amazonaws.com
-  NATS_GATEWAY_DNS_NAMES: k8s-nats-natsgate-2c2a33a54d-a5259d04fb10ed85.elb.eu-central-1.amazonaws.com,k8s-nats-natsgate-8f9a9906cb-6a59ef3d4ff84f12.elb.eu-central-1.amazonaws.com,k8s-nats-natsgate-a22d86f61f-f6737fcb872d12be.elb.eu-central-1.amazonaws.com
-  NATS_GATEWAY_ADVERTISE_0: k8s-nats-natsgate-2c2a33a54d-a5259d04fb10ed85.elb.eu-central-1.amazonaws.com:7222
-  NATS_GATEWAY_ADVERTISE_1: k8s-nats-natsgate-8f9a9906cb-6a59ef3d4ff84f12.elb.eu-central-1.amazonaws.com:7222
-  NATS_GATEWAY_ADVERTISE_2: k8s-nats-natsgate-a22d86f61f-f6737fcb872d12be.elb.eu-central-1.amazonaws.com:7222
+  NATS_GATEWAY_DNS_NAMES: k8s-nats-natsgate-9a49a33457-855f8d42089a130e.elb.eu-central-1.amazonaws.com,k8s-nats-natsgate-426435f5c8-9806ed35b9fd5bbc.elb.eu-central-1.amazonaws.com,k8s-nats-natsgate-f5f85e6f3c-26aec2e4bb3bdb0e.elb.eu-central-1.amazonaws.com
+  NATS_GATEWAY_ADVERTISE_0: k8s-nats-natsgate-9a49a33457-855f8d42089a130e.elb.eu-central-1.amazonaws.com:7222
+  NATS_GATEWAY_ADVERTISE_1: k8s-nats-natsgate-426435f5c8-9806ed35b9fd5bbc.elb.eu-central-1.amazonaws.com:7222
+  NATS_GATEWAY_ADVERTISE_2: k8s-nats-natsgate-f5f85e6f3c-26aec2e4bb3bdb0e.elb.eu-central-1.amazonaws.com:7222
   STOREFRONT_EVENT_STREAM: BOUTIQUE_EVENTS
   STOREFRONT_PROJECTION_DURABLE: storefront-projection-eu-central-1-v1
   STOREFRONT_PERSONALIZATION_STREAM: BOUTIQUE_PERSONALIZATION
